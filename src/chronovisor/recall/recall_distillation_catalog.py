@@ -26,6 +26,7 @@ from chronovisor.core.raw_store import (
     committed_raw_watermark,
 )
 from chronovisor.recall import recall_distillation as distill
+from chronovisor.recall import recall_distillation_ledger as ledger
 from chronovisor.recall import recall_distillation_store as store
 
 CATALOG_SCHEMA = "chronovisor.recall-distillation-catalog.v1"
@@ -279,8 +280,7 @@ def _connect(root: Path) -> sqlite3.Connection:
         raise
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys=ON")
-    connection.execute("PRAGMA journal_mode=DELETE")
-    connection.execute("PRAGMA synchronous=FULL")
+    ledger.configure_writer(connection)
     connection.executescript(
         """
         CREATE TABLE IF NOT EXISTS metadata(
@@ -2971,6 +2971,7 @@ def sync_historical_index(raw_dir: Path, root: Path) -> str:
         digest = _index_digest(atoms)
         try:
             with sqlite3.connect(path) as writable:
+                ledger.configure_writer(writable)
                 writable.execute(
                     "UPDATE metadata SET value=? WHERE key='content_sha256'", (digest,)
                 )
@@ -3006,8 +3007,7 @@ def sync_historical_index(raw_dir: Path, root: Path) -> str:
         connection: sqlite3.Connection | None = None
         try:
             connection = sqlite3.connect(path)
-            connection.execute("PRAGMA journal_mode=DELETE")
-            connection.execute("PRAGMA synchronous=FULL")
+            ledger.configure_writer(connection)
             connection.execute("BEGIN IMMEDIATE")
             added = _resolved_atoms(raw_dir, pending)
             digest = _advance_index_digest(
@@ -3060,8 +3060,7 @@ def sync_historical_index(raw_dir: Path, root: Path) -> str:
     connection: sqlite3.Connection | None = None
     try:
         connection = sqlite3.connect(path)
-        connection.execute("PRAGMA journal_mode=DELETE")
-        connection.execute("PRAGMA synchronous=FULL")
+        ledger.configure_writer(connection)
         connection.execute("BEGIN IMMEDIATE")
         indexed, digest = _index_atoms(
             connection, expected, legacy_checkpoint=checkpoint_for_validation

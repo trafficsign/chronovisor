@@ -8,13 +8,15 @@ import os
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any
 
 from chronovisor.core.store import CHRONOVISOR_ROOT
 
 _RESOURCE_LEASE_STATE = threading.local()
+_ADMISSION_STATE = threading.local()
+_ADMISSION_FD_ENV = "CHRONOVISOR_MODEL_ADMISSION_FD"
 
 
 class _ProcessResourceLock:
@@ -99,14 +101,49 @@ def _model_admission(
     lock_path: Path,
     *,
     deadline_at: float | None,
-) -> Iterator[None]:
+) -> Iterator[Any]:
     """Serialize background inference while giving queued foreground work priority."""
 
     from chronovisor.core.research_scheduler import foreground_active, sync_pending
 
     foreground = foreground_active()
     admission_path = lock_path.with_name(f"{lock_path.name}.admission")
-    with admission_path.open("a+") as handle:
+    inherited_fd = os.environ.get(_ADMISSION_FD_ENV)
+    if inherited_fd is not None:
+        # Only an explicitly passed descriptor of this admission file can
+        # share a parent's turn. The actual model lease is still mandatory.
+        try:
+            fd = int(inherited_fd)
+            inherited = os.fstat(fd)
+            expected = admission_path.stat()
+            if (inherited.st_dev, inherited.st_ino) != (
+                expected.st_dev, expected.st_ino
+            ):
+                raise ValueError("model admission descriptor does not match")
+            # A matching but unlocked file descriptor is not a reservation.
+            # Confirm the inherited open-file description owns the lock.
+            with admission_path.open("a+") as probe:
+                try:
+                    fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:
+                    fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
+                    raise ValueError("model admission descriptor is not locked")
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("invalid inherited model admission") from exc
+        yield fd
+        return
+    with ExitStack() as stack:
+        handle = stack.enter_context(admission_path.open("a+"))
+        queue = None
+        if not foreground:
+            # Wait outside the current owner's turn, then prevent a busy
+            # drain from reacquiring admission ahead of an existing waiter.
+            queue = stack.enter_context(
+                admission_path.with_suffix(".admission.queue").open("a+")
+            )
+            _acquire_file_lease(queue, exclusive=True, deadline_at=deadline_at)
         operation = fcntl.LOCK_SH if foreground else fcntl.LOCK_EX
         while True:
             if not foreground and sync_pending():
@@ -126,10 +163,47 @@ def _model_admission(
             if _timed_out(deadline_at):
                 raise TimeoutError("Ollama resource lease acquisition timed out")
             time.sleep(0.005)
+        if queue is not None:
+            fcntl.flock(queue.fileno(), fcntl.LOCK_UN)
+        try:
+            yield handle.fileno()
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def model_admission_turn(
+    *, timeout_ms: int, root: Path = CHRONOVISOR_ROOT
+) -> Iterator[None]:
+    """Keep one background turn across isolated, cancellable model children."""
+
+    if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms < 0:
+        raise ValueError("timeout_ms must be a non-negative integer")
+    if getattr(_ADMISSION_STATE, "fd", None) is not None:
+        yield
+        return
+    lock_path = Path(os.environ.get(
+        "CHRONOVISOR_OLLAMA_RESOURCE_LOCK",
+        str(root / "runtime/ollama-resource.lock"),
+    ))
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _model_admission(
+        lock_path, deadline_at=time.monotonic() + timeout_ms / 1000
+    ) as fd:
+        _ADMISSION_STATE.fd = fd
         try:
             yield
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            _ADMISSION_STATE.fd = None
+
+
+def model_admission_subprocess_options() -> dict[str, Any]:
+    """Pass the live admission descriptor only to an explicitly opted-in child."""
+
+    fd = getattr(_ADMISSION_STATE, "fd", None)
+    if fd is None:
+        return {}
+    return {"pass_fds": (fd,), "env": {**os.environ, _ADMISSION_FD_ENV: str(fd)}}
 
 
 @contextmanager

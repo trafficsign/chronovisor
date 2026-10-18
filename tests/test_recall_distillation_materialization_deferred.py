@@ -69,6 +69,13 @@ def test_chunk_defers_verified_materialization_boundaries_without_failure_record
     assert preserved["error_code"] == "distillation_run_failed"
     assert preserved["worker_failure_count"] == 3
     assert state_path.read_bytes() == before_bytes
+    from chronovisor.recall import recall_distillation_progress as progress
+
+    receipt = progress.read(tmp_path)
+    assert receipt is not None
+    assert receipt["last_outcome"] == "deferred"
+    assert receipt["last_defer_reason"] == reason
+    assert receipt["consecutive_deferrals"] == 1
 
 
 def test_chunk_keeps_generic_store_error_as_failure(

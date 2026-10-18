@@ -1391,3 +1391,47 @@ def test_certification_selection_precedes_limit_and_keeps_adverse_rows(
             materialization._selection(view, limit=1)
     finally:
         view.connection.close()
+
+
+def test_source_drift_rollback_preserves_sealed_large_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for index in range(201):
+        _append_label(tmp_path, f"rally-{index:03d}", f"candidate-{index:03d}")
+    calls: list[set[str]] = []
+    _stub_build_dependencies(monkeypatch, materialize_calls=calls)
+    small_batch = materialization._materialize_batch
+    state = ["source"]
+    monkeypatch.setattr(materialization, "_source_state", lambda *_args: (state[0],))
+    batches = 0
+    change_at = 0
+
+    def large_batch(connection: sqlite3.Connection, root: Path, labels: object,
+                    rally_ids: list[str], ox: str) -> None:
+        nonlocal batches
+        small_batch(connection, root, labels, rally_ids, ox)
+        for rally_id in rally_ids:
+            connection.execute(
+                "UPDATE rows SET row_json=? WHERE rally_id=?",
+                (json.dumps({"padding": "x" * 40_000, "batch": batches}), rally_id),
+            )
+        batches += 1
+        if batches == change_at:
+            state[0] = "changed"
+
+    monkeypatch.setattr(materialization, "_materialize_batch", large_batch)
+    materialization._build(tmp_path).close()
+    monkeypatch.setattr(materialization, "_contract_dependencies", lambda *_args: {
+        "code": "changed-code", "native": "native", "ox": "ox", "files": {},
+    })
+    batches = 0
+    change_at = 2
+    with pytest.raises(materialization.MaterializationSourceChanged):
+        materialization._build(tmp_path)
+    # A rollback exceeding SQLite's page cache must not discard prior commits.
+    assert ledger.checkpoint(materialization._path(tmp_path)) is not None
+    state[0] = "source"
+    change_at = 0
+    calls.clear()
+    materialization._build(tmp_path).close()
+    assert sum(map(len, calls)) == 101

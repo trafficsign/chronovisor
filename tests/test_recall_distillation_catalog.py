@@ -110,6 +110,36 @@ def test_bootstrap_catalog_keeps_text_out_of_sqlite_and_resolves_refs(
     assert "text" not in event_columns
 
 
+def test_large_delta_rollback_preserves_catalog_checkpoint(
+    tmp_path: Path,
+) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path, "save-synthetic-base.md", "a" * 24,
+        [_message("user", "synthetic", "2026-08-01T00:00:00Z")],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    original = catalog.rallies(tmp_path)[0]
+    checkpoint = catalog._read_catalog_checkpoint(tmp_path)
+    connection = catalog._connect(tmp_path)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        catalog._store_rallies(connection, [
+            {**original, "rally_id": f"synthetic-{index}", "padding": "x" * 40_000}
+            for index in range(100)
+        ])
+        assert connection.execute("PRAGMA page_count").fetchone()[0] * 4096 > 4_000_000
+        connection.rollback()
+    finally:
+        connection.close()
+    assert catalog._read_catalog_checkpoint(tmp_path) == checkpoint
+    _capture(
+        tmp_path, "save-synthetic-delta.md", "b" * 24,
+        [_message("user", "synthetic delta", "2026-08-01T00:01:00Z")],
+    )
+    assert catalog.advance(raw_dir, tmp_path, 4096).status == "advanced"
+
+
 def test_text_cache_reads_only_requested_raw_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

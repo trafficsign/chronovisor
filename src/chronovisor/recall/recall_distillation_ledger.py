@@ -38,6 +38,16 @@ def file_state(path: Path) -> dict[str, int] | None:
     }
 
 
+def configure_writer(connection: sqlite3.Connection) -> None:
+    """Keep rolled-back work from invalidating a sealed physical checkpoint."""
+
+    connection.execute("PRAGMA journal_mode=DELETE")
+    connection.execute("PRAGMA synchronous=FULL")
+    # Default spill writes uncommitted pages to the main file. Rollback then
+    # restores bytes but changes mtime/ctime, discarding verified prior work.
+    connection.execute("PRAGMA cache_spill=OFF")
+
+
 def connect(path: Path, *, readonly: bool = False) -> sqlite3.Connection:
     if readonly:
         connection = sqlite3.connect(
@@ -50,8 +60,7 @@ def connect(path: Path, *, readonly: bool = False) -> sqlite3.Connection:
         connection = sqlite3.connect(path)
         if stat.S_IMODE(path.stat().st_mode) != 0o600:
             path.chmod(0o600)
-        connection.execute("PRAGMA journal_mode=DELETE")
-        connection.execute("PRAGMA synchronous=FULL")
+        configure_writer(connection)
     connection.row_factory = sqlite3.Row
     return connection
 

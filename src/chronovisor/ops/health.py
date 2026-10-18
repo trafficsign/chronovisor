@@ -24,6 +24,9 @@ from chronovisor.decision.semantic_hold import (
 
 INGEST_LIVENESS_TTL_SECONDS = 5 * 60
 DISTILLATION_PROGRESS_STALE_SECONDS = 24 * 60 * 60
+# converge is scheduled every 30 minutes; observed formal completions take
+# about 50-55 minutes, so two hours covers two normal cycles plus headroom.
+DISTILLATION_FORMAL_PROGRESS_STALE_SECONDS = 2 * 60 * 60
 DISTILLATION_EXPIRY_WARNING_SECONDS = 7 * 24 * 60 * 60
 NATIVE_LUNA_SUPERVISOR_SCHEMA = "chronovisor.recall-luna-supervisor.v1"
 NATIVE_LUNA_SUPERVISOR_HEARTBEAT_STALE_SECONDS = 15 * 60
@@ -213,18 +216,146 @@ def _distillation_config(root: Path) -> dict[str, Any]:
     }
 
 
-def _distillation_state(root: Path) -> dict[str, Any]:
+def _distillation_state(
+    root: Path, *, filename: str | None = None
+) -> dict[str, Any]:
     """Read sealed state metadata without exposing private ledgers or text."""
 
     try:
         from chronovisor.recall import recall_distillation_store as store
 
         return store.read_sealed(
-            store.distillation_dir(root) / store.STATE_FILE,
+            store.distillation_dir(root) / (filename or store.STATE_FILE),
             schema=store.DISTILLATION_SCHEMA,
         )
     except Exception:
         return {}
+
+
+def _distillation_formal_progress(root: Path) -> dict[str, Any] | None:
+    """Read the sealed operational receipt for formal mainline attempts."""
+
+    value = _distillation_state(root, filename="formal-progress.json")
+    if value.get("kind") != "formal-progress":
+        return None
+    timestamps: dict[str, str | None] = {}
+    for key in ("first_attempt_at", "last_attempt_at", "last_success_at"):
+        raw = value.get(key)
+        if raw is None or raw == "":
+            timestamps[key] = None
+            continue
+        parsed = _parse_utc_timestamp(raw)
+        if parsed is None:
+            return None
+        timestamps[key] = parsed.isoformat()
+    counts: dict[str, int] = {}
+    for key in ("consecutive_deferrals", "attempt_count", "success_count"):
+        raw = value.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            return None
+        counts[key] = raw
+    outcome = value.get("last_outcome")
+    if not isinstance(outcome, str) or outcome not in {
+        "running",
+        "deferred",
+        "data_reject",
+        "error",
+        "succeeded",
+        "other",
+    }:
+        return None
+    reason = value.get("last_defer_reason")
+    if not isinstance(reason, str) or len(reason) > 128:
+        return None
+    if reason and any(
+        char not in _NATIVE_LUNA_SAFE_IDENTIFIER_CHARS for char in reason
+    ):
+        return None
+    return {
+        "first_attempt_at": timestamps["first_attempt_at"],
+        "last_attempt_at": timestamps["last_attempt_at"],
+        "last_success_at": timestamps["last_success_at"],
+        "last_outcome": outcome,
+        "last_defer_reason": reason,
+        **counts,
+    }
+
+
+def _distillation_formal_progress_health(
+    progress: Mapping[str, Any] | None,
+    state: Mapping[str, Any],
+    *,
+    enabled: bool,
+) -> dict[str, Any]:
+    """Summarize formal-attempt liveness without changing gate outcomes."""
+
+    if progress is None:
+        return {
+            "available": False,
+            "stalled": False,
+            "threshold_seconds": DISTILLATION_FORMAL_PROGRESS_STALE_SECONDS,
+        }
+    now = datetime.now(UTC)
+    attempt_at = _parse_utc_timestamp(progress.get("last_attempt_at"))
+    first_attempt_at = _parse_utc_timestamp(progress.get("first_attempt_at"))
+    formal_success_at = _parse_utc_timestamp(progress.get("last_success_at"))
+    state_success_at = _parse_utc_timestamp(state.get("last_success_at"))
+    if attempt_at is not None and attempt_at > now:
+        attempt_at = None
+    if first_attempt_at is not None and first_attempt_at > now:
+        first_attempt_at = None
+    if formal_success_at is not None and formal_success_at > now:
+        formal_success_at = None
+    if state_success_at is not None and state_success_at > now:
+        state_success_at = None
+    success_candidates = [
+        ("formal_progress", formal_success_at),
+        ("worker_state", state_success_at),
+    ]
+    success_source, success_at = max(
+        success_candidates,
+        key=lambda item: item[1] or datetime.min.replace(tzinfo=UTC),
+    )
+    if success_at is None:
+        success_source = "none"
+    anchor = success_at or first_attempt_at
+    age_seconds = (
+        max(0, int((now - anchor).total_seconds())) if anchor is not None else None
+    )
+    attempt_after_success = bool(
+        attempt_at is not None
+        and (success_at is None or attempt_at > success_at)
+    )
+    # A new attempt marks the receipt ``running`` before entering the worker.
+    # Keep an already-qualified defer stall visible during that attempt; only
+    # a newer worker success watermark (or an outcome that resets the streak)
+    # may clear it.
+    stalled = bool(
+        enabled
+        and progress.get("last_outcome") in {"deferred", "running"}
+        and progress.get("consecutive_deferrals", 0) >= 2
+        and attempt_after_success
+        and age_seconds is not None
+        and age_seconds > DISTILLATION_FORMAL_PROGRESS_STALE_SECONDS
+    )
+    return {
+        "available": True,
+        "first_attempt_at": first_attempt_at.isoformat()
+        if first_attempt_at is not None
+        else None,
+        "last_attempt_at": attempt_at.isoformat() if attempt_at is not None else None,
+        "last_success_at": success_at.isoformat() if success_at is not None else None,
+        "last_success_source": success_source,
+        "last_outcome": progress.get("last_outcome"),
+        "last_defer_reason": progress.get("last_defer_reason", ""),
+        "consecutive_deferrals": progress.get("consecutive_deferrals", 0),
+        "attempt_count": progress.get("attempt_count", 0),
+        "success_count": progress.get("success_count", 0),
+        "progress_age_seconds": age_seconds,
+        "attempt_after_success": attempt_after_success,
+        "threshold_seconds": DISTILLATION_FORMAL_PROGRESS_STALE_SECONDS,
+        "stalled": stalled,
+    }
 
 
 def _parse_utc_timestamp(value: object) -> datetime | None:
@@ -945,6 +1076,7 @@ def _distillation_alerts(
 
     config = _distillation_config(root)
     state = _distillation_state(root)
+    formal_progress = _distillation_formal_progress(root)
     alerts: list[dict[str, str]] = []
 
     def add(category: str, reason: str, message: str) -> None:
@@ -1173,6 +1305,18 @@ def _distillation_alerts(
             "データ待ち: 蒸留のdurable progressがありません",
         )
 
+    formal_mainline = _distillation_formal_progress_health(
+        formal_progress,
+        state,
+        enabled=enabled,
+    )
+    if formal_mainline.get("stalled") is True:
+        add(
+            "human_wait",
+            "distillation_mainline_stalled",
+            "人の判断待ち: formal mainline の成功が2時間以上なく、deferred が連続しています",
+        )
+
     diagnostic = {
         **snapshot,
         "enabled": enabled,
@@ -1184,6 +1328,7 @@ def _distillation_alerts(
         "progress_source": progress_source,
         "progress_age_seconds": progress_age,
         "progress_stale": progress_stale,
+        "formal_mainline": formal_mainline,
         "alert": bool(snapshot.get("alert")) or bool(alerts),
         "alerts": alerts,
         "reason_codes": [item["reason"] for item in alerts],

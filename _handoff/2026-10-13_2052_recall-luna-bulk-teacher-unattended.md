@@ -114,6 +114,12 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] 仕上げ3：正規CF品質rejectの件数・履歴を保持してhuman_waitを解除し、system errorのalertを維持する。
 - [x] 仕上げ4：固定200組のuncertainを不一致として実認証経路で評価し、既存floorを満たす場合だけ保守的な認証規則へ変更する。
 
+### 2026-10-18 formal mainline の隠れた停滞修復
+- [x] 停滞1：稼働を止めず段階時間・run前後dirty数・source writerを実測し、反復runの増減を記録する。
+- [ ] 停滞2：共有経路の根因を修正し、既存300秒・quota・全stage・validatorを維持して回帰と必須CIを通す。
+- [ ] 停滞3：formal成功の長時間不在と継続deferを、品質data outcomeと独立したreal health alertへ出す。
+- [ ] 停滞4：安全境界で一度配備しdrift=false、B2継続下で正式成功時刻の2回更新を確認、CF率・予測日・09:15 automationを更新する。
+
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
 - [x] 5-2 ingest：`apple-watch-band-material-tradeoffs/bandwork-leather-band-experience.md` が `missing_create_frontmatter` で失敗している（2026-10-13 19:45、1/3 回目）。再試行で直っていなければ原因を見る。
@@ -852,3 +858,15 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-18 12:38 JST — 通常Convergeも今回の制御付きrun後にCF品質rejectを処理し、failure_count4/counterfactual_data_rejectを保持、CFの反復失敗human_waitは発生していない。現worksetには従来上限3でquarantinedとなった候補、新規completed候補、attempt2でreadyへ戻った候補が存在し、上限やbackoffを変えずに進む。健康判定は一度CF件数のdata_waitだけとなった後、進行中のnative daily captureに伴うdaily run staleを別警告として再表示している。これをCF修正に紛れて抑止せず、既存09:15確認へ残す。formal last_success_atは未前進なので、従来の全formal成功条件はpartial receiptとして保持し、4項目の技術受入と混同しない。global PlanはCF100件・各drain・7日観測が未完のためrunningを維持する。
 
 - 2026-10-18 12:38 JST — canonical recall-p2b automationへstrict CASで新規則・分類・現package/receipt照合・CF実測予測を反映し、読み戻し成功。ACTIVE・毎日09:15・既存target thread等は保持。prompt SHAは95f1d567bef230d4a1b02fef91f3b8b1fd2cddc2d5971bbd7724309f66e002beで、旧bytesはprivate backupへ保持した。今回のsource変更は必須CI成功の234b7e05のみを一度配備し、後続変更はこのPlanの結果記録だけ。private受入証跡と検証用worktreeは再利用のため保持し、一時CASテストdirectoryは実行後に削除済み。
+
+- 2026-10-18 17:36 JST — 隠れた停滞修復に着手。10/18 10:30以降の実行ログを先に読み、前回仕上げの正式成功未前進を確認した。現last_success_atは2026-10-17T16:15:55.687839+00:00、worker_status deferred。17:38頃のRO集計ではmaterialization clean159417/dirty0、16332rally、labels159417/receipts157118、catalog revision16716/candidate16715で、常時全件re-dirtyという仮説は未立証。隔離worktreeで修正し、既存pinの通常300秒mainlineを既存排他のまま段階観測する。Lunaへhealth/progressとprivate live計測を独立委譲し、rootは共有join修正・最終差分・検証・一度配備を担当する。supervisor・shard・B2を止めず、台帳/checkpoint/lockの手変更は行わない。Converge設定1800秒に対し実終了間隔は約50–55分のため、stall閾値は2時間（実2run以上＋300秒余裕）、連続defer2回を根拠に選択する。前回のdata reject分類は維持する。
+
+- 2026-10-18 18:01 JST — 停滞1のlive計測を完了。既存234b7e05の正常API/既存排他/300秒で3runを観測し、所要50.411秒・32.992秒・53.918秒、正式last_success_atは3回とも不変だった。dirtyはrun1開始0→source sync後832（108rally）→batch768処理後64→0、run2/run3は0→0。run1の追加832label/receiptはdaily import、同runのmanifest追加8はmainline自身、catalogのRaw source更新者はingest-drainで、B2による既存全行の恒常re-dirtyは観測なし。run1/2のmaterializeは18.573秒/4.764秒、preflight10.853秒/9.652秒、training30.161秒/15.136秒、catalog.advance2.054秒。run3はsetup15.264秒、materialize17.873秒、preflight11.497秒、training30.130秒、CF probe1.044秒/execute8.248秒。stageは包含関係があり単純合計しない。モデル段階は2回capacity_unavailable、1回research_generation_busy（_worker_call 0.883ms、attempted=false）。ingest resource leaseの15秒/45秒通常取得probeも時間切れ。Librarianの研究lane再取得間隔は約110msで、即時取得だけでは正式runが飢餓状態になる。private measure receipt3件にmetadataだけを保持した。
+
+- 2026-10-18 18:01 JST — 別の根因を隔離fixtureで再現。catalogの実_store_events/_store_ralliesを通す1000 Raw unit・約5.0MB transactionがSQLite既定cache約2MBを超えると、rollback後にサイズは元へ戻るがmtime/ctimeが変わり、sealed checkpointがvalid→invalidとなる。既存live診断のcatalog全再構築204–229秒（直近221.051秒）を説明する。一方同じ16unit/1.14MB差分の読取は0.016秒、incremental join0.729秒なので差分量自体が原因ではない。materializationでも201rally/100rally batch/40KB合成rowで途中source変更を再現し、直前の完了batchが同じ物理checkpoint失効で失われることをred testで確認した。正常checkpointのno-op/append経路は現行でも維持されており、毎回の再構築と誤認しない。
+
+- 2026-10-18 18:01 JST — 判断: seal/validationを緩めず、sealed SQLiteの共有writer設定でcache_spillを無効化する。catalog/candidate/historical-index/ledger/materializationの全writer呼出を確認し同じ設定に集約、rollbackを越えて既存完了batchを保持する。9.45MBのrollback再現でmtime/ctime不変・checkpoint validを確認し、次Rawがrepairedでなくadvancedとなる回帰を追加。モデル側は研究laneと資源admissionに待機者用の順番を設け、既存処理の終了後に最大60秒（両取得合計）の範囲で受け取る。CFの4呼出を同じadmission turnに保持し、子processには実lock FDのみ明示継承する。各子は従来どおり実model exclusive lease・foreground cancel・45秒watchdogを使う。300秒上限、quota、schema/prompt、全gateは不変。B2/supervisor/shardの停止を解決策にしない。
+
+- 2026-10-18 18:01 JST — health実装はsealed formal-progress receiptへattempt/defer/実成功を記録し、worker_busyも専用正常file lockで直列化する。last_run_started_atをattempt時刻から分けてbusyとの競合でも完了tokenを守り、成功はworker stateのlast_success_at前進だけで認定。閾値2時間かつ連続延期2回でdistillation_mainline_stalledをhuman_waitとして発報し、再試行running中も維持する。counterfactual_data_rejectの旧分類は変更しない。298件の対象回帰が通過。必須architecture checkで新しいcross-domain import位置が検出されたため、凍結registry/ledgerを更新せず、既存worker/healthの境界経由へ集約してから全CIを進める。
+
+- 2026-10-18 18:06 JST — 共有境界へ整理後、architecture checkは違反0、ruff/mypy/import contracts/compile/whitespace通過。資源順番とFD継承（4子呼出・実exclusive lease維持・foreground取消）、health/progress/既存deferの100件も通過。health reader共通化に伴う既存mockの引数不足11件はtest fixtureを新signatureへ合わせて再検証した。最初のfull pytestは変更前architecture違反を検出して中断し証跡を保持、最終sourceでfull suiteを再実行中。変更を対象commitへまとめ、GitHub固定packageの必須CIを動かすためのみpushする判断。runtimeは234b7e05のままで、切替はCI成功後の一度に限定する。09:15 automationは新formal receipt/stall分類/差分保持/最大60秒の正常admission待ちを含むCAS候補をprivateに作成し、schedule・ACTIVE・既存targetは同一であることを検証した（まだ未適用）。

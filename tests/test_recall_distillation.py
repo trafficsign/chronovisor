@@ -2695,7 +2695,7 @@ def test_local_worker_metadata_and_transient_failure_classification(
     @contextmanager
     def lane(*_args: object, **kwargs: object):
         lane_kwargs.append(kwargs)
-        yield object()
+        yield SimpleNamespace(admission=SimpleNamespace(admitted=True))
 
     monkeypatch.setattr(research_scheduler, "research_lane", lane)
     failure = {"value": ""}

@@ -397,6 +397,12 @@ class _WorkerCounterfactual:
         self.deadline_ms = deadline_ms
 
     def compare(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        with ExitStack() as stack:
+            return self._compare(payload, _WorkerModelTurn(stack))
+
+    def _compare(
+        self, payload: Mapping[str, Any], model_turn: _WorkerModelTurn
+    ) -> Mapping[str, Any]:
         base = {
             key: payload[key]
             for key in ("rally_id", "candidate_id", "query", "context")
@@ -409,6 +415,7 @@ class _WorkerCounterfactual:
             expected_route=self.routes["recall.distill.answer_generator"],
             expected_digest=self.digests["recall.distill.answer_generator"],
             deadline_ms=self.deadline_ms,
+            model_turn=model_turn,
         )
         arm1 = _worker_call(
             "answer",
@@ -418,6 +425,7 @@ class _WorkerCounterfactual:
             expected_route=self.routes["recall.distill.answer_generator"],
             expected_digest=self.digests["recall.distill.answer_generator"],
             deadline_ms=self.deadline_ms,
+            model_turn=model_turn,
         )
         a0 = str(arm0.get("answer") or "")
         a1 = str(arm1.get("answer") or "")
@@ -449,6 +457,7 @@ class _WorkerCounterfactual:
                 expected_route=self.routes["recall.distill.utility_judge"],
                 expected_digest=self.digests["recall.distill.utility_judge"],
                 deadline_ms=self.deadline_ms,
+                model_turn=model_turn,
             )
 
         first = judge(first_a)
@@ -489,6 +498,12 @@ class _WorkerCounterfactual:
         }
 
 
+@dataclass
+class _WorkerModelTurn:
+    stack: ExitStack
+    lease: Any = None
+
+
 def _worker_call(
     operation: str,
     role: str,
@@ -498,6 +513,7 @@ def _worker_call(
     expected_route: Mapping[str, str],
     expected_digest: str,
     deadline_ms: int = 60_000,
+    model_turn: _WorkerModelTurn | None = None,
 ) -> Mapping[str, Any]:
     from chronovisor.core import ollama
     from chronovisor.core.research_scheduler import (
@@ -523,18 +539,24 @@ def _worker_call(
     if len(canonical_json.canonical_json_bytes_strict(payload)) > input_ceiling:
         raise DistillationError("distillation worker input exceeds fixed byte limit")
     encoded = canonical_json.canonical_json_strict(request)
-    with research_lane(
-        f"recall-distill-{request_id[:16]}",
-        enabled=True,
-        mode="sleep",
-        purpose="sleep",
-        needs_model=True,
-    ) as lease:
+    with ExitStack() as call_stack:
+        turn = model_turn or _WorkerModelTurn(call_stack)
+        if turn.lease is None:
+            turn.lease = turn.stack.enter_context(research_lane(
+                f"recall-distill-{request_id[:16]}",
+                enabled=True,
+                mode="sleep",
+                purpose="sleep",
+                needs_model=True,
+                wait_timeout_seconds=60,
+                reserve_model_turn=True,
+            ))
         outcome = run_cancellable_command(
             [sys.executable, "-m", "chronovisor.recall.recall_distillation_worker"],
             encoded,
-            lease,
+            turn.lease,
             timeout_seconds=deadline_ms / 1_000 + 5,
+            inherit_model_admission=True,
         )
     if outcome.status != "completed" or not isinstance(outcome.value, dict):
         if outcome.status in {"deferred", "cancelled", "timeout"}:
@@ -17002,6 +17024,7 @@ def run_distillation_chunk(
         or not 60 <= max_elapsed_seconds <= 1_800
     ):
         raise DistillationError("distillation elapsed limit is invalid")
+    from chronovisor.recall import recall_distillation_progress as progress
     from chronovisor.recall.recall_distillation_materialization import (
         MaterializationDeferred,
     )
@@ -17015,11 +17038,18 @@ def run_distillation_chunk(
         store.distillation_dir(resolved_root) / "distillation-worker.lock"
     )
     if lock is None:
+        if not dry_run:
+            progress.record_busy(resolved_root)
         return {"status": "deferred", "processed": 0, "reason": "worker_busy"}
+    token = None
+    result: dict[str, Any] | None = None
+    error: BaseException | None = None
     try:
+        if not dry_run:
+            token = progress.begin(resolved_root)
         try:
             with recall_wall_clock_deadline(max_elapsed_seconds * 1_000):
-                return _run_distillation_chunk_impl(
+                result = _run_distillation_chunk_impl(
                     root=resolved_root,
                     raw_dir=raw_dir,
                     config_path=config_path,
@@ -17033,7 +17063,7 @@ def run_distillation_chunk(
         except (MaterializationDeferred, store.DistillationStoreBusy) as exc:
             # Native imports may advance source ledgers during a verified join.
             # Incomplete work never authorizes a snapshot or clears a prior error.
-            return {
+            result = {
                 "status": "deferred", "processed": 0,
                 "reason": (
                     exc.reason if isinstance(exc, MaterializationDeferred)
@@ -17047,7 +17077,7 @@ def run_distillation_chunk(
             # idempotent resume points and are never rolled back after timeout.
             if not dry_run:
                 _record_worker_failure(resolved_root, exc, timeout=True)
-            return {
+            result = {
                 "status": "deferred",
                 "processed": 0,
                 "reason": "wall_clock_timeout",
@@ -17055,11 +17085,17 @@ def run_distillation_chunk(
                 **_timeout_workset_statuses(resolved_root),
             }
         except Exception as exc:
+            error = exc
             if not dry_run:
                 _record_worker_failure(resolved_root, exc)
             raise
+        return result
     finally:
-        store.release_lock(lock)
+        try:
+            if token is not None:
+                progress.finish(resolved_root, token, result, error)
+        finally:
+            store.release_lock(lock)
 
 
 def distillation_snapshot(root: Path | None = None) -> dict[str, Any]:

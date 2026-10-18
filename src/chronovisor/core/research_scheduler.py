@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -305,9 +305,49 @@ def research_lane(
     mode: str,
     purpose: str,
     needs_model: bool,
+    wait_timeout_seconds: float = 0,
+    reserve_model_turn: bool = False,
+) -> Iterator[ResearchLease]:
+    """Admit research and optionally retain one turn across its model children."""
+
+    from chronovisor.core.ollama_lease import model_admission_turn
+
+    started = time.monotonic()
+    with _research_lane(
+        run_id, enabled=enabled, mode=mode, purpose=purpose,
+        needs_model=needs_model, wait_timeout_seconds=wait_timeout_seconds,
+    ) as lease, ExitStack() as stack:
+        if reserve_model_turn and lease.admission.admitted:
+            remaining_ms = max(0, round(
+                (wait_timeout_seconds - (time.monotonic() - started)) * 1000
+            ))
+            try:
+                stack.enter_context(model_admission_turn(timeout_ms=remaining_ms))
+            except TimeoutError:
+                admission = ResearchAdmission(
+                    admitted=False, reason="resource_busy", run_id=run_id,
+                    resource_wait_ms=round((time.monotonic() - started) * 1000),
+                    mode=mode,
+                )
+                _event("research_deferred", **asdict(admission), purpose=purpose)
+                lease = ResearchLease(admission, started)
+        yield lease
+
+
+@contextmanager
+def _research_lane(
+    run_id: str,
+    *,
+    enabled: bool,
+    mode: str,
+    purpose: str,
+    needs_model: bool,
+    wait_timeout_seconds: float = 0,
 ) -> Iterator[ResearchLease]:
     """Admit at most one low-priority research generation across processes."""
 
+    if wait_timeout_seconds < 0:
+        raise ValueError("research wait timeout must be non-negative")
     started = time.monotonic()
     reason = ""
     if not enabled or mode == "off":
@@ -323,10 +363,25 @@ def research_lane(
     if not reason:
         RESEARCH_LOCK.parent.mkdir(parents=True, exist_ok=True)
         handle = RESEARCH_LOCK.open("a+")
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            reason = "research_generation_busy"
+        # A waiter holds the queue while the current lane owner finishes.
+        # Immediate callers cannot repeatedly barge into that handoff.
+        with RESEARCH_LOCK.with_suffix(".lock.queue").open("a+") as queue:
+            for waiting in (queue, handle):
+                while True:
+                    if sync_pending():
+                        reason = "sync_pending"
+                        break
+                    try:
+                        fcntl.flock(waiting.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() - started >= wait_timeout_seconds:
+                            reason = "research_generation_busy"
+                            break
+                        time.sleep(0.005)
+                if reason:
+                    break
+        if reason:
             handle.close()
             handle = None
     admission = ResearchAdmission(
@@ -385,6 +440,7 @@ def run_cancellable_command(
     *,
     timeout_seconds: float,
     poll_seconds: float = 0.01,
+    inherit_model_admission: bool = False,
 ) -> CancellableResult:
     """Run a model worker subprocess and propagate sync cancellation."""
 
@@ -404,12 +460,15 @@ def run_cancellable_command(
             error=result.error,
         )
         return result
+    from chronovisor.core.ollama_lease import model_admission_subprocess_options
+
     process = subprocess.Popen(
         command,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        **(model_admission_subprocess_options() if inherit_model_admission else {}),
     )
     _set_model_phase(
         lease.admission.run_id,

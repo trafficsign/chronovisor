@@ -461,6 +461,243 @@ def test_recall_distillation_health_prefers_label_progress_over_last_success(
     assert "durable_progress_stale" in payload["reason_codes"]
 
 
+def _write_formal_progress(root: Path, **overrides: object) -> None:
+    from chronovisor.recall import recall_distillation_store as store
+
+    payload: dict[str, object] = {
+        "kind": "formal-progress",
+        "first_attempt_at": "2026-10-18T03:00:00Z",
+        "last_attempt_at": "2026-10-18T04:00:00Z",
+        "last_success_at": "2026-10-18T01:00:00Z",
+        "last_outcome": "deferred",
+        "last_defer_reason": "materialization_budget_exhausted",
+        "consecutive_deferrals": 2,
+        "attempt_count": 2,
+        "success_count": 0,
+    }
+    payload.update(overrides)
+    store.write_sealed_state(
+        store.distillation_dir(root) / "formal-progress.json",
+        payload,
+    )
+
+
+def test_formal_mainline_stall_is_non_data_wait_alert_after_two_hours(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.recall import recall_distillation_store as store
+
+    root = tmp_path / "wiki"
+    root.mkdir()
+    (root / "config.toml").write_text(
+        "[recall.distillation]\n"
+        "enabled = true\n"
+        "capture_enabled = true\n"
+        "teacher_profile = \"local-triad-v1\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        health,
+        "recall_distillation_kpi",
+        lambda *_args: {
+            "status": "deferred",
+            "worker_status": "deferred",
+            "hold_reason": "counterfactual_pairs_below_floor",
+            "alert": False,
+        },
+    )
+    store.write_sealed_state(
+        store.distillation_dir(root) / store.STATE_FILE,
+        {
+            "kind": "worker-state",
+            "last_success_at": "2026-10-18T01:00:00Z",
+        },
+    )
+    _write_formal_progress(root)
+
+    payload = health.recall_distillation_health(root)
+
+    assert "counterfactual_pairs_below_floor" in payload["reason_codes"]
+    assert "distillation_mainline_stalled" in payload["reason_codes"]
+    stalled = next(
+        item
+        for item in payload["alerts"]
+        if item["reason"] == "distillation_mainline_stalled"
+    )
+    assert stalled["category"] == "human_wait"
+    assert payload["formal_mainline"]["stalled"] is True
+    assert payload["formal_mainline"]["consecutive_deferrals"] == 2
+
+
+def test_two_worker_busy_attempts_raise_formal_stall_alert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.recall import recall_distillation_progress as progress
+
+    root = tmp_path / "wiki"
+    root.mkdir()
+    (root / "config.toml").write_text(
+        "[recall.distillation]\n"
+        "enabled = true\n"
+        "capture_enabled = true\n"
+        "teacher_profile = \"local-triad-v1\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        health,
+        "recall_distillation_kpi",
+        lambda *_args: {
+            "status": "ready",
+            "worker_status": "ready",
+            "hold_reason": "",
+            "alert": False,
+        },
+    )
+    _write_formal_progress(
+        root,
+        first_attempt_at=(datetime.now(UTC) - timedelta(hours=3)).isoformat(),
+        last_attempt_at=(datetime.now(UTC) - timedelta(hours=3)).isoformat(),
+        last_success_at="",
+        consecutive_deferrals=0,
+    )
+
+    progress.record_busy(root)
+    progress.record_busy(root)
+    payload = health.recall_distillation_health(root)
+
+    assert "distillation_mainline_stalled" in payload["reason_codes"]
+    assert payload["formal_mainline"]["last_defer_reason"] == "worker_busy"
+    assert payload["formal_mainline"]["consecutive_deferrals"] == 2
+
+
+def test_formal_data_reject_does_not_create_defer_stall_alert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    root.mkdir()
+    (root / "config.toml").write_text(
+        "[recall.distillation]\n"
+        "enabled = true\n"
+        "capture_enabled = true\n"
+        "teacher_profile = \"local-triad-v1\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        health,
+        "recall_distillation_kpi",
+        lambda *_args: {
+            "status": "capture_only",
+            "worker_status": "capture_only",
+            "hold_reason": "counterfactual_pairs_below_floor",
+            "alert": False,
+        },
+    )
+    _write_formal_progress(
+        root,
+        last_outcome="data_reject",
+        last_defer_reason="",
+        consecutive_deferrals=0,
+    )
+
+    payload = health.recall_distillation_health(root)
+
+    assert "distillation_mainline_stalled" not in payload["reason_codes"]
+    assert payload["formal_mainline"]["stalled"] is False
+    assert "counterfactual_pairs_below_floor" in payload["reason_codes"]
+
+
+def test_formal_attempt_before_recent_success_does_not_stall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    root.mkdir()
+    (root / "config.toml").write_text(
+        "[recall.distillation]\n"
+        "enabled = true\n"
+        "capture_enabled = true\n"
+        "teacher_profile = \"local-triad-v1\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        health,
+        "recall_distillation_kpi",
+        lambda *_args: {
+            "status": "ready",
+            "worker_status": "ready",
+            "hold_reason": "",
+            "alert": False,
+        },
+    )
+    recent = datetime.now(UTC).isoformat()
+    _write_formal_progress(
+        root,
+        first_attempt_at=(datetime.now(UTC) - timedelta(hours=3)).isoformat(),
+        last_attempt_at=(datetime.now(UTC) - timedelta(hours=3)).isoformat(),
+        last_success_at=recent,
+        last_outcome="deferred",
+        consecutive_deferrals=4,
+    )
+
+    payload = health.recall_distillation_health(root)
+
+    assert "distillation_mainline_stalled" not in payload["reason_codes"]
+    assert payload["formal_mainline"]["attempt_after_success"] is False
+
+
+def test_formal_mainline_stall_remains_visible_while_new_attempt_is_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.recall import recall_distillation_progress as progress
+    from chronovisor.recall import recall_distillation_store as store
+
+    root = tmp_path / "wiki"
+    root.mkdir()
+    (root / "config.toml").write_text(
+        "[recall.distillation]\n"
+        "enabled = true\n"
+        "capture_enabled = true\n"
+        "teacher_profile = \"local-triad-v1\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        health,
+        "recall_distillation_kpi",
+        lambda *_args: {
+            "status": "deferred",
+            "worker_status": "deferred",
+            "hold_reason": "counterfactual_pairs_below_floor",
+            "alert": False,
+        },
+    )
+    _write_formal_progress(
+        root,
+        first_attempt_at=(datetime.now(UTC) - timedelta(hours=3)).isoformat(),
+        last_attempt_at=(datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
+        last_success_at="",
+        consecutive_deferrals=2,
+    )
+
+    token = progress.begin(root)
+    payload = health.recall_distillation_health(root)
+
+    assert "distillation_mainline_stalled" in payload["reason_codes"]
+    assert payload["formal_mainline"]["last_outcome"] == "running"
+    assert payload["formal_mainline"]["stalled"] is True
+
+    store.write_sealed_state(
+        store.distillation_dir(root) / store.STATE_FILE,
+        {
+            "kind": "worker-state",
+            "last_success_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    progress.finish(root, token, {"status": "ready"})
+    cleared = health.recall_distillation_health(root)
+
+    assert "distillation_mainline_stalled" not in cleared["reason_codes"]
+    assert cleared["formal_mainline"]["stalled"] is False
+
+
 def test_native_luna_supervisor_absence_preserves_existing_health(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -525,7 +762,7 @@ def test_repeated_mainline_failure_is_human_wait_without_replacing_supervisor_al
     monkeypatch.setattr(
         health,
         "_distillation_state",
-        lambda _root: {
+        lambda _root, **_kwargs: {
             "worker_failure_count": 2,
             "error_code": "distillation_run_failed",
             "worker_error_type": "RuntimeError",
@@ -568,7 +805,7 @@ def test_repeated_mainline_failure_stage_is_allowlisted_and_sanitized(
     monkeypatch.setattr(
         health,
         "_distillation_state",
-        lambda _root: {
+        lambda _root, **_kwargs: {
             "worker_failure_count": 2,
             "error_code": "distillation_run_failed",
             "worker_error_stage": worker_error_stage,
@@ -619,7 +856,7 @@ def test_counterfactual_rejection_kind_controls_repeated_failure_alert(
     monkeypatch.setattr(
         health,
         "_distillation_state",
-        lambda _root: {
+        lambda _root, **_kwargs: {
             "worker_failure_count": 2,
             "error_code": "distillation_run_failed",
             "worker_error_stage": "counterfactual",
