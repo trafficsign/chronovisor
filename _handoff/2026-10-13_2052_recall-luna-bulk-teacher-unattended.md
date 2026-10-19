@@ -123,7 +123,7 @@ created_at: 2026-10-13T20:52:29+09:00
 
 ### 2026-10-18 automatic cloud 廃止と local teacher 切替
 - [x] local1：code/config/supervisor/LaunchAgents/periodic/09:15 の全自動cloud経路と日次流入量を棚卸しする。
-- [ ] local2：既存sealed300を実serverが対応するreasoning水準で測定し、一致率・3x3行列・技術失敗・median/p90と共有資源余裕で最高の実用水準を選ぶ。
+- [x] local2：既存sealed300を実serverが対応するreasoning水準で測定し、一致率・3x3行列・技術失敗・median/p90と共有資源余裕で最高の実用水準を選ぶ。
 - [ ] local3：全自動経路をlocalへ切替え、cloud fallbackを禁止、独立性・既存gate・履歴とlabel provenanceを保持する。
 - [ ] local4：health/initにactive teacher/reasoning/backlog drain rateを表示する。遅い正常drainをhuman_waitにしない。
 - [ ] local5：必須CI・commit・安全境界で一度配備・drift=false・通常daily cycleとprocess/receiptのcloud0確認・09:15更新を完了する。
@@ -1052,3 +1052,17 @@ created_at: 2026-10-13T20:52:29+09:00
 
 
 - 2026-10-19 15:48 JST — authority/cache修正を含む配備候補485ceb2eのquality/Python3.14/Securityがすべて成功。quality実JUnitは7378 tests・failure0・error0・skip4（7374 passed）。6 constraint cohortとLibrarianの事前取得は全て同commit/MCP1.30.0を確認し、旧8c47e68dのCI・package証跡は別ディレクトリへ保存した。配備は未実行で、測定中のLIVE source/runtime pinを保持する。mediumは終端技術失敗なしで継続、全300件と3水準batchが揃ってから容量に基づき水準を選ぶ。
+
+
+- 2026-10-19 17:31 JST — 有効mediumのsealed300が全件完了。sample file hash・frozen input hash・既存Luna labelのexact joinを再照合し、low/xhighと同じlocal teacher route/model fingerprintだった。行=local/列=Luna、順序irrelevant/relevant/uncertainの3x3は[[176,16,9],[5,57,5],[16,14,2]]。単純一致235/300=78.33%、uncertain同士も不一致に含める悲観一致233/300=77.67%。Luna blind参照80.5%との差は-2.83 percentage points。length0・repair exhausted0・context0・その他の終端技術失敗0、通常repair成功5件。primary300試行すべて実reasoning非空、repairを含む305応答は全てfinish stop、最大1795 output tokensで16384 token枠への切詰めはなかった。
+
+- 2026-10-19 17:31 JST — mediumの最終実行1件wall中央値42.322秒/p9073.710秒/平均46.066秒、共有待ち・再試行込みは中央値44.104秒/p9085.379秒/平均53.021秒。model sessionは中央値27.616秒/p9043.949秒/平均29.366秒、走査全体15907.213秒。capacity defer3回・通常scheduler defer32回・cancelled30回を別記し、生成開始後のpreemptionを含み得るcancelledを未実行や成功扱いにしない。元結果はprivateに保存し、新しいmedium-300-complete-summary.jsonへ集計だけを新規作成した。通常batch形状の32固定入力を各水準で補測し、既存共有roleの実負荷・日次host overhead・cadenceを合わせて最終水準を選ぶ。
+
+
+- 2026-10-19 18:43 JST — 同じsealed300について有効low/medium/xhighを全件完了し、private aggregate-comparison.jsonへ入力hash・教師fingerprint・Luna exact join・3x3・技術失敗・速度を再検証して集約した。通常batch形状の補測はlow/medium各32件・18batchで全件成功、失敗0/repair0。共有待ち込み総時間1118.725/1472.187秒、34.960/46.005秒/件、model session19.014/22.981秒/件、cancelled3/6回・通常defer2/4回。xhigh補測は3/32件の後、同じ次batchが通常foreground preemptionで24分以上進まなかったため、無期限retryを終える判断。全体約27分の観測と元部分結果を保持し、通常research leaseを自然終了後に取得、child0・active research所有なしを確認して所有する待機controllerだけを終了した。supervisor・model server・実行中model childへのsignal0。必須のxhigh300件は完了済みであり、任意のbatch補測残り29件を成功や技術失敗へ算入しない。完了3件だけの速度を全32件へ外挿しない。
+
+- 2026-10-19 18:43 JST — 採用水準はqwen3.8-flash-next-chatのlow、output16384/context65536/structured reasoning budget=-1、通常local daily cadence10秒と決めた。lowは悲観一致235/300=78.33%、待ち込み中央値41.220秒/p9079.179秒。mediumは77.67%・44.104/85.379秒、xhighは73.67%・最終試行59.371/99.689秒（元278件は個別defer時間未記録）。Luna blind80.5%は別cohortの自己一貫性参照で、品質の真値や合格閾値ではない。全水準length/repair exhausted/contextの終端技術失敗0、通常repair成功low2/medium5/xhigh0。低一致率を理由とするLuna復帰・fallbackは行わない。
+
+- 2026-10-19 18:43 JST — 水準選定の容量根拠：直近7日平均763.7件/日、平日平均1052.4件/日、最大2480件/日。連続11.81時間の共有role観測から検証済み模擬41件と測定teacherを除いた実モデル生成は6.47時間/日相当、実remote0。検索authority133試行・lint23試行等を含み、deterministic lint件数や旧native B2 backlog burnを日次新規量へ加算しない。通常batch平均1.778件、旧profileで実測したhost32.184秒/cycle、既存CF97秒/12teacher batch、cadence待ち最大10秒を使うcalendar見積もりはlow1324.9件/日、medium1133.0件/日。待ち込みbatch wallには共有role待ちを含むため6.47時間を再加算しない。単一推論slotで算定し、Qwen/Ornithを並列容量に数えない。平日平均への余裕low20.57%・medium7.11%で、検索/lintの新reasoning費用・prefill/失敗時間の欠測・新profile overheadの不確かさを吸収する約20%の運転余裕を判断基準とした。これはquality gateではなく運転上の留保であり、全gate/floor/validatorは不変。最高の実用水準はlowと判断する。
+
+- 2026-10-19 18:43 JST — どの水準も最大2480件の日を当日中に排出できるとは実証していない。lowの見積もりでもpeak後1155件を繰越し、実測7日配列では後続2日で解消する。通常日の持続流入を余裕付きで処理し、burstはqueueを保持して後続日に排出する運用を選ぶ理由は、cloud禁止・既存品質条件・単一共有slotを同時に守るため。新local profileの実cycle費用とsearchの終端receipt速度を配備後に照合し、推定と実測を区別する。任意xhigh補測29件は共存throughput不成立により未完として明記し、より良いlocal modelが利用可能になった時に再測定する。
