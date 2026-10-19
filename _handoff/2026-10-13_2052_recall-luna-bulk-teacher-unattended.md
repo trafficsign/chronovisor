@@ -1015,3 +1015,20 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-19 04:45 JST — 原因となる資源拒否を入力不正へ分類していたadapterを修正する。MLX-Serveの特定のpre-generation memory refusalだけをcapacity_unavailableへ正規化し、既存schedulerの未実行deferへ渡す。一般のHTTP400、schema不正、生成途中のSSE失敗は従来の失敗のままにし、メッセージ本文をerrorへ保存しない。4失敗を先に再現し、streaming/非streaming・部分出力後は未実行扱いしない回帰を加え、関連217 tests・ruff/mypy成功。即時HTTP再試行は増やさない。元22件の記録は保持し、private別成果物へ同一sealed inputの最初の実推論を補測する。進行中の元xhighは変更せず自然完了を待つ。待機controllerだけをchild0で置換し、補測→修正low/medium→batchを順に実行する判断。新測定は資源拒否を別集計し30秒待ち、待ち込み時間も保存する。
 
 - 同修正の既存worker/未実行資源待ち回帰13 testsも成功。capacity_unavailableは安全な分類名だけを共通runtimeで伝播し、モデル実行前の待ちに既存attemptを消費させない。出力を一度でも受信したSSE失敗は実行済みfailureを維持する。変更は配備前の新commitへまとめ、必須3CIを再確認する。
+
+
+- 2026-10-19 04:49 JST — 次の共有メモリ不足でも入力不正を連発しないよう、元xhighの「今後起動するbenchmark child」にも検証済みcapacity分類器だけを適用する判断へ補足した。進行中childと親controllerにはsignalせず、request payload・teacher prompt/schema・frozen input・reasoning/output budgetは不変。変更前script/hashと分類器sourceをprivateに固定保存し、今後の行へdecoder hashを記録する。既存22件は書換えず補測対象のまま、以後の同じpre-generation拒否は既存の未実行deferへ入り、実生成前に再試行する。これはquality failureの救済やattempt上限の緩和ではない。
+
+
+- 2026-10-19 05:24 JST — memory admission分類修正を含む配備候補8c47e68dの必須quality/Python3.14/Securityがすべて成功。quality実JUnitは7357 tests・failure0・error0・skip4（7353 passed）。6 constraint cohortとLibrarianの事前取得は全て同commit/MCP1.30.0を確認した。元xhighの既存22件は保持され、追加の同種誤分類は観測していない。未開始のbatch補測も資源拒否時30秒待ちへ統一し、待ち時間はthroughputへ含める。payload・固定inputs・実行中processは変更せず、package配備は全有効測定の完了後の一度だけとする。
+
+
+- 2026-10-19 07:00 JST — 容量見積もりを補足。通常ingestの日次batch wallは直近7完了日で約4.1〜22.8時間だが、モデル待ち・索引などhost処理を含むため、collection-reviewや教師時間へ単純加算すると共有待ちを二重計上する。bounded local-consensus auditから生成時間と役割別件数だけをprivateへ継続収集し、取り込み・metadata・authorityの共有負荷も水準選定に含める。raw本文・質問・実IDは記録対象にせず、既存audit/queue/ledgerはread-only。現在のxhighは200件を超え、既知22件以後の同種メモリ拒否はcapacity deferとして処理されている。補測前の部分一致率では選定しない。
+
+
+- 2026-10-19 08:51 JST — 元xhigh走査は08:49に300件で自然終了（実生成278件・既知の推論前資源拒否22件、追加の技術失敗0・repair0）。以後の同種資源拒否9回と通常scheduler defer11回は未実行待ちとして保持。全走査の経過18416.118秒、生成できた278件のwall中央値60.478秒/p9099.939秒、model session中央値38.399秒/p9074.393秒で、共有待ちを分離して記録した。この段階の一致率は300件比較の結果として採用しない。元fileのhashを別referenceへ固定し、親processのexit0を確認、正規controllerが既知22件の最初の実推論を別成果物へ開始した。元結果・frozen inputs・台帳は変更せず、その後に修正low/mediumとbatch補測を続ける。
+
+
+- 2026-10-19 09:17 JST — xhighの補測22件は09:14に全件成功・exit0で終了。元278件とのread-only結合で同じsealed300の全実生成結果が揃った。行=local/列=Luna、順序irrelevant/relevant/uncertainの3x3は[[167,14,8],[6,54,5],[24,19,3]]。単純一致224/300=74.67%、uncertain同士も不一致に含める悲観一致221/300=73.67%。技術失敗はlength0・repair exhausted0・context0・その他実生成失敗0、repair成功0。元の推論前拒否22件は保存し、以後のcapacity defer9回・scheduler defer12回を別集計した。最終実行1件wall中央値59.371秒/p9099.689秒/平均63.621秒、model session中央値37.957秒/p9074.382秒/平均43.935秒。補測は22件すべて実reasoning非空・finish stop、最大3466 output tokensで、16384 token枠への切詰めはない。結果はprivate別summaryへ保存し、元file・補測fileを結合上書きしない。Luna blind参照80.5%との差は-6.83 percentage pointsだが、owner決定により日次Luna継続・fallbackへ戻さない。残る有効low/mediumとbatch容量を測って運用水準を決める。
+
+- 2026-10-19 09:17 JST — 09:15予定時刻を越えた09:17の正本照合でrecall-p2b automationはPAUSED、新local-only promptのhashは更新時から不変。連続process監視の自動cloud0、native authority execution/receipt/daily roundの新規・変更・削除はいずれも0。supervisorは元PID37609・disabled・active0を維持し、再起動していない。private automation-0915-observed.jsonへ証跡を保存。修正lowは開始済みで、最初の4件すべてに実reasoning非空とfinish stopを確認した。
