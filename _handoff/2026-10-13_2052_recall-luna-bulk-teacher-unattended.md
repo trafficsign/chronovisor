@@ -1,7 +1,7 @@
 ---
 task_id: plan_f1af8dd28d254ae0a5fa2c431b1dfb3f
 created_at: 2026-10-13T20:52:29+09:00
-状態: running
+状態: blocked
 ---
 
 # Recall：既存の Luna ラベルを保持し、ローカルで無人運転を続ける
@@ -9,7 +9,7 @@ created_at: 2026-10-13T20:52:29+09:00
 実行役：Astra（Codex）。2026-10-18の決定4改訂以後、日常・無人の判定はローカル。既存のLuna判定・認証・履歴は保持する。
 
 ## 目的
-- recall の教師ラベルは 2026-08-29 から止まっている。過去の会話に Luna で一括ラベルを付けて蒸留の本線を再開し、ユーザーが何もしなくても学習と昇格が回り続ける状態にする。
+- 既存のLuna一括ラベル・認証・履歴を保持し、2026-10-18の決定4改訂に従って日次教師と全自動判定をlocalへ移す。ユーザーが何もしなくても蓄積と昇格判定が継続する状態を目指し、既存gateを満たさない昇格は保留する。
 - 止まったときは、理由つきでユーザーに届くようにする。今回は 6 週間止まっていたのに health は ok で、ユーザーが尋ねるまで誰にも見えなかった。
 - 既存 Plan との関係：本線 `2026-08-14_1846_autonomous-recall-offline-distillation.html` と `2026-10-09_1011_recall-compounding-fitness-first.html` は置き換えない。両者の「教師評価の local-only 条件」と、10/9 の承認範囲だけをこの Plan で改める。
 
@@ -124,8 +124,8 @@ created_at: 2026-10-13T20:52:29+09:00
 ### 2026-10-18 automatic cloud 廃止と local teacher 切替
 - [x] local1：code/config/supervisor/LaunchAgents/periodic/09:15 の全自動cloud経路と日次流入量を棚卸しする。
 - [x] local2：既存sealed300を実serverが対応するreasoning水準で測定し、一致率・3x3行列・技術失敗・median/p90と共有資源余裕で最高の実用水準を選ぶ。
-- [ ] local3：全自動経路をlocalへ切替え、cloud fallbackを禁止、独立性・既存gate・履歴とlabel provenanceを保持する。
-- [ ] local4：health/initにactive teacher/reasoning/backlog drain rateを表示する。遅い正常drainをhuman_waitにしない。
+- [x] local3：全自動経路をlocalへ切替え、cloud fallbackを禁止、独立性・既存gate・履歴とlabel provenanceを保持する。
+- [x] local4：health/initにactive teacher/reasoning/backlog drain rateを表示する。遅い正常drainをhuman_waitにしない。
 - [ ] local5：必須CI・commit・安全境界で一度配備・drift=false・通常daily cycleとprocess/receiptのcloud0確認・09:15更新を完了する。
 
 ### Phase 5：別件の修理
@@ -145,7 +145,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - R6 と R7 が無人で進む経路が配備されている。昇格したかどうかは問わない（ゲートが決める）。昇格していないときは、理由が「データ待ち」か「人の判断待ち」かで表示されている。
 - この Plan の状態と実態が一致している。
 
-7 日の確認は 1 回の作業では終わらない。2026-10-18改訂によりcloudを使う旧09:15 heartbeatは停止し、local周期jobのsealed cycle履歴とhealth/initで日々の増分を追跡する。09:15 promptはlocal-onlyへ更新して保存し、後続の照合結果を実行ログへ追記する。7 日が満ちるまで `状態` は running のままにする。
+7 日の確認は 1 回の作業では終わらない。2026-10-18改訂によりcloudを使う旧09:15 heartbeatは停止し、local周期jobのsealed cycle履歴とhealth/initで日々の増分を追跡する。09:15 promptはlocal-onlyへ更新して保存し、後続の照合結果を実行ログへ追記する。継続運転できる間は7日が満ちるまで `状態` を running とし、実行不能の技術ブロッカーがある場合は blocked として理由を記す。
 
 ## 検証手順
 - status の `recall_distillation.last_success_at` が毎日進み、教師ラベルの件数が増えていること。
@@ -155,8 +155,11 @@ created_at: 2026-10-13T20:52:29+09:00
 - 配備後、runtime の drift が false であること。
 
 ## ブロッカー（発生時のみ）
-- 品質受入待ち：2026-10-18 22:55 JSTの364811daによるsealed baselineと対応snapshotでは、固定split・時系列・assignment・row integrityとblind repeatが通過し、残るgate理由はcounterfactual_pairs_below_floorだけ。CFは5/100、post-cutoff・distinct judge・両順序一致・既存validator・selected-only条件は維持する。適格workの実完了時刻によるrolling24hは4組/日（今回の通常formal観測を含む）へ減り、同率が続く場合の100組到達参考日は2026-11-11 JSTへ更新した。一方、18:51の復帰以後4.059時間の適格増分は0で、2回の正式成功も適格CF増とは一致しない。短時間の0件を持続的な0件/日とは断定せず、11/11も確定日・自動運転の保証率にはしない。09:15確認で実流入と条件付き予測を更新する。固定blind repeatは200組・stable161・unstable39・Wilson下限0.74455956で既存floor100/0.60を維持。
-- 7日無人継続は未完。別モデルA300件の独立比較測定は完了し、一致率72.6667%。低一致率を理由とする日次Luna継続判断は2026-10-18の決定4改訂で撤回し、local切替を実施中。補助比較Bも300件終端し、有効287件の一致165/287（57.4913%）、技術失敗13件を分母から除外した。モデル不変性の合格とは扱わず、品質昇格は保留したままlocalへ切り替える。既存09:15確認で追跡する。
+- 現在（2026-10-19）：R4 legacy root authorityのdevice不一致で新local teacherのreceipt発行が停止。inodeは一致し元sealは正常だが、既存validatorのdevice検査を解除せず、authority/ledger/checkpointを再封印しない制約の下では正常daily受入を完了できない。高速dailyだけ自然終了後にdisable/bootout済み、通常Converge/search/lint/ingestはlocalで継続。cloud fallbackは無し。Planをblockedとする。
+- 採用水準はQwen low、sealed300悲観一致78.33%、待ち込み中央値41.22秒/p90 79.18秒。新local labelは1件正規保存したがR4正式受入未完。定常の正常cycle throughputと7日継続は未検証で、1324.9件/日は共有負荷を含む事前projectionに留める。
+- local profileの昇格はteacher_models_not_distinct、教師/各class/control/probe/CFの既存floor、split/holdout等でheld。旧native認証の合格項目を新local profileへ引き継がず、既存Luna集合へlocal labelを混ぜない。
+- 旧native認証の履歴（現localの受入とは別）：2026-10-18 22:55 JSTの364811daによるsealed baselineと対応snapshotでは、固定split・時系列・assignment・row integrityとblind repeatが通過し、残るgate理由はcounterfactual_pairs_below_floorだけ。CFは5/100、post-cutoff・distinct judge・両順序一致・既存validator・selected-only条件は維持する。適格workの実完了時刻によるrolling24hは4組/日（今回の通常formal観測を含む）へ減り、同率が続く場合の100組到達参考日は2026-11-11 JSTへ更新した。一方、18:51の復帰以後4.059時間の適格増分は0で、2回の正式成功も適格CF増とは一致しない。短時間の0件を持続的な0件/日とは断定せず、11/11も確定日・自動運転の保証率にはしない。この旧native条件の予測を現local運転の所要時間へ転用しない。固定blind repeatは200組・stable161・unstable39・Wilson下限0.74455956で既存floor100/0.60を維持。
+- 7日無人継続は未完。別モデルA300件の独立比較測定は完了し、一致率72.6667%。低一致率を理由とする日次Luna継続判断は2026-10-18の決定4改訂で撤回し、local切替を実施中。補助比較Bも300件終端し、有効287件の一致165/287（57.4913%）、技術失敗13件を分母から除外した。モデル不変性の合格とは扱わず、品質昇格は保留したままlocalへ切り替えた。旧09:15 cloud automationは更新済みpromptを保持してPAUSED、現在の追跡はlocal receiptとhealth/initで行う。
 
 ## 受け渡しメモ（次担当へ）
 - ユーザーは「前のも、作って結局動いていない。これを何回も繰り返している」と言っている。今回の成否は、実装とテストが通ることではなく、無人で回り続けることで決まる。
@@ -1075,3 +1078,36 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-19 19:06 JST — 隔離rootで同じ履歴混在を再現し、完全なlocal/CF抽出集合との全行一致（欠落・改変・余分な行を拒否）と全台帳headの前後一致を両立させる修正を加えた。旧profileの全件snapshot検査は維持し、既存履歴を持つ通常pipelineが追加localラベルを保存しP5を保留できる回帰も追加。R4/履歴/通常backfillの31 tests、ruff/mypy/import契約/architecture検査が成功。prompt/schema/frozen入力・model runtime設定は不変なのでsealed300の再測定は不要。必須CIを修正commitで再実行する。
 
 - 2026-10-19 19:06 JST — 「一度の配備」の予定は初回受入不具合により満たせていない。所有者の無人運転を実際に稼働させる指示と、不具合修正まで進める既存承認に従い、停止状態を放置せず同じ変更範囲の是正配備を追加する判断。これを初回成功と数えず、最初の配備receipt・失敗・履歴検証を全て保持し、修正をまとめて必須CI後の自然な境界で切り替える。supervisor/実行中shardへのsignal、cloud fallback、quality gate緩和は行わない。隔離Raw1件は正規処理でattempt2へ進んだが次回backoffが10/20 04:12のため、期限を早めず保留として記録した。
+
+
+- 2026-10-19 19:35 JST — 是正commit92814f75の必須quality/Python3.14/Securityはすべて成功。quality実JUnitは7384 tests・failure0・error0・skip4（7380 passed）、意味索引smoke/HNSWも成功。隔離rootでの関連385 tests、ruff/mypy/import契約/architecture検査も成功した。7 package cohortを同commit/MCP1.30.0で事前取得済み。配備は既存workerの自然終了後の境界を待ち、稼働中supervisor/shard/model serverにはsignalしない。
+
+- 2026-10-19 19:35 JST — 09:15 recall-p2b automationの正本promptに採用済みlow、悲観一致78.33%、待ち込み中央値41.22秒、output16384/context65536、通常local dailyへの置換、P5独立性hold、改善local model到来時の再測定を追記した。schedule等は保持、状態はPAUSEDのまま。自動Codex実行自体がcloud呼出になるため再有効化しない判断を維持する。prompt/file hashと更新前bytesはprivate receiptへ保存し、実データ本文・質問・識別子は含めていない。
+
+
+- 2026-10-19 19:54 JST — 是正package92814f75を19:48に自然なingest/distillation lease境界で反映。supervisor同PID・disabled・active0・実child0を確認し、signal0。常駐5サービスと通常Convergeの実archive、PID1配下の通常local daily childの実環境archive/direct_urlは同commit/MCP1.30.0。元の3周期jobとdaily plistを同じbytes/identityのまま復帰、所有maintenanceを解除した。fresh MCP init/statusは成功、HTTP200・runtime drift=false・active teacher Qwen lowを確認。HTTPのmaterialized healthはstale/refreshingも併記し、古いcycleを新しい成功として数えない。履歴再照合は63134 immutable filesの変更0、既存ledger5本の旧prefix不変で成功。
+
+- 2026-10-19 19:54 JST — R4照合修正後の通常workerはworkset claimへ進んだが、正式cycle受入はまだ未完。source identity変更により既存165255行の検証用materializationが正規のincremental writerで再構築されており、19:54のRO照合ではdirty120561行・12291 rallies、検証済materialized43574行だった。300秒上限と検証条件を維持し、既存sealed checkpointから再開する。手作業でcache/ledger/checkpoint/lockを書き換えず、cold rebuild中の古いworker stateと新しい正式成功を区別する。queue内のpayload_missing1件は正規validatorのquarantineとして保持し、成功ラベルや完了周期に算入しない。
+
+
+- 2026-10-19 19:58 JST — 通常dailyでCatalogErrorを観測し、private digestはcommitted Raw inventory is invalidに一致した。台帳の破損を断定せず、同じ正規RawStoreのread-only inventory検証を別processで実行したところ43914 unitsを1.783秒で正常読取できた。一方、今回新設したdaily LaunchAgentはProcessType=Backgroundで、実childの経過124秒に対しCPU20.16秒、旧bulkログにも同種のBackground抑制とStandard切替の実績がある。入力やvalidatorを緩めず、今回所有するdailyジョブのProcessTypeだけを自然終了境界でStandardへ変えて実測する判断。10秒cadence・package pin・全model設定・共有lease/priority・既存gateを維持し、旧plist bytesと前後hashをprivateへ保存する。これは新たなpackage配備ではなくCPU/I/O schedulingの是正であり、supervisor/model server/稼働workerへsignalしない。
+
+
+- 2026-10-19 20:05 JST — local teacherの保存前に必須のinstalled source attestationが「installed OX source checkout is not exact」で保留していることを、配備archiveからのread-only呼出しで再現した。LIVEには保護対象の既存untracked資料があり、厳格なHEAD=origin/main=installed commit・index/tree/全tracked bytes・untracked無し検査に合格しない。これを削除・ignore・検査緩和で回避せず、同じ92814f75の専用detached clean worktreeをsandboxへ新設した。既存の正規attestationをそのcheckoutで実行し、installed/expected/source commit完全一致・drift=false・full source tree bindingを確認。通常dailyとConvergeだけのCHRONOVISOR_REPO_ROOTを自然終了境界でこのcheckoutへ合わせる判断。package/prompt/schema/input/model/digest/gateは不変。新source checkoutは運用で使うため保持し、LIVEの既存untracked資料と開発中Planはそのまま保持する。
+
+
+- 2026-10-19 20:18 JST — 通常local teacherはQwen low/output16384で実生成1件に成功（model generation26.267秒）、新local-single labelとworkset completionを正規writerで保存した。しかし直後のR4 receipt発行が失敗し、正常dailyの受入は未完。原因は既存legacy root authorityのdirectory identityと現在のstatのdevice不一致で、inodeは同一、元authorityのschema/seal/keys/artifact identityは正常。APFS再採番の可能性はあるが、それだけで同一volumeの継続証明とはしない。既存candidate-anchorのAPFS回帰はfile stateだけを対象とし、root/directory authorityはdevice+inodeの完全一致を引き続き要求する。現在の正規APIに既存authorityを保持したままこの不一致を解消する経路は確認できず、device比較の削除、authorityの上書き・再封印、履歴移動で通過させることは今回の制約に反するため行わない。
+
+- 2026-10-19 20:18 JST — 所有者の「localで提供不能なlaneはcloudへ戻さずhold」の指示を適用し、高頻度local daily LaunchAgentだけを自然終了・実worker lease解放後にdisable/bootoutして保留する判断。plist、設定、queue、label、旧authority、全履歴は保持し、通常Converge/search/Librarianとingestのlocal運転は継続する。promotionは既存独立性・品質gateの保留を維持。normal daily完走、新teacherのR4 receipt受入、定常の日次排出能力は未完で、前述1324.9件/日はprojectionのままである。source attestation/Standard schedulingの是正と初回materialization全行完了は確認済みだが、これらを正常cycle完了へ読み替えない。後続は既存authorityの同一性を証明できる正規復旧を別途成立させる必要がある。成立後のみ保持した同一plistをenable/bootstrapして通常周期を再受入する。手作業でstateやreceiptを正常に書き換えない。
+
+
+- 2026-10-19 20:23 JST — local3（cloud自動呼出/fallback全廃・local route/provenance・既存gate/履歴維持）とlocal4（health/initのteacher/level/drain表示）を完了として更新。fresh MCP init/statusは共にisError=false、Qwen lowとsearch/lintの終端receipt速度を返し、queue alertは空でslow drainをhuman_waitへ分類していない。HTTP200・runtime92814f75/expected同値・drift=falseも確認したが、HTTPのmaterialized healthはstaleを明示しておりfresh MCPの時刻付き観測と区別する。local5/3-2は未完：正常daily受入・定常容量の実証がR4 authority不一致でblocked、package配備も初回受入不具合のため初回485ceb2eと是正92814f75の2回になった。正常成功や一度配備の達成として記録しない。
+
+- 2026-10-19 20:23 JST — 新local labelのprofile/teacher_profileはlocal-single-v1、routeはrecall.distill.teacher.a/local/Qwen、model digestはsealed比較の教師と一致、reasoning level/final_attempt_levelはlow、output16384/context65536、repair0、source commit92814f75とclean source tree bindingを保持した。Luna-labelled certification setへの追加・旧labelの変更は0。最終履歴検証もimmutable63134 files変更0・ledger5本の旧prefix不変で成功。R4 receiptは未受入としてprivate provenance receiptへ明記。09:15正本はPAUSED・採用low promptのfile/prompt hash一致を再確認した。
+
+
+- 2026-10-19 20:28 JST — 自動cloud監視を20:23 JSTに終了し、所有するprocess/shared-role/acceptance observerだけを各自のstop条件で正常終了した。連続114188 process samples（最大間隔3.087秒）で自動cloud process0、native authority execution/receipt/daily roundは新規0・変更0・削除0、supervisorは同PID・active peak0。切替後の実model audit118件はremote0で、別途証明済みの切替前test模擬記録はこの118件に含まれない。processとreceiptの両方からLunaを含む自動cloud0を確認したが、正常daily完了はR4 blockerのため未証明。観測終了後もdefault deny・native無効・09:15 PAUSEDを維持する。
+
+- 2026-10-19 20:28 JST — 最終read-only queue観測は20:20:51 JST。search-review残28161件、切替後5569.035秒の終端12件、7.757件/時、同率継続時3630.314時間（約151.3日）。初期materialization・配備停止を含む条件付き予測であり、定常速度や完了期限の保証ではない。lint残75件、終端5件、3.232件/時、同条件で約23.205時間。slow drainはhuman_waitへ分類せず、R4 authorityの技術停止と分けて表示する。最終partial-acceptance receiptはcloud0・履歴保全・observer終了を確認し、normal_daily_accepted=false、steady_daily_capacity_measured=false、fast_daily_held=true、package配備2回を記録した。
+
+- 2026-10-19 20:28 JST — 残作業は、既存R4 root authorityの同一性を壊さない正規復旧後のnormal daily受入・定常容量確認・7日継続。任意xhigh batch補測の残29件も共有preemptionで未測定のまま保持するが、必須sealed300の3水準比較は完了している。Planの今回差分だけをlocal commitしてLIVEへfast-forwardし、runtime package pin92814f75・専用clean attestation checkout・origin/mainは保持する判断。文書だけの最終記録はpackage配備に不要なので追加push/restartを行わない。保護対象の既存untracked資料は前後の全file hashを照合して保持する。
