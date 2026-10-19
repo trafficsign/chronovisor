@@ -1046,3 +1046,9 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-19 15:23 JST — 配備前のauthority検査で、local_reasoningのlevel・output budget・contextを変えても旧DecisionRouter cacheが再利用される3ケースを失敗回帰として再現した。設定済みlocal routeの証跡へlevel/num_predict/num_ctxを厳密な任意フィールドとして結び、同じrouter instanceでも現在設定を再読込し、旧cacheと旧authorityのeffect適用を拒否する修正。モデルidentity/digestは変更せず、effort違いで独立教師と数えない。旧sealed artifactのbytesと読取互換を保持し、新フィールドの欠損・余分なkey・不正型・範囲外は拒否する。prompt/schema/frozen inputやquality gateは変更していない。
 
 - 2026-10-19 15:23 JST — Qwenの実reasoning有効化に対応する生成policy versionを16→17へ進め、既存authority epochが変更前と同一に見えないようにした。architectureの正規generatorで新しいcore設定参照1箇所を登録し、package edge44・entrypoint51・schema/signature digestを保持。旧source snapshot全体の再生成差分は採用せず、生成器が出した実変更のcontract hash2個だけを追従する。関連417 testsと検索/lint/provider68 testsは成功、旧policy hashを固定したfixture1件の失敗は新hashの完全一致へ更新し、当該1 testの再検証も成功。ruff/mypy/import契約も成功。新packageの必須3CIを実行し、local測定の自然完了まではLIVE sourceとruntime pinを変更しない。
+
+
+- 2026-10-19 15:28 JST — 共有role auditにテスト由来の模擬記録41件（remote表示31件・local表示10件）の混入を確認した。rootが対象回帰の実行時にCHRONOVISOR_ROOTを明示隔離しなかったことが原因。該当provider routingテストのFakeGenerationはdequeから応答するだけでnetwork transportを持たない。専用rootとsocket.connect/connect_ex全面禁止で同じ24 testsを再実行して成功し、生成された41 sessionの安全metadataの多重集合が混入分と完全一致、生成秒数/token数が全件未設定と確認した。private別receiptで対象record hashを固定し、元audit・observerは書換えず保存、通常role容量の集計だけからこの41件を除外する。以後のローカル検証は専用rootを明示する。CIはもともと隔離rootで実行されている。連続process監視とnative execution/receiptは実呼出0のままであり、模擬remote記録をcloud実行へ数えない。
+
+
+- 2026-10-19 15:48 JST — authority/cache修正を含む配備候補485ceb2eのquality/Python3.14/Securityがすべて成功。quality実JUnitは7378 tests・failure0・error0・skip4（7374 passed）。6 constraint cohortとLibrarianの事前取得は全て同commit/MCP1.30.0を確認し、旧8c47e68dのCI・package証跡は別ディレクトリへ保存した。配備は未実行で、測定中のLIVE source/runtime pinを保持する。mediumは終端技術失敗なしで継続、全300件と3水準batchが揃ってから容量に基づき水準を選ぶ。
