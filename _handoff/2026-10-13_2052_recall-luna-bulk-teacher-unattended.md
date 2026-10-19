@@ -134,6 +134,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] identity3：最終commitの必須CI成功後、安全境界で一度配備し、実archive・drift=false・同一daily plistの再開を確認する。
 - [x] identity4：新local teacherのR4 receiptを伴う正常daily受入と、原因修正によるhuman_wait解除を確認する。
 - [ ] identity5：cold rebuildを除く数時間のsearch/lint/teacherを測り、流入差引後の純減・ETA・制約を記録する。
+- [ ] identity5a：再開後に顕在化したRaw snapshot再解析と既存CF scheduling再計算を直し、正常運転が続く定常窓を取り直す。
 - [ ] identity6：7日継続は継続観測として保持する。数時間の受入を7日の完了へ読み替えない。
 
 ### Phase 5：別件の修理
@@ -1151,3 +1152,9 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-19 22:25 JST — 最初の正常dailyは22:19:03.712958にcapture_onlyで完走（190.006秒、label1件、同cycle内の新source/local/validなR4 receipt1件をseal検証付きで結合）。正式last_successは22:19:02.942170へ更新し、旧R4エラー欄は空になった。freshな新規stdio MCPでinit/statusとも成功、実commit=expected=aa8a82d5・drift=false、human_waitなしを確認。残るalertは既存のchronological_split_incomplete/data_waitで、health分類コードは変更していない。旧authorityとdaily plistの全bytes一致を再確認した。3-2/local5/identity4を完了へ更新する。当初のlocal切替で2回配備した履歴は取り消さず、今回の整合修復は1回配備として区別する。
 
 - 2026-10-19 22:25 JST — 既存Codex MCP接続はセッション開始時の92814f75を保持しており、同接続のruntimeは旧版と正しく表示された。稼働セッションを切断しない判断とし、新規MCP processを配備済みarchiveから起動して上記の現行受入を検証、検証用processは正常終了した。初回再構築と配備確認用MCP/HTTP読取の一時負荷を排除するため、定常窓の下界を22:25:17へ加算記録し、以後の最初のqueue snapshotから3時間以上を測る。shared slot、research待ち/preemption、role別生成時間欠測、通常cycle、queue流入と終端、process CPUをmetadataだけで観測する。7日継続は未完のまま。
+
+- 2026-10-19 22:59 JST — 正常dailyは22:24にも成功した後、別原因のRawSegmentCorrupt/CatalogErrorとCF immutable identity conflictが反復した。Rawの例外は「読取中に索引が更新された」検出で、内容破損の証拠ではない。3回の全体snapshot照合は維持し、変更されないjournal/manifestの解析だけをprocess内のexact device/inode/size/mtime/ctime cacheで再利用する。実機索引3924本に対して初案1024entryは全走査でcacheが回転し効果がなかったため8192へ修正。profile付き読取5回は初回4.15秒、再試行相当2.34–2.41秒、44445unit・watermark一致だった。cacheの永続化やdevice照合の緩和はない。
+
+- 2026-10-19 22:59 JST — CF全8465項目のread-only metadata照合で、7431項目は同じpayloadの優先度再計算、完了済み10項目は新cohortのsplitへの再割当が衝突原因だった。producerは既存priorityと完了時splitをSQLiteからbatch読取して引き継ぎ、advanceのimmutable validator、payload/provenance/as_of/groupの比較、未完項目に対する既存plan rotation規則は変更しない。全項目の再照合で残るidentity conflictは0。既存ledger/queueの手編集・再seal・削除は不要。回帰で未完/完了両方、直接priority改変拒否、読取中append、継続更新時の拒否、ctime/symlink検証を確認中。別の既存testはprior fixtureが全pairを消化して未処理pairが残らない場合に失敗していたため、fixture生成時だけ1claimとしてprofile切替の前提を固定した。実運転quotaは変更しない。
+
+- 2026-10-19 22:59 JST — 判断：22:25開始窓はこれらの非model停止と診断読取を含むため、定常容量の最終値には使わず証跡を保持する。R4修復の一度の配備と受入は完了済みだが、依頼6の「model以外の律速を直す」を実運転へ反映するため、追加修正をまとめて必須CI後にもう一度だけ安全境界で配備する。配備回数を一回と偽らず、追加分として記録する。稼働workerの自然終了を待ち、同一daily plistを保持し、supervisorは停止・再起動しない。cold再構築と受入確認負荷の後に新たな3時間以上の窓を開始する。09:15 PAUSED、自動cloud0、Qwen low、300秒・quota・prompt/schema/frozen入力・独立性gate、7日観測未完を継続する。

@@ -5028,7 +5028,10 @@ def test_p1_to_p4_teacher_backfill_runs_while_p5_is_held(
     prior_rows: list[dict[str, Any]] = []
     if prior_history:
         monkeypatch.setattr(distill.runtime_config, "runtime_identity", lambda: {"commit_id": "a" * 40})
-        previous_config = _config(tmp_path, teacher_profile=distill.LOCAL_TRIAD_PROFILE)
+        # Seed only part of the historical cohort so the switch has new work.
+        previous_config = _config(
+            tmp_path, teacher_profile=distill.LOCAL_TRIAD_PROFILE, teacher_claim_limit=1,
+        )
         previous = distill.run_distillation_chunk(
             root=tmp_path, raw_dir=raw_dir, config_path=previous_config,
             teachers={role: FakeTeacher(role) for role in distill.TEACHER_ROLES},

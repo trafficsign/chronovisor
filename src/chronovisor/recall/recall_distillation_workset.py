@@ -1484,6 +1484,35 @@ class DistillationWorkset:
             "provenance": provenance,
         }
 
+    def work_item_scheduling(self, work_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """Read frozen priorities and completed splits without changing history."""
+
+        from itertools import batched
+
+        if isinstance(work_ids, (str, bytes, bytearray, Mapping)):
+            raise DistillationWorksetError("work_ids must be an iterable of identifiers")
+        scheduling: dict[str, dict[str, Any]] = {}
+        with closing(self._connect()) as connection:
+            for batch in batched(work_ids, _SQLITE_BIND_CHUNK, strict=False):
+                chunk = tuple(_identifier(value, "work_id") for value in batch)
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = connection.execute(
+                    "SELECT work_id, priority, state, temporal_split_json "
+                    "FROM work_items WHERE work_id IN ("
+                    + placeholders + ")", chunk,
+                ).fetchall()
+                for row in rows:
+                    priority = row["priority"]
+                    if not isinstance(priority, int) or isinstance(priority, bool):
+                        raise DistillationWorksetError("priority must be an integer")
+                    value: dict[str, Any] = {"priority": priority}
+                    if row["state"] == "completed":
+                        value["completed_temporal_split"] = _metadata_value(
+                            json.loads(row["temporal_split_json"]), "temporal_split"
+                        )
+                    scheduling[_identifier(row["work_id"], "work_id")] = value
+        return scheduling
+
     def advance(
         self,
         items: Iterable[Mapping[str, Any]],

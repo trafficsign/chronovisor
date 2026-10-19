@@ -15888,6 +15888,15 @@ def _run_counterfactual_block(
             root, rallies=rally_by_id, snapshots=snapshots,
         ) if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE else None,
     )
+    # Cohort age changes scheduling hints, not the immutable queued priority.
+    scheduling = workset.work_item_scheduling(item["work_id"] for item in items)
+    for item in items:
+        frozen = scheduling.get(item["work_id"], {})
+        item["priority"] = frozen.get("priority", item["priority"])
+        completed_split = frozen.get("completed_temporal_split", {})
+        for field in ("split", "split_plan_id"):
+            if field in completed_split:
+                item["temporal_split"][field] = completed_split[field]
     _advance_local_workset(
         workset,
         items,

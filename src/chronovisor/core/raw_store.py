@@ -40,8 +40,10 @@ RawStorageKind = Literal[
 RAW_REFERENCE_SCHEMA = "chronovisor.raw-reference.v1"
 _LEGACY_ARCHIVE_BASENAME_RE = re.compile(r"^legacy-part-[0-9]{3}\.tar\.zst$")
 _SEGMENT_SNAPSHOT_CACHE_SIZE = 8
+_SEGMENT_INDEX_CACHE_SIZE = 8192
 _SEGMENT_SNAPSHOT_RETRIES = 3
 SegmentSnapshotSignature = tuple[tuple[str, int, int, int, int, int], ...]
+SegmentIndexIdentity = tuple[int, int, int, int, int]
 
 
 def committed_event_spans(
@@ -156,6 +158,9 @@ class RawStore:
         ],
     ] = OrderedDict()
     _segment_snapshots_lock = threading.Lock()
+    _segment_index_commits: OrderedDict[
+        Path, tuple[SegmentIndexIdentity, tuple[RawSegmentCommit, ...]]
+    ] = OrderedDict()
 
     def __init__(self, raw_dir: Path, *, mode: RawLayoutMode | str | None = None):
         self.raw_dir = raw_dir.expanduser().resolve(strict=False)
@@ -193,10 +198,7 @@ class RawStore:
             if manifest_path.name.startswith("legacy-part-"):
                 continue
             self._assert_safe_segment_index_path(manifest_path)
-            try:
-                commits = manifest_commits(manifest_path)
-            except RawSegmentCorrupt:
-                raise
+            commits = self._read_segment_index(manifest_path, sealed=True)
             segment_name = manifest_path.name.removesuffix(".manifest.json")
             segment_path = manifest_path.with_name(f"{segment_name}.jsonl.zst")
             for commit in commits:
@@ -272,7 +274,7 @@ class RawStore:
                 raise RawSegmentCorrupt(
                     f"open segment journal has no safe data file: {commit_path.name}"
                 )
-            for commit in read_commits(commit_path):
+            for commit in self._read_segment_index(commit_path, sealed=False):
                 yield RawUnit(
                     raw_id=commit.raw_id,
                     storage="segment_open",
@@ -283,6 +285,36 @@ class RawStore:
                     captured_at=commit.captured_at,
                     commit=commit,
                 )
+
+    def _segment_index_identity(self, path: Path) -> SegmentIndexIdentity:
+        self._assert_safe_segment_index_path(path)
+        identity = path.lstat()
+        if not stat.S_ISREG(identity.st_mode):
+            raise RawSegmentCorrupt("Raw segment index is not a regular file")
+        return (
+            identity.st_dev, identity.st_ino, identity.st_size,
+            identity.st_mtime_ns, identity.st_ctime_ns,
+        )
+
+    def _read_segment_index(
+        self, path: Path, *, sealed: bool
+    ) -> tuple[RawSegmentCommit, ...]:
+        # A busy journal must not force every retry to reparse unchanged history.
+        # This cache lives only in this process; device/inode checks stay exact.
+        before = self._segment_index_identity(path)
+        with self._segment_snapshots_lock:
+            cached = self._segment_index_commits.get(path)
+            if cached is not None and cached[0] == before:
+                self._segment_index_commits.move_to_end(path)
+                return cached[1]
+        commits = manifest_commits(path) if sealed else read_commits(path)
+        if self._segment_index_identity(path) == before:
+            with self._segment_snapshots_lock:
+                self._segment_index_commits[path] = (before, commits)
+                self._segment_index_commits.move_to_end(path)
+                while len(self._segment_index_commits) > _SEGMENT_INDEX_CACHE_SIZE:
+                    self._segment_index_commits.popitem(last=False)
+        return commits
 
     def _assert_safe_segment_index_path(self, path: Path) -> None:
         """Reject journal/manifest symlinks before they define Raw membership."""

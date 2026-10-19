@@ -9,7 +9,10 @@ import pytest
 from chronovisor.core import canonical_json
 from chronovisor.recall import recall_distillation as distill
 from chronovisor.recall import recall_distillation_store as store
-from chronovisor.recall.recall_distillation_workset import DistillationWorkset
+from chronovisor.recall.recall_distillation_workset import (
+    DistillationWorkset,
+    DistillationWorksetError,
+)
 
 
 def _sealed_counterfactual_exposure(
@@ -405,6 +408,67 @@ def test_counterfactual_payload_change_creates_new_work(
     )
     assert second.written == 1
     assert counterfactual.calls == 2
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_counterfactual_reenqueue_keeps_frozen_scheduling_across_cohort_rotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, completed: bool
+) -> None:
+    plan = {"artifact_id": "a" * 64, "assignments": {"rally-1": "test"}}
+    age_bands = {"rally-1": "locked-test"}
+    monkeypatch.setattr(distill, "_read_split_plan", lambda _root: plan)
+    monkeypatch.setattr(distill, "_scheduling_split_plan_id", lambda value: value["artifact_id"])
+    monkeypatch.setattr(distill, "_scheduling_age_bands", lambda *_args: age_bands)
+    monkeypatch.setattr(distill, "committed_raw_watermark", lambda _path: "raw-1")
+    rally = {
+        "rally_id": "rally-1", "session_cluster_id": "session-1",
+        "as_of": "2026-10-10T00:00:00Z",
+        "actual_answer_refs": [{"semantic_sha256": "answer"}],
+    }
+    snapshots = {"rally-1": {
+        "snapshot_sha256": "snapshot",
+        "candidates": [{"candidate_id": "candidate-1", "text_sha256": "text-1"}],
+    }}
+    kwargs = dict(
+        execute=False, root=tmp_path,
+        config=distill.DistillationConfig(enabled=True, teacher_profile=distill.LOCAL_SINGLE_PROFILE),
+        counterfactual=SimpleNamespace(local=True), snapshots=snapshots,
+        rally_by_id={"rally-1": rally}, texts={},
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl", label_rows=[],
+    )
+    assert distill._run_counterfactual_block(**kwargs).pending
+    workset = DistillationWorkset(store.distillation_dir(tmp_path) / "local-workset.sqlite3")
+    first, _ = distill._prepare_counterfactual_work(root=tmp_path, snapshots=snapshots, rally_by_id={"rally-1": rally})
+    work_id = first[0]["work_id"]
+    assert workset.work_item_scheduling([work_id]) == {work_id: {"priority": 30}}
+    if completed:
+        claims = workset.claim("local-counterfactual", 1, "fixture", 300)
+        workset.commit(claims, [{"status": "completed", "completion_ref": "label-ledger:" + "d" * 64, "completion_digest": "d" * 64}])
+        frozen = workset.work_item_identity(work_id)
+
+    plan.update(artifact_id="b" * 64, assignments={"rally-1": "train"})
+    age_bands["rally-1"] = "old-history"
+    store.append_chain(
+        store.distillation_dir(tmp_path) / "candidate-ledger.jsonl",
+        {"kind": "fixture", "sequence": 1},
+    )
+    changed, _ = distill._prepare_counterfactual_work(root=tmp_path, snapshots=snapshots, rally_by_id={"rally-1": rally})
+    assert changed[0]["priority"] == 10
+    assert changed[0]["work_id"] == work_id
+    assert distill._run_counterfactual_block(**kwargs).pending is not completed
+    assert workset.work_item_scheduling([work_id])[work_id]["priority"] == 30
+    identity = workset.work_item_identity(work_id)
+    assert identity is not None
+    if completed:
+        assert identity == frozen
+        assert workset.status("local-counterfactual")["completed"] == 1
+    else:
+        assert identity["temporal_split"]["split"] == "train"
+        assert workset.status("local-counterfactual")["ready"] == 1
+    rally["session_cluster_id"] = "changed-source-group"
+    with pytest.raises(DistillationWorksetError, match="identity conflict"):
+        distill._run_counterfactual_block(**kwargs)
+    assert workset.work_item_identity(work_id) == identity
 
 
 def test_counterfactual_without_sealed_exposure_defers_without_label_or_attempt(

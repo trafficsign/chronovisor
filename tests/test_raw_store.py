@@ -542,6 +542,69 @@ def test_committed_snapshot_fails_closed_when_indexes_keep_changing(
         RawStore(raw_dir, mode="v2").committed_segment_snapshot()
 
 
+@pytest.mark.parametrize("sealed", [False, True])
+def test_snapshot_retry_does_not_reparse_unchanged_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sealed: bool
+) -> None:
+    raw_dir = tmp_path / "raw"
+    source = tmp_path / "session.jsonl"
+    payload = b'{"source":"fixture"}\n'
+    source.write_bytes(payload)
+    historical = _append(raw_dir, source, payload)
+    if sealed:
+        seal_segment(historical.data_path, remove_open=True)
+        index_path = next(raw_dir.glob("**/*.manifest.json"))
+    else:
+        index_path = historical.commit_path
+    _append(raw_dir, source, payload, host="codex", raw_id="save-active.md", idempotency_key="active")
+    reader_name = "manifest_commits" if sealed else "read_commits"
+    original = getattr(raw_store_module, reader_name)
+    history_reads = 0
+
+    def read_while_capture_continues(path: Path):
+        nonlocal history_reads
+        commits = original(path)
+        if path == index_path:
+            history_reads += 1
+            _append(
+                raw_dir, source, payload, host="codex",
+                raw_id=f"save-appended-{history_reads}.md",
+                idempotency_key=f"appended-{history_reads}", after_line=history_reads,
+            )
+        return commits
+
+    monkeypatch.setattr(raw_store_module, reader_name, read_while_capture_continues)
+    units, watermark = RawStore(raw_dir, mode="v2").committed_segment_snapshot()
+    assert history_reads == 1
+    assert {unit.raw_id for unit in units} == {"save-shared.md", "save-active.md", "save-appended-1.md"}
+    assert RawStore(raw_dir, mode="v2").committed_segment_watermark() == watermark
+
+
+def test_index_cache_does_not_publish_a_parse_that_raced_an_append(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw_dir = tmp_path / "raw"
+    source = tmp_path / "session.jsonl"
+    payload = b'{"source":"fixture"}\n'
+    source.write_bytes(payload)
+    _append(raw_dir, source, payload)
+    original = raw_store_module.read_commits
+    reads = 0
+
+    def append_after_read(path: Path):
+        nonlocal reads
+        commits = original(path)
+        reads += 1
+        if reads == 1:
+            _append(raw_dir, source, payload, raw_id="save-second.md", idempotency_key="second", after_line=1)
+        return commits
+
+    monkeypatch.setattr(raw_store_module, "read_commits", append_after_read)
+    units, _ = RawStore(raw_dir, mode="v2").committed_segment_snapshot()
+    assert reads == 2
+    assert {unit.raw_id for unit in units} == {"save-shared.md", "save-second.md"}
+
+
 def test_committed_snapshot_cache_includes_index_ctime(
     tmp_path: Path, monkeypatch
 ) -> None:

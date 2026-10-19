@@ -292,6 +292,22 @@ def test_advance_refuses_incompatible_temporal_split_rebind(
     assert workset.watermark() == {"source": 1}
 
 
+def test_priority_lookup_is_batched_and_does_not_relax_immutable_priority(
+    tmp_path: Path,
+) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    items = [_item(f"item-{index}", priority=index) for index in range(501)]
+    workset.advance(items, {"source": 1})
+    before = workset.status()
+    assert workset.work_item_scheduling([item["work_id"] for item in items] + ["absent"]) == {
+        f"item-{index}": {"priority": index} for index in range(501)
+    }
+    assert workset.status() == before
+    with pytest.raises(DistillationWorksetError, match="identity conflict"):
+        workset.advance([_item("item-0", priority=99)], {"source": 2})
+    assert workset.watermark() == {"source": 1}
+
+
 def test_advance_split_rebind_rejects_tampered_metadata(tmp_path: Path) -> None:
     path = tmp_path / "workset.sqlite3"
     workset = DistillationWorkset(path)
