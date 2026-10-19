@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import importlib
 import json
+import logging
 import math
 import os
 import re
@@ -15676,6 +15677,10 @@ def _compare_and_commit_counterfactual(
             "counterfactual_data_reject"
             if isinstance(exc, _CounterfactualDataRejected)
             else "counterfactual_invalid"
+        )
+        logging.getLogger(__name__).warning(
+            "counterfactual_failure class=%s cause_type=%s cause_sha256=%s",
+            failure_class, type(exc).__name__, hashlib.sha256(str(exc).encode()).hexdigest(),
         )
         workset.commit(
             [claim],

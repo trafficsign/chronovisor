@@ -1198,3 +1198,9 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-20 03:44 JST — 判断：既に旧sourceで完了済みとなった03:15の1件は、source切替後に新publisherを旧sourceとしてR4へ帰属させない。独立したread-only設計確認でも、既存の跨source回復は旧source時点のsealed pending markerがあるfailure経路だけで、今回のvalid labelには同等の証明がないと確認。事後markerを作ってsource照合を外すことは採用せず、旧labelとattempt2 completionを保持し、この歴史的1件のR4未発行を明示的な未完了として残す。新sourceの通常回復を修正し、今後の同じ中断でreceiptが失われないことを検証する。prompt/schema/frozen inputs、source gate、quota、attempt上限は変更しない。
 
 - 2026-10-20 03:47 JST — 独立レビューで、source切替後の旧labelを回収するとsource照合の拒否より先にworksetを完了へ進める潜在経路も確認した。回収batchの現source bindingを一度検証し、commit前に全sourceフィールドを照合、公開後の既存再照合も維持する。commit/tree相違の回帰2件を追加し、16新回帰を含む関連471件が成功。旧sourceの履歴的未発行を新版sourceとして採用せず、履歴・source gateを保持する。
+
+- 2026-10-20 03:54 JST — 是正前の定常窓を00:52:08〜03:52:11、3.0007時間で終了。検索114終端（正常108・隔離6）、新規流入0・再open2、純減112＝895.8件/日、残27933件、同じ実流入なら31.18日。lint22正常終端、新規0・再open4、純減18＝144.0件/日、残51件、同条件8.50時間。teacherは39 label中R4受入38＝303.9件/日、過去平均流入763.7に対し純排出−459.8件/日、平日1052.4に対し−748.5件/日で増加し、解消ETAはない。teacherの過去流入を別queueの検索/lintへ直接流用しない。workset新規128は既存historyの展開であり、新しいsource rallyの流入は0、teacher pendingは1571→1660。この旧source窓を是正後の受入とはしない。
+
+- 2026-10-20 03:54 JST — materialization178標本は全てdirty0・読取error0。検索authority118/118はgenerationあり・成功、旧30/133のmissingは本窓では0。単一slotの共有生成は検索2870.6秒、teacher/CF1722.9秒、ingest2918.0秒ほか、検索admission待ち4215.0秒（中央値36.54秒/p95 86.87秒）、distillationのresource待ち1235.8秒。research preemption/cancel0、resource/scheduler defer27件。失敗は少なくともCF6（invalid5・timeout1）とmainline3（Raw索引競合1・R4公開2）、後者のR4未発行gapは同じ旧label1件のまま。旧期間のCF細因を一般分類から断定しない。
+
+- 2026-10-20 03:54 JST — 判断：非model律速の原因を観測できないまま断定しないため、CF例外の型とmessage SHA-256だけを既存通常ログへ追加。本文・質問・回答・record IDは出さず、既存state/teacher schema、分類、hashによる既存失敗集計、retry3、300秒、12000-byte入力上限、prompt/frozen inputsは一切変更しない。合成private文字列非露出とretry/quarantine不変の4回帰を追加し、関連372件成功。未配備5da77cc6のCI/package証跡は保持し、安全境界を取る前の所有待機helperだけを終了した（production signal0）。この診断を同じ次回配備へまとめ、最終SHAの必須CIを確認する。
