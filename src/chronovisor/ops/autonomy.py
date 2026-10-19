@@ -1985,6 +1985,47 @@ def _review_deferred_duplicate(
     )
 
 
+def _merge_duplicate_observation(
+    state: ConvergenceStore,
+    *,
+    candidate_key: str,
+    candidate: dict[str, Any],
+    input_data: dict[str, Any],
+    local_decision: dict[str, Any],
+    eligible_keys: set[str] | None,
+    now: datetime | None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Keep identical terminal observations without refreshing their timestamps."""
+
+    metadata = {
+        "candidate": candidate,
+        "local_action": local_decision.get("action"),
+        "local_reason": local_decision.get("reason"),
+        "local_proposal": local_decision,
+    }
+    # A targeted run must still check its same-source history under the writer
+    # lock. Normal scans can reuse the exact-version read cache for no-op work.
+    item = state.get(candidate_key) if eligible_keys is None else None
+    if (
+        item is not None
+        and item.get("status") in {"applied", "rejected", "quarantined"}
+        and _without_observation_timestamps(item.get("metadata"))
+        == _without_observation_timestamps(metadata)
+    ):
+        return {"item": item, "created": False, "changed": False, "dry_run": dry_run}
+    return state.merge_item(
+        lane=DUPLICATE_FRONTIER_LANE,
+        source_id=f"{candidate['left']}<->{candidate['right']}",
+        input_data=input_data,
+        resolver_version=DUPLICATE_FRONTIER_RESOLVER_VERSION,
+        metadata=metadata,
+        now=now,
+        dry_run=dry_run,
+        supersede_eligible_keys=eligible_keys,
+    )
+
+
 def resolve_deferred_duplicates_with_frontier(
     records: list[dict[str, Any]],
     *,
@@ -2101,20 +2142,15 @@ def resolve_deferred_duplicates_with_frontier(
                 }
             )
             continue
-        merged = state.merge_item(
-            lane=DUPLICATE_FRONTIER_LANE,
-            source_id=f"{candidate['left']}<->{candidate['right']}",
+        merged = _merge_duplicate_observation(
+            state,
+            candidate_key=candidate_key,
+            candidate=candidate,
             input_data=input_data,
-            resolver_version=DUPLICATE_FRONTIER_RESOLVER_VERSION,
-            metadata={
-                "candidate": candidate,
-                "local_action": local_decision.get("action"),
-                "local_reason": local_decision.get("reason"),
-                "local_proposal": local_decision,
-            },
+            local_decision=local_decision,
+            eligible_keys=eligible_keys,
             now=now,
             dry_run=dry_run,
-            supersede_eligible_keys=eligible_keys,
         )
         item = merged["item"]
         if item is None:

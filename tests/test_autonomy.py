@@ -1423,6 +1423,63 @@ def test_frontier_duplicate_key_is_pair_order_stable_and_content_sensitive(
     assert len(store.list_items(lane=autonomy.DUPLICATE_FRONTIER_LANE)) == 2
 
 
+@pytest.mark.parametrize("targeted", [False, True])
+def test_terminal_duplicate_timestamp_refresh_keeps_history_and_scope_guards(
+    monkeypatch, tmp_path: Path, targeted: bool,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    _write_page(pages / "a.md", "Alpha", "A")
+    _write_page(pages / "b.md", "Beta", "B")
+    monkeypatch.setattr(autonomy, "find_page", lambda page_id: pages / f"{page_id}.md")
+    monkeypatch.setattr(autonomy, "DECISIONS_FILE", tmp_path / "decisions.jsonl")
+    monkeypatch.setattr(autonomy, "_now", lambda: NOW.isoformat())
+    store = _convergence_store(tmp_path)
+    record = _deferred_record("a", "b")
+    first = autonomy.resolve_deferred_duplicates_with_frontier(
+        [record], convergence_store=store, budget=_frontier_budget(calls=1),
+        reviewer=lambda _: {"decision": "keep_both", "confidence": 0.91, "summary": "Distinct scope"},
+        now=NOW,
+    )
+    assert first["kept_both"] == 1
+    item = store.list_items(lane=autonomy.DUPLICATE_FRONTIER_LANE)[0]
+    before_state = store.state_file.read_bytes()
+    before_events = store.events_file.read_bytes()
+    before_item = store.get(item["key"])
+    original_merge = store.merge_item
+    merges = []
+
+    def merge(**kwargs):
+        merges.append(kwargs)
+        return original_merge(**kwargs)
+
+    monkeypatch.setattr(store, "merge_item", merge)
+    monkeypatch.setattr(autonomy, "_now", lambda: (NOW + timedelta(minutes=1)).isoformat())
+    repeated = autonomy.resolve_deferred_duplicates_with_frontier(
+        [record], convergence_store=store, budget=_frontier_budget(calls=1),
+        reviewer=lambda _: pytest.fail("terminal work repeated the model call"),
+        now=NOW + timedelta(minutes=1),
+        eligible_keys={item["key"]} if targeted else None,
+    )
+    assert repeated["frontier_calls"] == 0
+    assert repeated["status_counts"] == {"rejected": 1}
+    assert len(merges) == int(targeted)
+    if not targeted:
+        assert store.state_file.read_bytes() == before_state
+        assert store.events_file.read_bytes() == before_events
+        assert store.get(item["key"]) == before_item
+
+    # A substantive observation change still reaches the locked merge path.
+    changed = {**record, "score": float(record["score"]) - 0.01}
+    autonomy.resolve_deferred_duplicates_with_frontier(
+        [changed], convergence_store=store, budget=_frontier_budget(calls=1),
+        reviewer=lambda _: pytest.fail("existing terminal decision was reset"),
+        now=NOW + timedelta(minutes=2),
+    )
+    assert len(merges) == int(targeted) + 1
+    assert store.get(item["key"])["metadata"]["candidate"]["score"] == changed["score"]
+
+
 def test_typed_yaml_snapshot_review_boundaries_build_both_prompts(
     tmp_path: Path,
 ) -> None:
