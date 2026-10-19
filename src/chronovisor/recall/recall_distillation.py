@@ -412,10 +412,7 @@ class _WorkerCounterfactual:
     def _compare(
         self, payload: Mapping[str, Any], model_turn: _WorkerModelTurn
     ) -> Mapping[str, Any]:
-        base = {
-            key: payload[key]
-            for key in ("rally_id", "candidate_id", "query", "context")
-        }
+        base = {key: payload[key] for key in ("rally_id", "candidate_id", "query", "context")}
         arm0 = _worker_call(
             "answer",
             "recall.distill.answer_generator",
@@ -426,6 +423,18 @@ class _WorkerCounterfactual:
             deadline_ms=self.deadline_ms,
             model_turn=model_turn,
         )
+        a0 = str(arm0.get("answer") or "")
+        try:
+            # A second answer cannot shrink either blind order's utility input.
+            _check_worker_input_size(
+                {**base, "answer_a": a0, "answer_b": "", "blind_order": "a_first"},
+                max_input_bytes=self.max_input_bytes,
+            )
+        except DistillationError:
+            logging.getLogger(__name__).warning(
+                "counterfactual_input_early_reject skipped_answer_generations=1",
+            )
+            raise
         arm1 = _worker_call(
             "answer",
             "recall.distill.answer_generator",
@@ -436,7 +445,6 @@ class _WorkerCounterfactual:
             deadline_ms=self.deadline_ms,
             model_turn=model_turn,
         )
-        a0 = str(arm0.get("answer") or "")
         a1 = str(arm1.get("answer") or "")
         first_a = (
             int.from_bytes(
@@ -454,10 +462,7 @@ class _WorkerCounterfactual:
                 "utility",
                 "recall.distill.utility_judge",
                 {
-                    "rally_id": base["rally_id"],
-                    "candidate_id": base["candidate_id"],
-                    "query": base["query"],
-                    "context": base["context"],
+                    **base,
                     "answer_a": a0 if a_first else a1,
                     "answer_b": a1 if a_first else a0,
                     "blind_order": "a_first" if a_first else "b_first",
@@ -513,6 +518,11 @@ class _WorkerModelTurn:
     lease: Any = None
 
 
+def _check_worker_input_size(payload: Mapping[str, Any], *, max_input_bytes: int) -> None:
+    if len(canonical_json.canonical_json_bytes_strict(payload)) > min(max_input_bytes, 12_000):
+        raise DistillationError("distillation worker input exceeds fixed byte limit")
+
+
 def _worker_call(
     operation: str,
     role: str,
@@ -544,9 +554,7 @@ def _worker_call(
         "input": dict(payload),
         "deadline_ms": deadline_ms,
     }
-    input_ceiling = min(max_input_bytes, 12_000)
-    if len(canonical_json.canonical_json_bytes_strict(payload)) > input_ceiling:
-        raise DistillationError("distillation worker input exceeds fixed byte limit")
+    _check_worker_input_size(payload, max_input_bytes=max_input_bytes)
     encoded = canonical_json.canonical_json_strict(request)
     with ExitStack() as call_stack:
         turn = model_turn or _WorkerModelTurn(call_stack)
