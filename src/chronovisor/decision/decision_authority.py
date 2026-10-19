@@ -899,6 +899,25 @@ def _local_consensus_proof_error(
     return None
 
 
+def _configured_reasoning_provenance_error(route: Mapping[str, Any]) -> str | None:
+    if "configured_local_reasoning" not in route:
+        return None
+    reasoning = route["configured_local_reasoning"]
+    if (
+        route.get("location") != "local"
+        or not isinstance(reasoning, Mapping)
+        or set(reasoning) != {"level", "num_predict", "num_ctx"}
+        or not isinstance(reasoning.get("level"), str)
+        or reasoning.get("level") not in {"low", "medium", "xhigh"}
+        or type(reasoning.get("num_predict")) is not int
+        or not 1 <= reasoning["num_predict"] <= 131_072
+        or type(reasoning.get("num_ctx")) is not int
+        or not 1 <= reasoning["num_ctx"] <= 262_144
+    ):
+        return "route configured reasoning is invalid"
+    return None
+
+
 def route_provenance_error(routes: object) -> str | None:
     if not isinstance(routes, list) or len(routes) != 3:
         return "route triplet is invalid"
@@ -918,8 +937,10 @@ def route_provenance_error(routes: object) -> str | None:
             "endpoint_sha256",
             "revision",
             "ollama",
-        }:
+        } | ({"configured_local_reasoning"} if "configured_local_reasoning" in route else set()):
             return "route fields are invalid"
+        if error := _configured_reasoning_provenance_error(route):
+            return error
         provider = route.get("provider")
         model = route.get("model")
         location = route.get("location")
@@ -1004,8 +1025,10 @@ def single_route_provenance_error(routes: object) -> str | None:
         "endpoint_sha256",
         "revision",
         "ollama",
-    }:
+    } | ({"configured_local_reasoning"} if "configured_local_reasoning" in route else set()):
         return "single authority route fields are invalid"
+    if error := _configured_reasoning_provenance_error(route):
+        return error
     provider = route.get("provider")
     model = route.get("model")
     location = route.get("location")

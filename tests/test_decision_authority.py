@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 
 import pytest
 
@@ -193,6 +194,26 @@ def test_semantic_authority_compare_rejects_adoption_epoch_change() -> None:
         compare_semantic_authority(expected, current, lane="example_lane")
         == "decision authority changed before effect"
     )
+
+
+def test_legacy_authority_does_not_match_configured_local_reasoning() -> None:
+    legacy = _production_authority()
+    artifact = seal_semantic_artifact(
+        {"schema_version": 1, "review": _review(legacy)},
+        authority=legacy, lane="example_lane",
+    )
+    original = json.dumps(artifact, sort_keys=True)
+    current = _production_authority()
+    current["router"]["routes"][0]["configured_local_reasoning"] = {
+        "level": "medium", "num_predict": 16_384, "num_ctx": 65_536,
+    }
+
+    assert semantic_authority_shape_error(legacy, lane="example_lane") is None
+    assert semantic_authority_shape_error(current, lane="example_lane") is None
+    assert compare_semantic_authority(
+        artifact["authority"], current, lane="example_lane",
+    ) == "decision authority changed before effect"
+    assert json.dumps(artifact, sort_keys=True) == original
 
 
 def test_semantic_authority_rejects_incomplete_or_mismatched_verdict() -> None:
@@ -631,3 +652,48 @@ def test_qualification_lane_uses_runtime_routes_without_legacy_adoption() -> Non
         )
         is None
     )
+
+
+@pytest.mark.parametrize("single", [False, True])
+@pytest.mark.parametrize(
+    "invalid",
+    [None, {}, {"level": "high", "num_predict": 16384, "num_ctx": 65536},
+     {"level": [], "num_predict": 16384, "num_ctx": 65536},
+     {"level": "low", "num_predict": True, "num_ctx": 65536},
+     {"level": "low", "num_predict": 131073, "num_ctx": 65536},
+     {"level": "low", "num_predict": 16384, "num_ctx": 262145},
+     {"level": "low", "num_predict": 16384, "num_ctx": 65536, "extra": "synthetic"}],
+)
+def test_configured_reasoning_provenance_remains_strict(single, invalid) -> None:
+    from chronovisor.core import runtime_config
+    from chronovisor.decision.decision_authority import (
+        route_provenance_error,
+        single_route_provenance_error,
+    )
+
+    routes = _production_authority()["router"]["routes"]
+    validator = route_provenance_error
+    if single:
+        routes = [dict(routes[0], role="classification.authority", provider="omlx",
+                       model=runtime_config.SINGLE_MODEL_RUNTIME_MODEL,
+                       revision=runtime_config.SINGLE_MODEL_RUNTIME_REVISION,
+                       protocol="omlx-native", ollama=None)]
+        validator = single_route_provenance_error
+    routes[0]["configured_local_reasoning"] = {
+        "level": "xhigh", "num_predict": 16384, "num_ctx": 65536,
+    }
+    assert validator(routes) is None
+    routes[0]["configured_local_reasoning"] = invalid
+    assert validator(routes) == "route configured reasoning is invalid"
+
+
+def test_reasoning_levels_do_not_make_model_identities_independent() -> None:
+    from chronovisor.decision.decision_authority import route_provenance_error
+
+    routes = _production_authority()["router"]["routes"]
+    for route, level in zip(routes, ("low", "medium", "xhigh"), strict=True):
+        route["model"] = "same-model"
+        route["configured_local_reasoning"] = {
+            "level": level, "num_predict": 16384, "num_ctx": 65536,
+        }
+    assert route_provenance_error(routes) == "route identities are not independent"

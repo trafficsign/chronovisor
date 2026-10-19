@@ -2021,6 +2021,20 @@ class DecisionRouter:
                 decision_artifact_root = default_store_root(chronovisor_root)
         self.decision_artifact_store = DecisionArtifactStore(decision_artifact_root)
 
+    def _configured_route_provenance(
+        self, provenance: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Bind current sampler overrides without changing model identity."""
+
+        from chronovisor.core.model_execution import local_reasoning_settings
+
+        result = dict(provenance)
+        if result.get("location") == "local":
+            reasoning = local_reasoning_settings(result["role"], result["model"])
+            if reasoning is not None:
+                result["configured_local_reasoning"] = reasoning
+        return result
+
     def authority_router(self, *, refresh: bool = False) -> dict[str, Any]:
         """Return ordered safe route provenance for one authority epoch."""
 
@@ -2029,7 +2043,8 @@ class DecisionRouter:
         )
         if self._route_provenance_snapshot is not None and not refresh:
             routes = [
-                dict(self._route_provenance_snapshot[role]) for role in route_names
+                self._configured_route_provenance(self._route_provenance_snapshot[role])
+                for role in route_names
             ]
             return {"source": self.policy.source, "error": None, "routes": routes}
 
@@ -2101,7 +2116,8 @@ class DecisionRouter:
             "source": self.policy.source,
             "error": error,
             "routes": [
-                dict(route_rows[role]) for role in route_names if role in route_rows
+                self._configured_route_provenance(route_rows[role])
+                for role in route_names if role in route_rows
             ],
         }
 
@@ -2109,9 +2125,9 @@ class DecisionRouter:
         if self._route_provenance_snapshot is None:
             self.authority_router()
         if self._route_provenance_snapshot is not None:
-            return dict(self._route_provenance_snapshot[role])
+            return self._configured_route_provenance(self._route_provenance_snapshot[role])
         route = self.routes[role]
-        return {
+        return self._configured_route_provenance({
             "role": route.role,
             "provider": route.provider,
             "model": route.model,
@@ -2120,7 +2136,7 @@ class DecisionRouter:
             "endpoint_sha256": route.endpoint_sha256,
             "revision": route.revision,
             "ollama": None,
-        }
+        })
 
     def _artifact_identity(
         self,

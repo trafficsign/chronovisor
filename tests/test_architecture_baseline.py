@@ -2634,7 +2634,7 @@ def test_baseline_labels_repository_contract_hash_semantics(
     schema = hashes["production_schema_manifest"]
     signature = hashes["production_signature_manifest"]
     assert authority["lane_contract_case_manifest_sha256"] == (
-        "b3efb577ca3c4bca9000625db56154d03942233af041f5af992f9e7ff666b8b8"
+        "0453c62e52b5f6015f9889958f6b51ab903b0fe9abba3553ed562245f9080928"
     )
     assert schema["canonical_mapping_sha256"]["sha256"] == (
         "e83ea1675494d831585ad74ec3dcadcd1cb05ffb97af9ee15582b62140aeaf52"
@@ -2963,7 +2963,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 44
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1582
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1583
     assert {
         field: counts[field]
         for field in (
@@ -2976,7 +2976,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 44,
-        "cross_domain_sites": 1582,
+        "cross_domain_sites": 1583,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,

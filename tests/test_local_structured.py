@@ -112,9 +112,9 @@ class QueueTransport:
 
 
 def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> None:
-    assert STRUCTURED_GENERATION_POLICY_VERSION == 16
+    assert STRUCTURED_GENERATION_POLICY_VERSION == 17
     assert structured_generation_policy() == {
-        "version": 16,
+        "version": 17,
         "temperature": 0,
         "seed": 0,
         "think": {
@@ -189,7 +189,10 @@ def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> No
                 "revision": QWEN_FLASH_REVISION,
                 "model_type": QWEN_FLASH_MODEL_TYPE,
                 "architecture": QWEN_FLASH_ARCHITECTURE,
-                "initial": {"think": "selected", "format": "json_schema"},
+                "initial": {
+                    "think": "selected", "format": "json_schema",
+                    "reasoning_budget_tokens_for_string_think": -1,
+                },
             },
             QWEN_STRUCTURED_MODEL: {
                 "initial": {"think": "selected_boolean", "format": None},
@@ -1140,7 +1143,7 @@ def test_active_marker_is_atomic_redacted_and_removed_after_session(
     assert audit["context_tokens"] == 32_768
     assert audit["requested_num_ctx"] == 32_768
     assert isinstance(audit["required_num_ctx"], int)
-    assert audit["structured_generation_policy_version"] == 16
+    assert audit["structured_generation_policy_version"] == 17
     assert audit["structured_generation_policy_sha256"] == (
         structured_generation_policy_sha256()
     )

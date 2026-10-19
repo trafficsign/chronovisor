@@ -48,7 +48,7 @@ SAFE_RUNTIME_ROLE_RE = re.compile(r"^[a-z][a-z0-9._-]{0,127}$")
 LOCAL_ACTIVITY_PHASES = frozenset(
     {"trigger", "load", "context", "generate", "repair", "validate", "vote"}
 )
-STRUCTURED_GENERATION_POLICY_VERSION = 16
+STRUCTURED_GENERATION_POLICY_VERSION = 17
 STRUCTURED_GENERATION_TEMPERATURE = 0
 STRUCTURED_GENERATION_SEED = 0
 _DEFAULT_STRUCTURED_MEMORY_RESERVE_GIB = 16
@@ -226,7 +226,10 @@ def structured_generation_policy() -> dict[str, Any]:
                 "revision": QWEN_FLASH_REVISION,
                 "model_type": QWEN_FLASH_MODEL_TYPE,
                 "architecture": QWEN_FLASH_ARCHITECTURE,
-                "initial": {"think": "selected", "format": "json_schema"},
+                "initial": {
+                    "think": "selected", "format": "json_schema",
+                    "reasoning_budget_tokens_for_string_think": -1,
+                },
             },
             _QWEN_STRUCTURED_COMPAT_MODEL: {
                 "initial": {"think": "selected_boolean", "format": None},
