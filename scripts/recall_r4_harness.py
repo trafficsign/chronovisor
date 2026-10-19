@@ -2643,7 +2643,9 @@ def _production_ledger_checkpoint(
         "st_mtime_ns": current["st_mtime_ns"],
         "st_ctime_ns": current["st_ctime_ns"],
     }
-    if dict(file_state) != expected:
+    from chronovisor.recall.recall_file_identity import persisted_file_state_matches
+
+    if not persisted_file_state_matches(file_state, expected, path=path):
         raise R4Error(f"production {ledger_name} checkpoint file state mismatch")
     if (
         _production_stat(checkpoint_path, label=f"production {ledger_name} checkpoint")
@@ -2972,20 +2974,9 @@ def _production_candidate_tail(
 
 
 def _stable_candidate_file_state(value: Any) -> dict[str, int]:
-    """Normalize durable candidate identity across APFS mount-id changes."""
+    from chronovisor.recall.recall_file_identity import stable_file_state
 
-    stable = {"size_bytes", "st_ino", "st_mtime_ns", "st_ctime_ns"}
-    if not isinstance(value, Mapping) or set(value) not in (
-        stable,
-        stable | {"st_dev"},
-    ):
-        return {}
-    result = {key: value[key] for key in stable}
-    return (
-        result
-        if all(type(item) is int and item >= 0 for item in result.values())
-        else {}
-    )
+    return stable_file_state(value)
 
 
 def _production_chain(
@@ -6439,6 +6430,8 @@ def validate_source_bound_authority_receipt(
 ) -> dict[str, Any]:
     """Re-derive the sole authority receipt from source and fixed production."""
 
+    from chronovisor.recall.recall_file_identity import persisted_identity_matches
+
     _reject_original_symlinks((("authority receipt", authority_path), ("R4 artifact", artifact_path)))
     source = _assert_source(source_root, source_commit)
     artifact = read_artifact(artifact_path)
@@ -6464,9 +6457,11 @@ def validate_source_bound_authority_receipt(
         raw, state = _authority_read_fd(output_fd, authority_path.name, label="authority receipt")
         if (
             hashlib.sha256(raw).hexdigest() != reference.get("file_sha256")
-            or output_identity != (reference.get("parent_dev"), reference.get("parent_ino"))
-            or (artifact_parent["st_dev"], artifact_parent["st_ino"])
-            != (reference.get("parent_dev"), reference.get("parent_ino"))
+            or not persisted_identity_matches(
+                reference.get("parent_dev"), reference.get("parent_ino"), os.fstat(output_fd),
+                volume=os.fstat(parent_fd), recorded_at_ns=state["st_mtime_ns"],
+            )
+            or (artifact_parent["st_dev"], artifact_parent["st_ino"]) != output_identity
         ):
             raise R4Error("authority receipt path binding is invalid")
         projection = _collect_authoritative_production(

@@ -31,6 +31,10 @@ from chronovisor.recall.recall_distillation_workset import (
     DistillationWorkset,
     DistillationWorksetError,
 )
+from chronovisor.recall.recall_file_identity import (
+    persisted_file_state_matches,
+    persisted_identity_matches,
+)
 
 ARCHIVE_SCHEMA = "chronovisor.recall-r4-workset-archive.v1"
 CUTOVER_SCHEMA = "chronovisor.recall-r4-workset-cutover.v1"
@@ -965,7 +969,13 @@ def _validate_candidate_binding(
     ):
         raise CutoverError("candidate manifest binding is invalid")
     current = _candidate_binding(root, prestate)
-    if current != dict(expected):
+    if (
+        any(current[key] != expected[key] for key in current if key != "file_state")
+        or not persisted_file_state_matches(
+            expected["file_state"], current["file_state"],
+            path=store.distillation_dir(root) / "candidate-ledger.jsonl",
+        )
+    ):
         raise CutoverError("candidate changed since archive manifest")
     return current
 
@@ -1191,8 +1201,12 @@ def cutover(
             _validate_candidate_binding(root, manifest.get("candidate"), before)
             if (
                 manifest.get("source") != source
-                or manifest.get("authority")
-                != {"device": authority[0], "inode": authority[1]}
+                or not isinstance(manifest.get("authority"), Mapping)
+                or not persisted_identity_matches(
+                    manifest["authority"].get("device"), manifest["authority"].get("inode"),
+                    store.distillation_dir(root).lstat(), volume=root.stat(),
+                    recorded_at_ns=manifest_path.stat().st_mtime_ns,
+                )
                 or _sqlite_identity(snapshot / old.name) != identity
                 or current_sha not in {identity.get("main_sha256"), fresh_sha}
             ):

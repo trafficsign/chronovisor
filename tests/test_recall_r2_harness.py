@@ -236,7 +236,8 @@ def test_delta_read_failure_reports_bounded_safe_counters() -> None:
 
 
 @pytest.mark.darwin_contract
-def test_clone_checkpoint_rebind_keeps_delta_incremental(tmp_path: Path) -> None:
+@pytest.mark.parametrize("renumbered", [False, True])
+def test_clone_checkpoint_rebind_keeps_delta_incremental(tmp_path: Path, renumbered: bool) -> None:
     from chronovisor.core import raw_segment
     from chronovisor.core.raw_store import RawStore
     from chronovisor.core.store import RuntimeContext, init_chronovisor
@@ -260,6 +261,18 @@ def test_clone_checkpoint_rebind_keeps_delta_incremental(tmp_path: Path) -> None
     )
     catalog.advance(base / "raw", base, 4096)
     catalog.sync_historical_index(base / "raw", base)
+    if renumbered:
+        for checkpoint_path in (
+            catalog._catalog_checkpoint_path(base),
+            catalog._index_checkpoint_path(catalog.historical_index_path(base)),
+        ):
+            checkpoint = store.read_sealed(checkpoint_path)
+            for key in ("file_state", "catalog_file_state"):
+                if key in checkpoint:
+                    checkpoint[key]["st_dev"] += 2
+            for key in ("schema", "namespace", "seal_sha256"):
+                checkpoint.pop(key, None)
+            store.write_sealed_state(checkpoint_path, checkpoint)
     shutil.copytree(base, clone, copy_function=shutil.copy2)
 
     source_catalog = catalog._read_catalog_checkpoint(base)

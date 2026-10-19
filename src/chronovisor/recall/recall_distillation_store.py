@@ -20,6 +20,7 @@ from chronovisor.core.canonical_json import (
     canonical_json_sha256_strict,
 )
 from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.recall.recall_file_identity import persisted_file_state_matches
 
 DISTILLATION_SCHEMA = "chronovisor.recall-distillation.v1"
 DISTILLATION_DIR = CHRONOVISOR_ROOT / "runtime" / "recall-distillation"
@@ -664,7 +665,7 @@ def _read_chain_checkpoint_details(path: Path) -> dict[str, Any] | None:
             )
         )
         or (checkpoint["records"] == 0) != (checkpoint["head_sha256"] == "")
-        or checkpoint.get("file_state") != current_state
+        or not persisted_file_state_matches(checkpoint.get("file_state"), current_state, path=path)
         or (current_state is None and checkpoint["records"] != 0)
         or ("generation" in checkpoint and not _valid_chain_generation(generation))
     ):
@@ -1213,7 +1214,7 @@ def _unique_index_checkpoint_matches(path: Path) -> bool:
     return (
         checkpoint.get("kind") == "unique-ledger-index-checkpoint"
         and checkpoint.get("index_name") == path.name
-        and checkpoint.get("file_state") == _ledger_file_state(path)
+        and persisted_file_state_matches(checkpoint.get("file_state"), _ledger_file_state(path), path=path)
     )
 
 
@@ -1687,8 +1688,7 @@ def read_chain_tail(
     if (
         parsed is not None
         and parsed[0] is not None
-        and parsed[0]["st_dev"] == state["st_dev"]
-        and parsed[0]["st_ino"] == state["st_ino"]
+        and persisted_file_state_matches(parsed[0], state, path=path, identity_only=True)
         and state["size_bytes"] < parsed[1]
     ):
         os.close(descriptor)
@@ -1715,8 +1715,7 @@ def read_chain_tail(
     cursor_state, offset, records, previous, cursor_generation = parsed
     same_identity = (
         cursor_state is not None
-        and cursor_state["st_dev"] == state["st_dev"]
-        and cursor_state["st_ino"] == state["st_ino"]
+        and persisted_file_state_matches(cursor_state, state, path=path, identity_only=True)
     )
     if (
         not same_identity
@@ -1741,7 +1740,7 @@ def read_chain_tail(
         )
 
     if checkpoint["records"] == records:
-        if state != cursor_state or state["size_bytes"] != offset:
+        if not persisted_file_state_matches(cursor_state, state, path=path) or state["size_bytes"] != offset:
             data = _read_pinned_ledger(descriptor, path, state)
             rows, decoded = _decode_verified_snapshot(path, state, data, strict=True)
             if decoded != checkpoint_head:

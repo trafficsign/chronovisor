@@ -37,6 +37,7 @@ from chronovisor.core.provider_profiles import (
     ProviderAdapterError,
     ProviderFailureCategory,
 )
+from chronovisor.recall.recall_file_identity import persisted_identity_matches
 
 OX_ALPHA_PROVIDER = "opencode-go"
 OX_ALPHA_ROUTE_MODEL = "opencode-go/deepseek-v4-flash"
@@ -787,8 +788,11 @@ class OpenCodeOxAlphaTeacher:
                 != "chronovisor.recall-r4-simulation-attestation.v1"
                 or payload.get("namespace") != "recall-distillation"
                 or payload.get("seal_sha256") != _sha256(unsigned)
-                or payload.get("owned_root")
-                != {"st_dev": root_stat.st_dev, "st_ino": root_stat.st_ino}
+                or not isinstance(payload.get("owned_root"), Mapping)
+                or not persisted_identity_matches(
+                    payload["owned_root"].get("st_dev"), payload["owned_root"].get("st_ino"),
+                    root_stat, volume=root.parent.stat(), recorded_at_ns=before.st_mtime_ns,
+                )
                 or expires.tzinfo is None
                 or expires <= datetime.now(UTC)
                 or expires > datetime.now(UTC) + timedelta(minutes=10)

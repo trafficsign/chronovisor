@@ -28,6 +28,7 @@ from chronovisor.core.raw_store import (
 from chronovisor.recall import recall_distillation as distill
 from chronovisor.recall import recall_distillation_ledger as ledger
 from chronovisor.recall import recall_distillation_store as store
+from chronovisor.recall.recall_file_identity import persisted_file_state_matches
 
 CATALOG_SCHEMA = "chronovisor.recall-distillation-catalog.v1"
 HISTORICAL_INDEX_SCHEMA = "chronovisor.recall-historical-fts.v1"
@@ -159,7 +160,7 @@ def _read_catalog_checkpoint(root: Path) -> dict[str, Any] | None:
         or not isinstance(checkpoint.get("event_rowid"), int)
         or isinstance(checkpoint.get("event_rowid"), bool)
         or checkpoint["event_rowid"] < 0
-        or checkpoint.get("file_state") != _index_file_state(catalog_path(root))
+        or not persisted_file_state_matches(checkpoint.get("file_state"), _index_file_state(catalog_path(root)), path=catalog_path(root))
         or (
             "catalog_lineage" in checkpoint and _catalog_lineage(checkpoint) is None
         )
@@ -193,7 +194,7 @@ def _read_candidate_catalog_state(root: Path) -> dict[str, Any] | None:
         state.get("kind") != "candidate-catalog-state"
         or not isinstance(state.get("catalog_watermark"), str)
         or not isinstance(state.get("event_rowid"), int)
-        or state.get("catalog_file_state") != _index_file_state(catalog_path(root))
+        or not persisted_file_state_matches(state.get("catalog_file_state"), _index_file_state(catalog_path(root)), path=catalog_path(root))
     ):
         return None
     return state
@@ -258,7 +259,7 @@ def _read_index_checkpoint(
         or (
             "catalog_lineage" in checkpoint and _catalog_lineage(checkpoint) is None
         )
-        or checkpoint.get("file_state") != _index_file_state(path)
+        or not persisted_file_state_matches(checkpoint.get("file_state"), _index_file_state(path), path=path)
     ):
         return None
     return checkpoint
@@ -1919,6 +1920,18 @@ def _verify_candidate_index_row(row: sqlite3.Row) -> dict[str, Any]:
     return value
 
 
+def _candidate_state_matches(
+    recorded: Mapping[str, Any], current: Mapping[str, Any], path: Path,
+    *, identity_only: bool = False,
+) -> bool:
+    if recorded.get("ledger_exists") == current.get("ledger_exists") == 0:
+        return recorded == current
+    return persisted_file_state_matches(
+        recorded, current, path=path, device_key="ledger_dev",
+        inode_key="ledger_ino", time_key="ledger_mtime_ns", identity_only=identity_only,
+    )
+
+
 def _candidate_index_state_row(
     connection: sqlite3.Connection,
 ) -> dict[str, Any] | None:
@@ -2075,7 +2088,7 @@ def sync_candidate_index(
                     raise CatalogError("candidate index ledger path conflicts")
                 count, head = _candidate_db_summary(readonly, state)
                 current = _candidate_file_state(path)
-                if current == {key: state[key] for key in current}:
+                if _candidate_state_matches({key: state[key] for key in current}, current, path):
                     return {
                         "status": "noop",
                         "count": count,
@@ -2116,7 +2129,7 @@ def sync_candidate_index(
                     "ledger_ctime_ns",
                 )
             }
-            if current == stored:
+            if _candidate_state_matches(stored, current, path):
                 connection.rollback()
                 return {
                     "status": "noop",
@@ -2129,11 +2142,7 @@ def sync_candidate_index(
             if (
                 current["ledger_exists"] == 0
                 or current["ledger_size"] < state["ledger_size"]
-                or (
-                    current["ledger_dev"],
-                    current["ledger_ino"],
-                )
-                != (state["ledger_dev"], state["ledger_ino"])
+                or not _candidate_state_matches(stored, current, path, identity_only=True)
             ):
                 if count == 0 and state["ledger_size"] == 0:
                     mode = "bootstrap"
@@ -2352,7 +2361,7 @@ def candidate_prefix_matches(
                     )
                 }
                 current = _candidate_file_state(candidate_path)
-                if current != stored:
+                if not _candidate_state_matches(stored, current, candidate_path):
                     raise CatalogError("candidate ledger changed after indexing")
                 if records > int(state["record_count"]):
                     matched = False
@@ -2482,7 +2491,7 @@ def read_candidate_snapshots(
                 "ledger_ctime_ns",
             )
         }
-        if current != stored:
+        if not _candidate_state_matches(stored, current, path):
             raise CatalogError("candidate ledger changed after indexing")
         placeholders = ",".join("?" for _ in requested)
         rows = [
@@ -2959,7 +2968,7 @@ def sync_historical_index(raw_dir: Path, root: Path) -> str:
     if (
         checkpoint is not None
         and checkpoint["catalog_watermark"] == watermark
-        and checkpoint["catalog_file_state"] == catalog_checkpoint["file_state"]
+        and persisted_file_state_matches(checkpoint["catalog_file_state"], _index_file_state(catalog_path(root)), path=catalog_path(root))
         and checkpoint["catalog_event_rowid"] == catalog_checkpoint["event_rowid"]
         and _catalog_lineage(checkpoint) == _catalog_lineage(catalog_checkpoint)
     ):

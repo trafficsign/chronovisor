@@ -26,6 +26,7 @@ from chronovisor.recall import recall_distillation_store as store
 from chronovisor.recall.recall_distillation_single_teacher_gate import (
     NATIVE_LUNA_SINGLE_PROFILE,
 )
+from chronovisor.recall.recall_file_identity import persisted_file_state_matches
 
 _VERSION = "canonical-materialization-v1"
 _VIEWS: dict[Path, Projection] = {}
@@ -108,6 +109,7 @@ def _code_identity() -> str:
         "recall_distillation_catalog.py", "recall_distillation_store.py",
         "recall_distillation_ledger.py", "recall_distillation_materialization.py",
         "recall_distillation_validation.py",
+        "recall_file_identity.py",
     ):
         digest.update(Path(__file__).with_name(name).read_bytes())
     return digest.hexdigest()
@@ -133,6 +135,19 @@ def _contract_dependencies(root: Path, labels: ledger.LedgerIndex) -> dict[str, 
         "ox": distill._current_ox_profile_contract_id(root),
         "files": {str(path): ledger.file_state(path) for path in sorted(paths)},
     }
+
+
+def _contracts_match(recorded: Any, current: Mapping[str, Any]) -> bool:
+    if not isinstance(recorded, Mapping) or set(recorded) != set(current):
+        return False
+    old_files = recorded.get("files")
+    files = current["files"]
+    return (
+        all(recorded[key] == current[key] for key in current if key != "files")
+        and isinstance(old_files, Mapping) and set(old_files) == set(files)
+        and all(persisted_file_state_matches(old_files[path], state, path=Path(path))
+                for path, state in files.items())
+    )
 
 
 def _prefix_matches(index: ledger.LedgerIndex, old: Mapping[str, Any]) -> bool:
@@ -208,7 +223,7 @@ def _sync_inputs(
     old_labels = int(metadata.get("labels", {}).get("records", 0))
     _add_labels(connection, labels, old_labels, str(contracts["ox"]))
     if (
-        metadata.get("contracts") != contracts
+        not _contracts_match(metadata.get("contracts"), contracts)
         or metadata.get("lineage") != journal["catalog_lineage"]
         or not _prefix_matches(receipts, metadata.get("receipts", {}))
         or int(metadata.get("candidate_count", 0)) > int(candidates["record_count"])
@@ -230,7 +245,10 @@ def _sync_inputs(
         ):
             connection.execute("UPDATE rows SET dirty=1 WHERE receipt_sha256=?", (receipt[0],))
     for dependency in connection.execute("SELECT * FROM dependencies").fetchall():
-        if _encoded(ledger.file_state(Path(dependency["path"]))) != dependency["state"]:
+        if not persisted_file_state_matches(
+            json.loads(dependency["state"]), ledger.file_state(Path(dependency["path"])),
+            path=Path(dependency["path"]),
+        ):
             _dirty_rallies(connection, [str(dependency["rally_id"])])
     return {
         "labels": labels.cursor, "receipts": receipts.cursor, "contracts": contracts,
@@ -386,7 +404,7 @@ class Projection:
         if (
             ledger.file_state(self.path) != self.state or saved is None
             or saved.get("metadata") != self.metadata
-            or any(ledger.file_state(path) != state for path, state in dependencies)
+            or any(not persisted_file_state_matches(state, ledger.file_state(path), path=path) for path, state in dependencies)
         ):
             raise store.DistillationStoreError("canonical materialization projection changed")
         if _source_state(self.root, self.metadata["contracts"]) != self.source_state:

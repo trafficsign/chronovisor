@@ -1435,3 +1435,35 @@ def test_source_drift_rollback_preserves_sealed_large_batches(
     calls.clear()
     materialization._build(tmp_path).close()
     assert sum(map(len, calls)) == 101
+
+
+def test_contract_device_renumbering_does_not_redirty_validated_materialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.recall import recall_file_identity as file_identity
+
+    _append_label(tmp_path, "rally-a", "candidate-a")
+    calls: list[set[str]] = []
+    _stub_build_dependencies(monkeypatch, materialize_calls=calls)
+    contract = tmp_path / "contract.json"
+    contract.write_text("fixture")
+    physical = ledger.file_state(contract)
+    assert physical is not None
+    old = {**physical, "st_dev": physical["st_dev"] + 2}
+    contracts = {"code": "code", "native": "native", "ox": "ox", "files": {str(contract): old}}
+    monkeypatch.setattr(materialization, "_contract_dependencies", lambda *_: contracts)
+    first = materialization._build(tmp_path)
+    first.close()
+    assert calls == [{"rally-a"}]
+    contracts["files"] = {str(contract): physical}
+    monkeypatch.setattr(file_identity.sys, "platform", "darwin")
+    monkeypatch.setattr(file_identity, "birthtime_ns", lambda _: 0)
+    second = materialization._build(tmp_path)
+    second.close()
+    assert calls == [{"rally-a"}]
+    # A changed contract still invalidates the old materialization.
+    contract.write_text("changed fixture")
+    contracts["files"] = {str(contract): ledger.file_state(contract)}
+    third = materialization._build(tmp_path)
+    third.close()
+    assert calls == [{"rally-a"}, {"rally-a"}]

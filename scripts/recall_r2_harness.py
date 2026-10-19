@@ -1813,6 +1813,8 @@ def _new_clone_destination(source: Path, *, prefix: str | None = None) -> Path:
 def _rebind_clone_checkpoints(catalog: Any, source: Path, destination: Path) -> None:
     """Re-seal valid copied checkpoints against clone-local file identities."""
 
+    from chronovisor.recall.recall_file_identity import persisted_file_state_matches
+
     source_catalog = catalog._read_catalog_checkpoint(source)
     if source_catalog is None:
         return
@@ -1821,7 +1823,9 @@ def _rebind_clone_checkpoints(catalog: Any, source: Path, destination: Path) -> 
     clone_catalog_state = catalog._index_file_state(clone_catalog_path)
     if not isinstance(source_catalog_state, Mapping) or clone_catalog_state is None:
         raise R2Error("cloned catalog checkpoint source is incomplete")
-    for key in ("size_bytes", "st_dev", "st_mtime_ns"):
+    if catalog.catalog_path(source).stat().st_dev != clone_catalog_path.stat().st_dev:
+        raise R2Error("cloned catalog volume differs from source")
+    for key in ("size_bytes", "st_mtime_ns"):
         if source_catalog_state.get(key) != clone_catalog_state.get(key):
             raise R2Error("cloned catalog bytes differ from checkpoint source")
 
@@ -1838,13 +1842,19 @@ def _rebind_clone_checkpoints(catalog: Any, source: Path, destination: Path) -> 
         source_index_state = source_index.get("file_state")
         if not isinstance(source_index_state, Mapping) or clone_index_state is None:
             raise R2Error("cloned FTS checkpoint source is incomplete")
-        for key in ("size_bytes", "st_dev", "st_mtime_ns"):
+        if source_index_path.stat().st_dev != clone_index_path.stat().st_dev:
+            raise R2Error("cloned FTS volume differs from source")
+        for key in ("size_bytes", "st_mtime_ns"):
             if source_index_state.get(key) != clone_index_state.get(key):
                 raise R2Error("cloned FTS bytes differ from checkpoint source")
         if (
             source_index.get("catalog_watermark") != source_catalog["catalog_watermark"]
             or source_index.get("catalog_event_rowid") != source_catalog["event_rowid"]
-            or source_index.get("catalog_file_state") != source_catalog_state
+            or not persisted_file_state_matches(
+                source_index.get("catalog_file_state"),
+                catalog._index_file_state(catalog.catalog_path(source)),
+                path=catalog.catalog_path(source),
+            )
         ):
             raise R2Error("source catalog and FTS checkpoints differ")
         source_catalog_lineage = catalog._catalog_lineage(source_catalog)

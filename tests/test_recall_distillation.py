@@ -13314,3 +13314,57 @@ def test_shadow_operational_evidence_rejects_arbitrary_mapping() -> None:
             cohort="5" * 64,
             host="codex",
         )
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("change", ["renumber", "new_inode", "later_birth", "different_volume"])
+def test_r4_persisted_root_identity_across_mounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy: bool, change: str,
+) -> None:
+    from chronovisor.recall import recall_file_identity as file_identity
+
+    root, evidence, source = _legacy_r4_root_fixture(tmp_path)
+    directory = store.distillation_dir(root)
+    observed = directory.stat()
+    authority_id = (
+        distill._r4_legacy_root_authority_id() if legacy
+        else canonical_json.canonical_json_sha256_strict(
+            {"kind": "local-r4-distillation-root-authority"}
+        )
+    )
+    payload: dict[str, Any] = {
+        "kind": "local-r4-distillation-root-authority",
+        "directory_identity": {"device": observed.st_dev + 2, "inode": observed.st_ino},
+    }
+    if legacy:
+        payload["legacy_migration"] = {
+            "artifact_id": "a" * 64, "file_sha256": "b" * 64, "source_binding": source,
+        }
+    _, authority_path, _ = store.write_immutable_pinned(
+        root, payload, schema=distill.R4_DIRECTORY_AUTHORITY_SCHEMA,
+        artifact_id=authority_id,
+    )
+    authority_bytes = authority_path.read_bytes()
+    monkeypatch.setattr(file_identity.sys, "platform", "darwin")
+    real_birth = file_identity.birthtime_ns
+    recorded_at = min(authority_path.stat().st_mtime_ns, real_birth(authority_path.stat()) or authority_path.stat().st_mtime_ns)
+    real_match = file_identity.persisted_identity_matches
+    def mounted_identity(device: Any, inode: Any, current: Any, **kwargs: Any) -> bool:
+        from types import SimpleNamespace
+        birth = recorded_at + 1_000_000 if change == "later_birth" else recorded_at - 1_000_000
+        current = SimpleNamespace(st_dev=current.st_dev, st_ino=current.st_ino, st_birthtime_ns=birth)
+        if change == "different_volume":
+            kwargs["volume"] = SimpleNamespace(st_dev=current.st_dev + 1)
+        return real_match(device, inode, current, **kwargs)
+    monkeypatch.setattr(distill, "persisted_identity_matches", mounted_identity)
+    if change == "new_inode":
+        directory.rename(root / "old-directory")
+        directory.mkdir()
+    if change == "renumber":
+        assert distill._r4_distillation_root_authority(root, register=False) == (
+            observed.st_dev, observed.st_ino,
+        )
+    else:
+        with pytest.raises(distill.DistillationError, match="authority changed"):
+            distill._r4_distillation_root_authority(root, register=False)
+    assert authority_path.read_bytes() == authority_bytes

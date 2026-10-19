@@ -477,3 +477,46 @@ def test_pinned_immutable_write_retains_preexisting_artifact_on_after_persist_fa
         )
 
     assert store.read_immutable_pinned(directory, artifact_id, schema="test.r4.v1") == artifact
+
+
+def test_chain_checkpoint_and_cursor_survive_device_renumbering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.recall import recall_file_identity as file_identity
+
+    path = tmp_path / "rows.jsonl"
+    store.append_chain(path, {"kind": "fixture", "value": 1})
+    _, cursor, _ = store.read_chain_tail(path)
+    checkpoint_path = store._chain_checkpoint_path(path)
+    checkpoint = store.read_sealed(checkpoint_path)
+    checkpoint["file_state"]["st_dev"] += 2
+    cursor["file_state"]["st_dev"] += 2
+    store.write_sealed_state(checkpoint_path, {k: v for k, v in checkpoint.items() if k not in {"schema", "namespace", "seal_sha256"}})
+    original = checkpoint_path.read_bytes()
+    monkeypatch.setattr(file_identity.sys, "platform", "darwin")
+    monkeypatch.setattr(file_identity, "birthtime_ns", lambda _value: 0)
+    rows, current, reset = store.read_chain_tail(path, cursor)
+    assert rows == [] and reset is False
+    assert current["head_sha256"] == cursor["head_sha256"]
+    assert checkpoint_path.read_bytes() == original
+    # A subsequent append reuses the verified prefix through the normal writer.
+    store.append_chain(path, {"kind": "fixture", "value": 2})
+    rows, _, reset = store.read_chain_tail(path, cursor)
+    assert len(rows) == 1 and rows[0]["value"] == 2 and reset is False
+
+
+def test_rebound_cursor_still_rejects_truncation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.recall import recall_file_identity as file_identity
+
+    path = tmp_path / "rows.jsonl"
+    store.append_chain(path, {"kind": "fixture", "value": 1})
+    _, cursor, _ = store.read_chain_tail(path)
+    cursor["file_state"]["st_dev"] += 2
+    monkeypatch.setattr(file_identity.sys, "platform", "darwin")
+    monkeypatch.setattr(file_identity, "birthtime_ns", lambda _value: 0)
+    with path.open("r+b") as handle:
+        handle.truncate(0)
+    with pytest.raises(store.DistillationStoreError, match="truncated"):
+        store.read_chain_tail(path, cursor)

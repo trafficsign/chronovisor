@@ -5184,3 +5184,22 @@ def test_dry_run_keeps_state_and_page_byte_identical(
     assert store.state_file.read_bytes() == state_before
     assert page.read_bytes() == page_before
     assert store.get(merged["item"]["key"])["status"] == "pending_local"
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_saved_review_versions_survive_device_change_but_reject_new_preimage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed: bool,
+) -> None:
+    from chronovisor.recall import recall_file_identity as file_identity
+
+    path = tmp_path / "page.md"
+    path.write_text("fixture preimage")
+    mutations = [SimpleNamespace(path=path, page_id="fixture")]
+    versions = content_correction._mutation_file_versions(mutations)
+    versions["fixture"]["device"] += 2
+    monkeypatch.setattr(file_identity.sys, "platform", "darwin")
+    monkeypatch.setattr(file_identity, "birthtime_ns", lambda _: 0)
+    if changed:
+        path.write_text("different preimage")
+    error = content_correction._reviewed_preimage_version_error(versions, mutations)
+    assert (error is not None) is changed

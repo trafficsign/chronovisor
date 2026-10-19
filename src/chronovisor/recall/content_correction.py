@@ -122,6 +122,7 @@ from chronovisor.recall.recall_auditor import (
     read_jsonl_tail,
     turn_id_for,
 )
+from chronovisor.recall.recall_file_identity import persisted_file_state_matches
 from chronovisor.recall.recall_runtime import (
     RECALL_FEEDBACK_FILE,
     RECALL_LOG_FILE,
@@ -2749,7 +2750,13 @@ def _reviewed_preimage_version_error(
         current = _mutation_file_versions(mutations)
     except OSError as exc:
         return f"frontier reviewed page version unavailable: {exc}"
-    if current != reviewed_versions:
+    if set(current) != set(reviewed_versions) or any(
+        not persisted_file_state_matches(
+            reviewed_versions[mutation.page_id], current[mutation.page_id],
+            path=mutation.path, device_key="device", inode_key="inode", time_key="mtime_ns",
+        )
+        for mutation in mutations
+    ):
         return "frontier reviewed page version changed before commit"
     return None
 

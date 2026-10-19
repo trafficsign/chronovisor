@@ -1,7 +1,7 @@
 ---
 task_id: plan_f1af8dd28d254ae0a5fa2c431b1dfb3f
 created_at: 2026-10-13T20:52:29+09:00
-状態: blocked
+状態: running
 ---
 
 # Recall：既存の Luna ラベルを保持し、ローカルで無人運転を続ける
@@ -1111,3 +1111,15 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-19 20:28 JST — 最終read-only queue観測は20:20:51 JST。search-review残28161件、切替後5569.035秒の終端12件、7.757件/時、同率継続時3630.314時間（約151.3日）。初期materialization・配備停止を含む条件付き予測であり、定常速度や完了期限の保証ではない。lint残75件、終端5件、3.232件/時、同条件で約23.205時間。slow drainはhuman_waitへ分類せず、R4 authorityの技術停止と分けて表示する。最終partial-acceptance receiptはcloud0・履歴保全・observer終了を確認し、normal_daily_accepted=false、steady_daily_capacity_measured=false、fast_daily_held=true、package配備2回を記録した。
 
 - 2026-10-19 20:28 JST — 残作業は、既存R4 root authorityの同一性を壊さない正規復旧後のnormal daily受入・定常容量確認・7日継続。任意xhigh batch補測の残29件も共有preemptionで未測定のまま保持するが、必須sealed300の3水準比較は完了している。Planの今回差分だけをlocal commitしてLIVEへfast-forwardし、runtime package pin92814f75・専用clean attestation checkout・origin/mainは保持する判断。文書だけの最終記録はpackage配備に不要なので追加push/restartを行わない。保護対象の既存untracked資料は前後の全file hashを照合して保持する。
+
+
+- 2026-10-19 20:36 JST — Astraが10/19 19:00以降の実行ログを先に読了し、所有者代理の明示判断に従いR4再起動後device再採番の整合修復を開始。旧device単独の永続比較を品質gateとは扱わない。same inode・現在のroot/authority parentと同一volume・authority作成以前のbirth timeを共有規則とし、in-process TOCTOUはdevice+inode完全一致を維持する。旧sealed authorityはbytes不変、必要な証拠はprivateへ加算保存。独立worktreeで実装し、既存untracked資料・index・supervisor・稼働workerを保持。自動cloud0、Qwen low、300秒、quota、prompt/schema/frozen入力と独立性gate、09:15 PAUSEDを維持する。グラフは10/14世代で対象sourceにmetadata変更があるため直接source照合を正本とする。必須CI後に安全境界で一度配備し、通常daily受入とcold rebuildを除いた数時間の定常排出を測る。7日継続は未完の観測として残す。
+
+
+- 2026-10-19 21:04 JST — 永続identityの共有実装をrecall_file_identityへ集約。既存candidate-anchorのAPFS投影規則を移し、root/子directoryの読み取りではsame inode・現在のauthority parent/rootと同一device・authority作成以前のbirthを検証する。旧device番号だけでは拒否せず、fd/pathの処理中照合はexactのまま。旧R4 authorityの実機read-only検証は成功し、実装前後の全bytes一致を確認した。authorityの更新・再seal・移動は不要という判断。コピーされたファイルの保存mtimeがbirthより古い場合は保存ctimeもsnapshot以前の上界として使う。macOSのfloat birth秒と整数nsの相互変換による誤拒否を再現し、OSが公開する精度で比較する回帰を追加した。Linuxではdevice差を再mountと推定しない。
+
+- 2026-10-19 21:04 JST — sibling sweep分類（rootの2読取経路を除き32照合箇所・11ファイルを修正、既存anchor投影2箇所の重複統合は別計数）。永続: distillationの子directory authorityとlegacy evidence 2、storeのchain/unique checkpoint・cursor 5、catalog/candidate index/historical index 9、ledger projection 1、materialization contract/dependency 3、content_correction review preimage 1、remote_teacherの期限付きsimulation owned-root 1、R4 harnessのcheckpoint/receipt parent 2、R4 workset cutoverのmanifest file/root 2、R5 completion/inner parent 3、R2 cloneのsource checkpoint 3。R2は共有readerで元snapshotを検証し、clone間のvolume比較には現在のstatを使う。すべて内容hash・inode・mtime/ctime・seal等の既存条件を保持し、再起動を理由とする再build/再sealを避ける。
+
+- 2026-10-19 21:04 JST — sweepでexactを維持した範囲: raw_storeのRawUnitとsegment/legacy検証cache、ingest orchestratorのfresh RawUnit、convergenceのprocess-local version cache、okf_cutover/okf_workspaceの現在volume事前確認、core/storeとraw_semantic_projectionのfd/path、llm_security/llm_config/ollama_leaseの継承fd、workset/validation/rolloutの処理内pin、research evidence_reconstructionの読取/cache、Cortex cursorとburn_monitorの同一process内tail。recall_r7_evidenceおよびR0/R1/R3/R6/R7/R8 harnessのstatは同一観測/稼働processに結びつくTOCTOUまたは当時の監査記録で、再起動後に旧processの権限を継承させる永続authorityではない。semantic_holdのfile observationもin-flight boundary guardでexactを保持。recall_improvementのbest_dev_scoreはdeviceではない。src/scriptsのst_dev全ヒットを直接確認し、グラフの古い/欠落範囲を補った。
+
+- 2026-10-19 21:04 JST — 隔離rootの関連689 tests成功。再生成directory（inode相違/後発birth）、別volumeを拒否し、再採番のみを許容する両root形式の回帰、checkpoint/cursor・candidate index・materialization・review preimageの再起動回帰を含む。ruff/mypy/import境界とarchitecture frozen ceilingも維持。共有helperをrecall内に置いて既存のdomain依存を増やさず、baselineの緩和は行わない。R2/R4/R5を含む履歴全体と必須CIを続ける。通常daily plistは保存bytesを維持するため、その既存参照先のclean attestation checkoutを安全境界で新commitへ進める（パス名に旧短縮SHAが残るが、実HEAD/source/package一致で検証する）。

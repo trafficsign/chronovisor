@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.recall import recall_distillation_store as store
+from chronovisor.recall.recall_file_identity import persisted_file_state_matches
 
 _VERSION = "recall-ledger-projection-v2"
 _FIELDS = frozenset({
@@ -72,7 +73,7 @@ def checkpoint(path: Path) -> dict[str, Any] | None:
             schema=store.DISTILLATION_SCHEMA,
         )
         current = file_state(path)
-        if current is None or value.get("file_state") != current:
+        if current is None or not persisted_file_state_matches(value.get("file_state"), current, path=path):
             return None
         return value
     except (OSError, store.DistillationStoreError):

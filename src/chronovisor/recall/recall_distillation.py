@@ -69,6 +69,12 @@ from chronovisor.recall.recall_distillation_single_teacher_gate import (
     expected_ox_provider_request_sha256,
     expected_ox_request_sha256,
 )
+from chronovisor.recall.recall_file_identity import (
+    birthtime_ns,
+    persisted_file_state_matches,
+    persisted_identity_matches,
+    stable_file_state,
+)
 
 RALLY_SCHEMA = "chronovisor.recall-rally.rally-v1"
 BASELINE_SCHEMA = "chronovisor.recall-distill-baseline.v1"
@@ -1413,22 +1419,7 @@ def _r4_require_canonical_artifact_id(
         raise DistillationError("R4 artifact identity is invalid")
 
 
-def _r4_stable_file_state(value: Any) -> dict[str, int]:
-    """Drop the APFS mount-local device id from a durable file identity."""
-
-    stable = {"size_bytes", "st_ino", "st_mtime_ns", "st_ctime_ns"}
-    if not isinstance(value, Mapping) or set(value) not in (
-        stable,
-        stable | {"st_dev"},
-    ):
-        return {}
-    result = {key: value[key] for key in stable}
-    if any(
-        isinstance(item, bool) or not isinstance(item, int) or item < 0
-        for item in result.values()
-    ):
-        return {}
-    return result
+_r4_stable_file_state = stable_file_state
 
 
 def _r4_bootstrap_inputs_unchanged(
@@ -12245,7 +12236,10 @@ def _r4_legacy_evidence_state(
         compared = required - (
             {"st_mtime_ns", "st_ctime_ns"} if name == "workset_shm" else set()
         )
-        if any(state[key] != evidence_state[key] for key in compared):
+        if (
+            not persisted_file_state_matches(evidence_state, state, path=paths[name], identity_only=True)
+            or any(state[key] != evidence_state[key] for key in compared - {"st_dev"})
+        ):
             raise DistillationError("legacy R4 root authority migration content drift")
     if (
         observed["distillation_lock"] is None
@@ -12561,6 +12555,49 @@ def bootstrap_r4_distillation_root_authority(root: Path) -> tuple[int, int]:
         raise DistillationError("local R4 root authority is invalid") from exc
 
 
+def _r4_persisted_directory_matches(
+    authority: Mapping[str, Any],
+    *,
+    directory: Path,
+    authority_path: Path,
+    observed: tuple[int, int],
+    parent_identity: tuple[int, int],
+) -> bool:
+    recorded = authority.get("directory_identity")
+    if not isinstance(recorded, Mapping) or set(recorded) != {"device", "inode"}:
+        return False
+    try:
+        with open_directory_nofollow(directory) as directory_fd:
+            current = os.fstat(directory_fd)
+            with open_directory_nofollow(authority_path.parent) as parent_fd:
+                parent = os.fstat(parent_fd)
+                with open_regular_nofollow(authority_path) as handle:
+                    evidence = os.fstat(handle.fileno())
+                    if json.loads(handle.read()) != authority:
+                        return False
+                    captured = min(
+                        evidence.st_mtime_ns,
+                        birthtime_ns(evidence) or evidence.st_mtime_ns,
+                    )
+                    return (
+                        (current.st_dev, current.st_ino) == observed
+                        and (parent.st_dev, parent.st_ino) == parent_identity
+                        and persisted_identity_matches(
+                            recorded["device"], recorded["inode"], current,
+                            volume=parent, recorded_at_ns=captured,
+                        )
+                        and all(
+                            getattr(state, key) == getattr(evidence, key)
+                            for state in (os.fstat(handle.fileno()), authority_path.lstat())
+                            for key in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+                        )
+                        and store.pinned_directory_identity(directory, create=False) == observed
+                        and store.pinned_directory_identity(authority_path.parent, create=False) == parent_identity
+                    )
+    except (OSError, ValueError, store.DistillationStoreError):
+        return False
+
+
 def _bootstrap_r4_distillation_root_authority(root: Path) -> tuple[int, int]:
     """Create the one-time R4 root authority before any distillation state exists.
 
@@ -12625,7 +12662,6 @@ def _bootstrap_r4_distillation_root_authority(root: Path) -> tuple[int, int]:
             )
         except store.DistillationStoreError as exc:
             raise DistillationError("local R4 root authority is unsafe") from exc
-    expected_directory = {"device": observed[0], "inode": observed[1]}
     if (
         set(authority)
         != {
@@ -12638,7 +12674,11 @@ def _bootstrap_r4_distillation_root_authority(root: Path) -> tuple[int, int]:
         }
         or authority.get("artifact_id") != authority_id
         or authority.get("kind") != authority_identity["kind"]
-        or authority.get("directory_identity") != expected_directory
+        or not _r4_persisted_directory_matches(
+            authority, directory=store.distillation_dir(root),
+            authority_path=authority_parent / f"{authority_id}.json",
+            observed=observed, parent_identity=parent_identity,
+        )
     ):
         raise DistillationError("local R4 root authority changed")
     return observed
@@ -12692,7 +12732,6 @@ def _r4_distillation_root_authority(root: Path, *, register: bool) -> tuple[int,
         raise DistillationError("local R4 root authority is missing") from None
     except store.DistillationStoreError as exc:
         raise DistillationError("local R4 root authority is unsafe") from exc
-    expected_directory = {"device": observed[0], "inode": observed[1]}
     expected_keys = {
         "schema",
         "namespace",
@@ -12721,7 +12760,11 @@ def _r4_distillation_root_authority(root: Path, *, register: bool) -> tuple[int,
         set(authority) != expected_keys
         or authority.get("artifact_id") != observed_authority_id
         or authority.get("kind") != authority_identity["kind"]
-        or authority.get("directory_identity") != expected_directory
+        or not _r4_persisted_directory_matches(
+            authority, directory=store.distillation_dir(root),
+            authority_path=authority_parent / f"{observed_authority_id}.json",
+            observed=observed, parent_identity=parent_identity,
+        )
     ):
         raise DistillationError("local R4 root authority changed")
     return observed
@@ -12796,12 +12839,15 @@ def _r4_directory_authority(
         *authority_identity,
         "directory_identity",
     }
-    expected_directory = {"device": observed[0], "inode": observed[1]}
     if (
         set(authority) != expected_keys
         or authority.get("artifact_id") != authority_id
         or any(authority.get(key) != value for key, value in authority_identity.items())
-        or authority.get("directory_identity") != expected_directory
+        or not _r4_persisted_directory_matches(
+            authority, directory=directory,
+            authority_path=authority_root / f"{authority_id}.json",
+            observed=observed, parent_identity=authority_root_identity,
+        )
     ):
         raise DistillationError("local R4 directory authority changed")
     return observed

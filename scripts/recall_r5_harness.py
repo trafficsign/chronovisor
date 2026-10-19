@@ -3871,6 +3871,23 @@ def _validate_completion_nested(payload: Mapping[str, Any]) -> None:
         raise R5Error("formal completion requires complete identity records")
 
 
+def _persisted_parent_identity(path: Path, device: Any, inode: Any) -> dict[str, int]:
+    from chronovisor.recall.recall_file_identity import persisted_identity_matches
+
+    directory = path.parent
+    current = directory.lstat()
+    identity = _directory_identity(directory)
+    if (
+        (current.st_dev, current.st_ino) != (identity["dev"], identity["ino"])
+        or not persisted_identity_matches(
+            device, inode, current, volume=directory.parent.stat(),
+            recorded_at_ns=path.lstat().st_mtime_ns,
+        )
+    ):
+        raise R5Error("persisted artifact parent identity changed")
+    return identity
+
+
 def read_completion(path: Path) -> dict[str, Any]:
     parent_fd, completion_parent = _open_owned_directory(path.parent)
     try:
@@ -3940,7 +3957,7 @@ def read_completion(path: Path) -> dict[str, Any]:
         or len(inner["source_commit"]) != 40
         or bool(set(inner["source_commit"]) - set("0123456789abcdef"))
         or not all(isinstance(inner.get(key), int) and inner[key] > 0 for key in ("parent_dev", "parent_ino"))
-        or output != {"dev": completion_parent["dev"], "ino": completion_parent["ino"]}
+        or _persisted_parent_identity(path, output.get("dev"), output.get("ino")) != completion_parent
         or not isinstance(supervisor.get("pid"), int)
         or supervisor["pid"] <= 0
         or not isinstance(supervisor.get("pgid"), int)
@@ -3989,10 +4006,7 @@ def read_completion(path: Path) -> dict[str, Any]:
     try:
         bound_inner = read_artifact(
             inner_path,
-            parent_identity={
-                "dev": inner["parent_dev"], "ino": inner["parent_ino"],
-                "mode": _directory_identity(inner_path.parent)["mode"],
-            },
+            parent_identity=_persisted_parent_identity(inner_path, inner["parent_dev"], inner["parent_ino"]),
         )
     except (OSError, R5Error) as exc:
         raise R5Error("completion inner artifact is unavailable") from exc
@@ -4070,10 +4084,7 @@ def assert_formal_acceptance(
     receipt_path = Path(str(receipt.get("path") or ""))
     bound_inner = read_artifact(
         receipt_path,
-        parent_identity={
-            "dev": receipt["parent_dev"], "ino": receipt["parent_ino"],
-            "mode": _directory_identity(receipt_path.parent)["mode"],
-        },
+        parent_identity=_persisted_parent_identity(receipt_path, receipt["parent_dev"], receipt["parent_ino"]),
     )
     if dict(bound_inner) != dict(inner):
         raise R5Error("completion does not bind the supplied inner artifact")

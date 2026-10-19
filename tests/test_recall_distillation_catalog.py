@@ -1978,3 +1978,33 @@ def test_catalog_readers_preserve_sealed_file_identity(
     assert catalog._read_catalog_checkpoint(root) is not None
     assert path.read_bytes() == before
     assert path.stat().st_ctime_ns == before_ctime
+
+
+def test_catalog_and_candidate_index_survive_mount_renumbering_without_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.recall import recall_file_identity as file_identity
+
+    path, claims = _candidate_prefix_fixture(tmp_path)
+    saved = catalog._read_catalog_checkpoint(tmp_path)
+    assert saved is not None
+    with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
+        connection.execute("UPDATE candidate_index_state SET ledger_dev=ledger_dev+2")
+    catalog._write_catalog_checkpoint(
+        tmp_path, saved["catalog_watermark"], saved["event_rowid"],
+        catalog_lineage=saved["catalog_lineage"],
+    )
+    checkpoint_path = catalog._catalog_checkpoint_path(tmp_path)
+    saved = store.read_sealed(checkpoint_path)
+    saved["file_state"]["st_dev"] += 2
+    _rewrite_checkpoint(checkpoint_path, saved)
+    checkpoint_bytes = checkpoint_path.read_bytes()
+    database_bytes = catalog.catalog_path(tmp_path).read_bytes()
+    monkeypatch.setattr(file_identity.sys, "platform", "darwin")
+    monkeypatch.setattr(file_identity, "birthtime_ns", lambda _value: 0)
+    assert catalog.sync_candidate_index(tmp_path, path)["status"] == "noop"
+    assert catalog.candidate_prefix_matches(
+        tmp_path, records=2, head_sha256=str(claims[-1]["record_sha256"]),
+    )
+    assert checkpoint_path.read_bytes() == checkpoint_bytes
+    assert catalog.catalog_path(tmp_path).read_bytes() == database_bytes
