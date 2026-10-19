@@ -1066,3 +1066,12 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-19 18:43 JST — 水準選定の容量根拠：直近7日平均763.7件/日、平日平均1052.4件/日、最大2480件/日。連続11.81時間の共有role観測から検証済み模擬41件と測定teacherを除いた実モデル生成は6.47時間/日相当、実remote0。検索authority133試行・lint23試行等を含み、deterministic lint件数や旧native B2 backlog burnを日次新規量へ加算しない。通常batch平均1.778件、旧profileで実測したhost32.184秒/cycle、既存CF97秒/12teacher batch、cadence待ち最大10秒を使うcalendar見積もりはlow1324.9件/日、medium1133.0件/日。待ち込みbatch wallには共有role待ちを含むため6.47時間を再加算しない。単一推論slotで算定し、Qwen/Ornithを並列容量に数えない。平日平均への余裕low20.57%・medium7.11%で、検索/lintの新reasoning費用・prefill/失敗時間の欠測・新profile overheadの不確かさを吸収する約20%の運転余裕を判断基準とした。これはquality gateではなく運転上の留保であり、全gate/floor/validatorは不変。最高の実用水準はlowと判断する。
 
 - 2026-10-19 18:43 JST — どの水準も最大2480件の日を当日中に排出できるとは実証していない。lowの見積もりでもpeak後1155件を繰越し、実測7日配列では後続2日で解消する。通常日の持続流入を余裕付きで処理し、burstはqueueを保持して後続日に排出する運用を選ぶ理由は、cloud禁止・既存品質条件・単一共有slotを同時に守るため。新local profileの実cycle費用とsearchの終端receipt速度を配備後に照合し、推定と実測を区別する。任意xhigh補測29件は共存throughput不成立により未完として明記し、より良いlocal modelが利用可能になった時に再測定する。
+
+
+- 2026-10-19 19:06 JST — 18:48に初回package485ceb2eを自然なingest/distillation lease境界で配備し、常駐5サービスのarchive/direct_urlは同commit/MCP1.30.0、HTTP runtime drift=falseを確認。supervisorは同PID・disabled・active0、model serverも再起動なし。3周期jobを既存identityのまま復元し、local dailyを10秒cadenceで登録した。fresh MCP init/statusはisError=falseでlocal teacherとlow/output16384/context65536、search/lint drain欄を返した。旧materialized HTTP snapshotは更新待ちとして区別する。履歴保全検証は凍結63134 filesの変更0・正本ledger5本の旧prefix不変で成功。process/native receiptの自動cloud増分0を継続観測している。
+
+- 2026-10-19 19:06 JST — 初回配備は受入失敗として継続中。通常Convergeでlocal R4 repairが止まり、private error digestが「local R4 repair ledger identity changed」のhashと一致した。local-singleは意図的にlocal/CFだけを抽出するが、R4復旧がその部分集合の件数/headをLuna履歴を含む全台帳の件数/headと比較していたことが原因。新workset753件はready・attempt0のまま、最初のdaily周期も318.710秒で300秒wall-clock deferとなり、新local labelの正式完了をまだ確認できていない。これを品質holdや正常なslow drainへ読み替えない。既存のgate・上限・台帳/checkpoint/lockは変更しない。
+
+- 2026-10-19 19:06 JST — 隔離rootで同じ履歴混在を再現し、完全なlocal/CF抽出集合との全行一致（欠落・改変・余分な行を拒否）と全台帳headの前後一致を両立させる修正を加えた。旧profileの全件snapshot検査は維持し、既存履歴を持つ通常pipelineが追加localラベルを保存しP5を保留できる回帰も追加。R4/履歴/通常backfillの31 tests、ruff/mypy/import契約/architecture検査が成功。prompt/schema/frozen入力・model runtime設定は不変なのでsealed300の再測定は不要。必須CIを修正commitで再実行する。
+
+- 2026-10-19 19:06 JST — 「一度の配備」の予定は初回受入不具合により満たせていない。所有者の無人運転を実際に稼働させる指示と、不具合修正まで進める既存承認に従い、停止状態を放置せず同じ変更範囲の是正配備を追加する判断。これを初回成功と数えず、最初の配備receipt・失敗・履歴検証を全て保持し、修正をまとめて必須CI後の自然な境界で切り替える。supervisor/実行中shardへのsignal、cloud fallback、quality gate緩和は行わない。隔離Raw1件は正規処理でattempt2へ進んだが次回backoffが10/20 04:12のため、期限を早めず保留として記録した。

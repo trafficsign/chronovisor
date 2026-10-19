@@ -4994,8 +4994,14 @@ def test_preflight_automatically_aggregates_safe_runtime_metrics(
     assert overridden["metrics"]["latency_p95_ms"] == 300
 
 
-@pytest.mark.parametrize("profile", [distill.LOCAL_TRIAD_PROFILE, distill.LOCAL_SINGLE_PROFILE])
-def test_p1_to_p4_teacher_backfill_runs_while_p5_is_held(tmp_path: Path, profile: str) -> None:
+@pytest.mark.parametrize("profile,prior_history", [
+    (distill.LOCAL_TRIAD_PROFILE, False),
+    (distill.LOCAL_SINGLE_PROFILE, False),
+    (distill.LOCAL_SINGLE_PROFILE, True),
+])
+def test_p1_to_p4_teacher_backfill_runs_while_p5_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: str, prior_history: bool,
+) -> None:
     class FakeTeacher:
         local = True
 
@@ -5017,6 +5023,20 @@ def test_p1_to_p4_teacher_backfill_runs_while_p5_is_held(tmp_path: Path, profile
 
     raw_dir = _raw(tmp_path)
     config = _config(tmp_path, teacher_profile=profile)
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    prior_bytes = b""
+    prior_rows: list[dict[str, Any]] = []
+    if prior_history:
+        monkeypatch.setattr(distill.runtime_config, "runtime_identity", lambda: {"commit_id": "a" * 40})
+        previous_config = _config(tmp_path, teacher_profile=distill.LOCAL_TRIAD_PROFILE)
+        previous = distill.run_distillation_chunk(
+            root=tmp_path, raw_dir=raw_dir, config_path=previous_config,
+            teachers={role: FakeTeacher(role) for role in distill.TEACHER_ROLES},
+        )
+        assert previous["labels_written"] > 0
+        prior_bytes = label_path.read_bytes()
+        prior_rows = store.read_chain(label_path)
+        config = _config(tmp_path, teacher_profile=profile)
     roles = distill.TEACHER_ROLES[:1] if profile == distill.LOCAL_SINGLE_PROFILE else distill.TEACHER_ROLES
     teachers = {role: FakeTeacher(role) for role in roles}
     result = distill.run_distillation_chunk(
@@ -5026,16 +5046,18 @@ def test_p1_to_p4_teacher_backfill_runs_while_p5_is_held(tmp_path: Path, profile
         teachers=teachers,
     )
     assert result["status"] == "capture_only"
-    assert result["candidate_snapshots"] == 3
+    assert result["candidate_snapshots"] == (0 if prior_history else 3)
     assert result["labels_written"] > 0
-    labels = store.read_chain(store.distillation_dir(tmp_path) / "label-ledger.jsonl")
+    assert label_path.read_bytes().startswith(prior_bytes)
+    labels = store.read_chain(label_path)[len(prior_rows):]
     assert all(row["authority"] in {"teacher-only", "verified"} for row in labels)
     assert all("reason" not in row and "rationale" not in row for row in labels)
     if profile == distill.LOCAL_SINGLE_PROFILE:
-        label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
         assert all(row["profile"] == profile for row in labels)
         assert distill._local_single_label_rows(label_path) == labels
-        assert distill._local_single_prior_pairs(label_path) == set()
+        assert distill._local_single_prior_pairs(label_path) == (
+            {(row["rally_id"], row["candidate_id"]) for row in prior_rows}
+        )
 
 
 def test_counterfactual_turn_without_real_work_falls_back_to_teacher(

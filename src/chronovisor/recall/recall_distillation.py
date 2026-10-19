@@ -13608,21 +13608,26 @@ def _repair_r4_local_receipts(
 ) -> None:
     """Repair every supplied label row through idempotent immutable receipts.
 
-    ``label_rows`` is the caller's sealed, complete ledger snapshot.  A
-    persistent cursor supplied no additional correctness and left a mutable
-    path below the distillation root; rechecking the complete snapshot is the
-    smaller fail-closed contract.
+    Local-single readers supply the exact local/CF projection; other readers
+    supply the complete ledger. Verify either view against the full sealed
+    source before recovery, and keep the full head pinned through publication.
     """
 
     commit = runtime_config.runtime_identity().get("commit_id")
     if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         return
     ledger_head = store.chain_head(label_path)
-    expected_head = str(label_rows[-1].get("record_sha256") or "") if label_rows else ""
-    if ledger_head != {
-        "records": len(label_rows),
-        "head_sha256": expected_head,
-    }:
+    if config.teacher_profile == LOCAL_SINGLE_PROFILE:
+        snapshot_matches = (
+            list(label_rows) == _local_single_label_rows(label_path)
+            and store.chain_head(label_path) == ledger_head
+        )
+    else:
+        expected_head = str(label_rows[-1].get("record_sha256") or "") if label_rows else ""
+        snapshot_matches = ledger_head == {
+            "records": len(label_rows), "head_sha256": expected_head,
+        }
+    if not snapshot_matches:
         raise DistillationError("local R4 repair ledger identity changed")
     entries: list[dict[str, Any]] = []
     for label in label_rows:
