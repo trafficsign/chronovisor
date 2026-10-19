@@ -13366,6 +13366,77 @@ def _write_r4_local_failure_receipts(
         return False
 
 
+def _local_r4_recovered_label_matches(
+    *,
+    workset: Any,
+    work_id: str,
+    settlement_attempt: object,
+    task: Mapping[str, Any],
+    label: Mapping[str, Any],
+) -> bool:
+    """Bind an earlier generated label to the same immutable reclaimed work.
+
+    Reclaim increments the queue attempt even when no model call is repeated.
+    Keep that history and the original label attempt; neither is the other's
+    identity. Only the exact payload, route and candidate may be settled later.
+    """
+
+    attempt = label.get("attempt")
+    digest = label.get("payload_digest")
+    route = task.get("route")
+    profile = label.get("teacher_profile")
+    if (
+        isinstance(attempt, bool)
+        or not isinstance(attempt, int)
+        or attempt < 1
+        or isinstance(settlement_attempt, bool)
+        or not isinstance(settlement_attempt, int)
+        or settlement_attempt < attempt
+        or not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        or not isinstance(route, str)
+        or profile not in {LOCAL_SINGLE_PROFILE, LOCAL_TRIAD_PROFILE}
+        or label.get("work_id") != work_id
+        or _local_work_id(digest, route, profile) != work_id
+    ):
+        return False
+    item = workset.work_item_identity(work_id)
+    return (
+        isinstance(item, Mapping)
+        and item.get("work_id") == work_id
+        and item.get("payload_digest") == digest
+        and item.get("kind") == f"local-teacher:{route}"
+        and item.get("payload_ref")
+        == f"candidate-snapshot:{task['rally'].get('rally_id')}:{task['candidate'].get('candidate_id')}"
+        and isinstance(item.get("provenance"), Mapping)
+        and item["provenance"].get("route") == route
+    )
+
+
+def _local_r4_completion_matches(
+    *, workset: Any, entry: Mapping[str, Any], completion: Mapping[str, Any] | None,
+) -> bool:
+    """Check the original label digest and, for recovery, immutable work identity."""
+
+    if not isinstance(completion, Mapping):
+        return False
+    attempt = completion.get("attempt")
+    record = entry["label"].get("record_sha256")
+    if (
+        isinstance(attempt, bool)
+        or not isinstance(attempt, int)
+        or completion != {
+            "work_id": entry["work_id"], "attempt": attempt,
+            "completion_ref": f"label-ledger:{record}", "completion_digest": record,
+        }
+    ):
+        return False
+    return attempt == entry["attempt"] or _local_r4_recovered_label_matches(
+        workset=workset, work_id=entry["work_id"], settlement_attempt=attempt,
+        task=entry["task"], label=entry["label"],
+    )
+
+
 def _write_r4_local_receipts(
     *,
     root: Path,
@@ -13474,13 +13545,9 @@ def _write_r4_local_receipts(
                 or canonical_json.canonical_json_sha256_strict(label_unsigned) != record
                 or not isinstance(captured_at, str)
                 or _OX_EXPIRY_RE.fullmatch(captured_at) is None
-                or completion
-                != {
-                    "work_id": work_id,
-                    "attempt": attempt,
-                    "completion_ref": f"label-ledger:{record}",
-                    "completion_digest": record,
-                }
+                or not _local_r4_completion_matches(
+                    workset=workset, entry=entry, completion=completion,
+                )
             ):
                 return False
             assignment = task["assignment"]
@@ -13717,13 +13784,9 @@ def _repair_r4_local_receipts(
     ready_entries = [
         entry
         for entry in entries
-        if completed.get(str(entry["work_id"]))
-        == {
-            "work_id": entry["work_id"],
-            "attempt": entry["attempt"],
-            "completion_ref": (f"label-ledger:{entry['label']['record_sha256']}"),
-            "completion_digest": entry["label"]["record_sha256"],
-        }
+        if _local_r4_completion_matches(
+            workset=workset, entry=entry, completion=completed.get(str(entry["work_id"])),
+        )
     ]
     _ensure_r4_local_receipts(
         root=root,
@@ -14529,6 +14592,7 @@ def _reconcile_local_teacher_claims(
         if row.get("kind") == "teacher-label"
     }
     reconciled_rows: dict[str, Mapping[str, Any]] = {}
+    recovery_source: Mapping[str, str] | None = None
     for claim in claims:
         row = completed_by_work.get(claim.work_id)
         task = tasks.get(claim.work_id)
@@ -14546,6 +14610,22 @@ def _reconcile_local_teacher_claims(
             ):
                 row = legacy
         if row is not None and isinstance(row.get("record_sha256"), str):
+            if "attempt" in row and (
+                task is None
+                or not _local_r4_recovered_label_matches(
+                    workset=workset, work_id=claim.work_id,
+                    settlement_attempt=claim.attempt, task=task, label=row,
+                )
+                or canonical_json.canonical_json_sha256_strict(
+                    {key: value for key, value in row.items() if key != "record_sha256"}
+                ) != row["record_sha256"]
+            ):
+                raise DistillationError("local R4 recovered label identity conflicts")
+            if "attempt" in row:
+                if recovery_source is None:
+                    recovery_source = _validate_ox_source_binding(ox_alpha_source_binding())
+                if {key: row.get(key) for key in recovery_source} != recovery_source:
+                    raise DistillationError("local R4 recovered label source conflicts")
             reconciled_rows[claim.work_id] = row
     reconciled = [claim for claim in claims if claim.work_id in reconciled_rows]
     if reconciled:

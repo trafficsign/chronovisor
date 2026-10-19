@@ -1176,3 +1176,25 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-20 00:49 JST — cold再構築後のdeferを追加診断。CPU sampleは待機が主体で、Librarian collection-reviewがresearch枠を約80〜147秒占有し、dailyが60秒の待機上限へ達していた。00:42にはdailyが27.790秒でresearch枠を取得し、直後のLibrarian再取得はbusyで拒否されたため、既存のwaiter優先queueは機能している。その後は残る共通model枠待ちでresource_busyとなり、次の通常周期で上記正式成功へ復帰した。割込みによる飢餓やCPU停滞と断定せず、他roleを停止・quota削減・優先順位変更せずに、この競合を含む実容量を測る判断。schedulerのlease占有時間（model待ちを含む）、生成時間、defer/preemption、CPU時間を別々に集計する。Convergeは元の30分周期、Librarianは元の5分起動周期を維持する。
 
 - 2026-10-20 00:49 JST — cold再構築とMCP/HTTP確認負荷を除き、定常窓の下界を00:48:44.926011へ加算記録した。この後の最初のqueue snapshotから3時間以上を計測する。search/lintは各queueへの実流入、teacherは受入済みlocal R4との結合と平均763.7/平日1052.4の流入を使い、隔離・source staleと正常判定の終端を分ける。自動cloud0・supervisor active0・09:15 PAUSED・Qwen low・300秒と既存gateを維持。7日継続は未完の観測のまま。
+
+- 2026-10-20 01:56 JST — 定常窓の実開始は00:52:08、必要な3時間の最短終了は03:52:08。最初の1.011時間の途中集計ではsearch正常34＋隔離3（pending28045→28008、実流入0）、lint正常10（69→59、実流入0）、teacherのvalid local R4受入13件。teacherは308.6件/日相当で、平均流入との差は−455.1/日、平日との差は−743.8/日。この時点では平均流入下でbacklogが増える見込みだが、最終容量は3時間以上で確定する。worksetへの新規登録64件には過去candidateの展開を含み、この窓の新しいas_ofを持つrallyは0件なので、workset登録率を日々の新規流入へ読み替えない。materializationは60観測すべてdirty0、観測したmodel sessionの失敗・生成時間欠測・remote呼出しは0。最初のsearch隔離に残るauthorityエラー欄は前日18:49の履歴で、現在の技術失敗へ数えず、隔離そのものは正常判定と別に計上する。Convergeの初回は約20.5分、その終了から次の通常起動まで約30分で、lintの実効周期も計測に含める。
+
+
+- 2026-10-20 02:41 JST — 内部stageの監視漏れを訂正。daily全体がcapture_onlyでも02:14:45のCounterfactualInvalid/counterfactual_system_error/count1をstateが保持していた。旧private observerはworker_status=errorだけを観測していたため、以後の「技術エラー0」は全stageの結論として撤回する。02:35からlast_failure_at・stage・error digest・countを全outer statusで観測する補助observerを追加し、旧log/stateは保持した。モデルaudit、queue差分、sealed local R4の受入数自体は保持されており、定常窓は実際の失敗・延期時間を含めた容量として続ける。直近集計のsearch64 session/lint14 sessionは生成時間欠測0・失敗0、ingestにはcapacity_unavailable/生成未開始の欠測1件があり、旧search30件のinvalid_request欠測と混同しない。
+
+- 2026-10-20 02:41 JST — CFの新失敗はanswer2呼出の成功後、utilityの実行前に発生。10/18 19:51以後に実bytesで確定済みの固定12000-byte cap拒否と同じ呼出パターンだが、今回の生成回答bytesは保存されていないため同一原因と断定しない。現在の対象群の回答を空としたutility下界も固定cap付近で、過去にもこの固定入力群が通常3attempt/隔離へ進むことを確認済み。入力切詰め、cap拡張、prompt/schema変更、candidate並替え、system errorの品質分類への変更は既存契約を変えるため行わない判断。R4 authorityの原因修復と正常daily受入はこのCF制約とは別に成立している。02:39の実dailyを1秒sampleしたところ727中719sampleが待機で、同時間の減速をCPU停止や全materialization再構築とは断定しない。追加package配備はせず、正常な他role競合と既存CF制約を含めた3時間測定を完了する。
+
+
+- 2026-10-20 02:58 JST — 02:56:25にCFの同じCounterfactualInvalid/system_errorが再発しcount2となった。一方、同時刻に正式last_successは通常経路で更新され、local R4は33件まで進行。CF失敗の消去・品質分類への変更は行わない。最終health確認もhuman_wait全消失を事前に仮定せず、警告が残る場合は受入未達として別記し、runtime/authority/履歴の保持確認を最後まで実行する。private closeout helperは警告時の早期assert停止を、passed=falseと警告を証跡へ保存する形へ変えた。製品のalert判定や受入条件は緩めていない。
+
+
+- 2026-10-20 03:18 JST — CFの同じsystem_errorは03:07:40にcount3へ進行。さらに03:15:52のRawSegmentCorrupt/count1を別stageの実失敗として検出した。error digestは既存の「Raw segment indexes changed during snapshot」と完全一致し、3回の前後signature照合すべてで並行更新を検知した拒否である。配備済み8e615e76から通常RawStore.committed_segment_snapshotをread-onlyで一度呼び、44525 unitsを2.256秒で正常検証できた。Rawの物理破損とは断定しない。共有cache修正は不変indexの再解析費用を減らすもので、継続更新のfail-closed拒否を消す契約ではなく、その回帰も維持する。今回の単発拒否と通常retryに伴う時間を測定から取り除かず、再分類・retry上限引上げ・writer停止は行わない。数時間の完全無失敗を主張せず、非modelの反復再解析/不要再保存を減らした効果と、モデル競合・残る契約拒否を分けて記録する。
+
+
+- 2026-10-20 03:29 JST — 新たな回復バグを確定。03:15:40のteacher labelは保存後にRaw snapshot競合で中断し、03:22の正規再試行が同じlabel digestをworksetの完了へ再利用した。このときimmutable labelのattempt1に対し、worksetのattempt_countは2、completion_digestは同じlabelを指すため、R4公開の厳密attempt照合が拒否した。現在の新source teacher label42件に対してR4は41件で、未発行はこの03:15:40の1件。旧device mismatchの再発ではなく、partial append後のclaim回復で生成attemptとretry attemptを混同する別の整合不具合である。通常後続周期は別labelのR4を発行できるが、この未発行を完了や品質保留へ読み替えない。旧label・workset履歴・sealed authorityを変更せず、原labelのattemptと現在のretry履歴を両方保持する正規回復の修正・回帰を検討する。追加変更が必要になったため、現在の窓は是正前の実測として保持し、最終版の必須CI/安全境界/通常受入とcoldを除く定常窓を再確認する。根因修正をせず単にrequeueしたりattempt照合を外すことはしない。
+
+- 2026-10-20 03:44 JST — claim回復の新しい3失敗を合成fixtureで再現し、生成labelのattemptと回収後settlement attemptを区別する共有照合を実装。work IDを元payload digest・route・profileから再計算し、immutable work itemのdigest・候補参照・routeとcompletionのlabel digest/refが完全一致する場合だけ、後続attemptによる同じlabelの完了を認める。labelの元attempt、worksetの回収attempt、transition chainは保持し、同じsourceの未発行R4だけを通常のsealed writerで加算する。未来attempt・bool・異なるpayload/work・source driftを拒否する14回帰と既存関連463件が成功。再実行で既存receipt/ledger/workset履歴が変わらないことも確認した。
+
+- 2026-10-20 03:44 JST — 判断：既に旧sourceで完了済みとなった03:15の1件は、source切替後に新publisherを旧sourceとしてR4へ帰属させない。独立したread-only設計確認でも、既存の跨source回復は旧source時点のsealed pending markerがあるfailure経路だけで、今回のvalid labelには同等の証明がないと確認。事後markerを作ってsource照合を外すことは採用せず、旧labelとattempt2 completionを保持し、この歴史的1件のR4未発行を明示的な未完了として残す。新sourceの通常回復を修正し、今後の同じ中断でreceiptが失われないことを検証する。prompt/schema/frozen inputs、source gate、quota、attempt上限は変更しない。
+
+- 2026-10-20 03:47 JST — 独立レビューで、source切替後の旧labelを回収するとsource照合の拒否より先にworksetを完了へ進める潜在経路も確認した。回収batchの現source bindingを一度検証し、commit前に全sourceフィールドを照合、公開後の既存再照合も維持する。commit/tree相違の回帰2件を追加し、16新回帰を含む関連471件が成功。旧sourceの履歴的未発行を新版sourceとして採用せず、履歴・source gateを保持する。
