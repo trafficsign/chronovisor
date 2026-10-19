@@ -117,13 +117,19 @@ def _search_label_review_config(root: Path | None = None) -> Mapping[str, Any]:
     path = _runtime_root(root) / "config.toml"
     try:
         snapshot = path.read_bytes()
-        data = tomllib.loads(snapshot.decode("utf-8"))
+        return dict(_parse_search_label_review_config(snapshot))
     except FileNotFoundError:
         return {}
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise NativeLunaIdentityError(
             "native_luna_config_unavailable"
         ) from exc
+
+
+@lru_cache(maxsize=1)
+def _parse_search_label_review_config(snapshot: bytes) -> Mapping[str, Any]:
+    """Reuse parsing only for identical bytes; every caller rereads the file."""
+    data = tomllib.loads(snapshot.decode("utf-8"))
     section = data.get(SEARCH_LABEL_REVIEW_SECTION)
     if section is None:
         return {}

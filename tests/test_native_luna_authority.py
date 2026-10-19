@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
@@ -679,3 +680,35 @@ def _explicit_legacy_cloud_opt_in(monkeypatch):
     from chronovisor.core import model_execution
 
     monkeypatch.setattr(model_execution, "automatic_cloud_allowed", lambda *_args: True)
+
+
+def test_review_config_reuses_only_identical_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('[search_label_review]\nauthority = "local"\n')
+    observed = path.stat()
+    calls = 0
+    original = native.tomllib.loads
+
+    def parse(value: str) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return original(value)
+
+    native._parse_search_label_review_config.cache_clear()
+    monkeypatch.setattr(native.tomllib, "loads", parse)
+    first = native._search_label_review_config(tmp_path)
+    assert first["authority"] == "local"
+    assert native._search_label_review_config(tmp_path)["authority"] == "local"
+    assert calls == 1
+    # Preserved stat metadata must never conceal changed authority bytes.
+    path.write_text('[search_label_review]\nauthority = "other"\n')
+    os.utime(path, ns=(observed.st_atime_ns, observed.st_mtime_ns))
+    assert native._search_label_review_config(tmp_path)["authority"] == "other"
+    assert calls == 2
+    path.write_text('[search_label_review\n')
+    with pytest.raises(native.NativeLunaIdentityError, match="config_unavailable"):
+        native._search_label_review_config(tmp_path)
+    path.unlink()
+    assert native._search_label_review_config(tmp_path) == {}

@@ -38,10 +38,10 @@
   <integer>60</integer>
 
   <key>LowPriorityIO</key>
-  <true/>
+  <false/>
 
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>Standard</string>
 
   <key>StandardOutPath</key>
   <string>@@HOME@@/.chronovisor/logs/search-label-drain.launchd.out.log</string>

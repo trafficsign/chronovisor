@@ -211,8 +211,8 @@ def test_launchd_template_renders_portable_absolute_paths(
         assert payload["RunAtLoad"] is False
         assert payload["StartInterval"] == 60
         assert payload["ThrottleInterval"] == 60
-        assert payload["LowPriorityIO"] is True
-        assert payload["ProcessType"] == "Background"
+        assert payload["LowPriorityIO"] is False
+        assert payload["ProcessType"] == "Standard"
 
 
 def test_launchd_label_prefix_reads_runtime_config(tmp_path: Path) -> None:
