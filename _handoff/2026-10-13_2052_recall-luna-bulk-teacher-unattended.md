@@ -134,7 +134,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] identity3：最終commitの必須CI成功後、安全境界で一度配備し、実archive・drift=false・同一daily plistの再開を確認する。
 - [x] identity4：新local teacherのR4 receiptを伴う正常daily受入と、原因修正によるhuman_wait解除を確認する。
 - [ ] identity5：cold rebuildを除く数時間のsearch/lint/teacherを測り、流入差引後の純減・ETA・制約を記録する。
-- [ ] identity5a：再開後に顕在化したRaw snapshot再解析と既存CF scheduling再計算を直し、正常運転が続く定常窓を取り直す。
+- [ ] identity5a：再開後に顕在化したRaw snapshot再解析・既存CF scheduling再計算・終端duplicateの不要な再保存を直し、正常運転が続く定常窓を取り直す。
 - [ ] identity6：7日継続は継続観測として保持する。数時間の受入を7日の完了へ読み替えない。
 
 ### Phase 5：別件の修理
@@ -1166,3 +1166,13 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-19 23:44 JST — 追加律速の修正は関連251件と構造36件、ruff/mypy/import/architectureを通過。実状態のmemory snapshot・現page hashに一致した10項目によるread-only比較は5.387秒から0.532秒、semantic state一致、書込0・model呼出し0。これはparse/比較のみの下界で、実書込省略の効果や本番排出率を代替しない。時刻だけが変わる再観測でstate/events bytes不変、実metadata変更は保存、targeted scopeはlocked guardを通る回帰を追加した。
 
 - 2026-10-19 23:44 JST — 判断：3c0c94d5は必須CI成功済みだが未配備。追加配備helperを変更前で保留し、このduplicate律速修正も最終targetへまとめて再CIする。これによりsource切替とcold rebuildをもう一回増やさない。実行中Convergeには停止信号を送らず自然終了を待ち、所有helperと保持済みplistの状態だけを新target用private証跡へ引き継ぐ。旧marker/receiptの証跡を保持し、旧authority・ledger・checkpoint・lockの手編集は行わない。定常測定はこの最終targetの受入後に開始する。
+
+- 2026-10-20 00:13 JST — 最終target 8e615e76のquality・Python 3.14 compatibility・Securityは全て成功。quality実JUnitは7418件、失敗/エラー0、skip4（7414 passed）、HNSW/semantic smokeも成功。Convergeは自然終了し、保持済み3周期jobとdailyのidle境界を同じownerのまま最終targetへ引き継いだ。停止したのは未配備3c0c94d5用の所有待機helperだけで、production workerへのsignalは0。現在は通常ingestのlease解放を待つ。最終版の7 package構成はMCP1.30.0とcommit完全一致で事前取得済み、依存制約bytes不変。定常測定の開始は新版の正常daily・R4・cold再構築・fresh healthの受入後とし、旧窓とCI待機中の値は使わない。
+
+- 2026-10-20 00:18 JST — 通常ingestバッチの終了とdistillation leaseの空きを待ち、00:16:49に追加修正8e615e76を一度配備した。常駐5サービスと通常daily childの実archive/direct_urlは同commit/MCP1.30.0、supervisorは同じ起動時刻・disabled・active0・実child0で保持、workerへのsignal0。旧authorityの配備済み検証は成功し、全bytes不変・drift=falseを再確認、旧sealと観測証拠に結合した新しいsealed attestationだけを加算した。元の3周期jobと完全同一daily plistを再開し、所有maintenanceを解除。設定はruntime.sourceだけ変更し、既存untracked資料は前後hash一致。今回の配備総数はR4整合修復1回と、その後に実測した非model律速の是正1回で、中間3c0c94d5の配備は0回。新しい正常daily受入・定常窓は引き続き観測する。
+
+- 2026-10-20 00:49 JST — 最終版の初回正常dailyは00:46:49.103781に完了し、同周期のlabel2件とlocal/validのsealed R4 receipt2件を結合確認。正式last_successは00:46:48.469327へ更新、worker_failure_count0・capture_only・materialization dirty0。fresh MCP init/statusは成功、実commit/expectedとも8e615e76・drift=false、recall_distillationのhuman_waitなし、残る理由はchronological_split_incomplete/data_wait。分類の変更ではなく正規成功による解除。HTTP200/drift=falseも確認したが、HTTPのmaterialized healthはstaleを明示するためfresh MCPと区別する。旧authorityと同一daily plistの全bytesを再確認。最初のR4整合修復後の正常受入22:19:03はそのまま保持する。
+
+- 2026-10-20 00:49 JST — cold再構築後のdeferを追加診断。CPU sampleは待機が主体で、Librarian collection-reviewがresearch枠を約80〜147秒占有し、dailyが60秒の待機上限へ達していた。00:42にはdailyが27.790秒でresearch枠を取得し、直後のLibrarian再取得はbusyで拒否されたため、既存のwaiter優先queueは機能している。その後は残る共通model枠待ちでresource_busyとなり、次の通常周期で上記正式成功へ復帰した。割込みによる飢餓やCPU停滞と断定せず、他roleを停止・quota削減・優先順位変更せずに、この競合を含む実容量を測る判断。schedulerのlease占有時間（model待ちを含む）、生成時間、defer/preemption、CPU時間を別々に集計する。Convergeは元の30分周期、Librarianは元の5分起動周期を維持する。
+
+- 2026-10-20 00:49 JST — cold再構築とMCP/HTTP確認負荷を除き、定常窓の下界を00:48:44.926011へ加算記録した。この後の最初のqueue snapshotから3時間以上を計測する。search/lintは各queueへの実流入、teacherは受入済みlocal R4との結合と平均763.7/平日1052.4の流入を使い、隔離・source staleと正常判定の終端を分ける。自動cloud0・supervisor active0・09:15 PAUSED・Qwen low・300秒と既存gateを維持。7日継続は未完の観測のまま。
