@@ -71,7 +71,7 @@ created_at: 2026-10-13T20:52:29+09:00
 
 ### Phase 3：本線の再開と日次運転
 - [ ] 3-1 `recall.distillation.enabled = true` にして本線を再開する。R5 の残り（blind repeat、反実仮想、validation、locked test、壊した対照が通らないこと）を受入まで進める。反実仮想が下限に届かない間は、その理由を「データ待ち」として表示する。
-- [ ] 3-2（2026-10-18改訂）日々の増分をローカル教師で処理する。一致率を理由に Luna/cloud へ戻さず、実測で選んだ reasoning 水準を使い、品質・独立性要件を満たさない昇格は既存gateで保留する。
+- [x] 3-2（2026-10-18改訂）日々の増分をローカル教師で処理する。一致率を理由に Luna/cloud へ戻さず、実測で選んだ reasoning 水準を使い、品質・独立性要件を満たさない昇格は既存gateで保留する。
 - [x] 3-3 R6（student 候補）と R7（shadow → canary 5 / 25 / 100、自動ロールバック）を、本線の設計どおり無人で進むところまで実装して配備する。昇格するかどうかは既存のゲートだけで決める。
 
 ### Phase 4：止まったら知らせる
@@ -126,7 +126,15 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] local2：既存sealed300を実serverが対応するreasoning水準で測定し、一致率・3x3行列・技術失敗・median/p90と共有資源余裕で最高の実用水準を選ぶ。
 - [x] local3：全自動経路をlocalへ切替え、cloud fallbackを禁止、独立性・既存gate・履歴とlabel provenanceを保持する。
 - [x] local4：health/initにactive teacher/reasoning/backlog drain rateを表示する。遅い正常drainをhuman_waitにしない。
-- [ ] local5：必須CI・commit・安全境界で一度配備・drift=false・通常daily cycleとprocess/receiptのcloud0確認・09:15更新を完了する。
+- [x] local5：必須CI・commit・安全境界で一度配備・drift=false・通常daily cycleとprocess/receiptのcloud0確認・09:15更新を完了する。
+
+### 2026-10-19 APFS再採番の整合修復と定常容量
+- [x] identity1：共有規則で永続inode/現在volume/birthを検証し、旧authorityのbytesと処理中TOCTOUを保持する。
+- [x] identity2：st_devの全siblingを分類し、永続32照合箇所を共有helperへ集約、再作成・別volume・再採番と履歴の回帰を通す。
+- [x] identity3：最終commitの必須CI成功後、安全境界で一度配備し、実archive・drift=false・同一daily plistの再開を確認する。
+- [x] identity4：新local teacherのR4 receiptを伴う正常daily受入と、原因修正によるhuman_wait解除を確認する。
+- [ ] identity5：cold rebuildを除く数時間のsearch/lint/teacherを測り、流入差引後の純減・ETA・制約を記録する。
+- [ ] identity6：7日継続は継続観測として保持する。数時間の受入を7日の完了へ読み替えない。
 
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
@@ -155,8 +163,8 @@ created_at: 2026-10-13T20:52:29+09:00
 - 配備後、runtime の drift が false であること。
 
 ## ブロッカー（発生時のみ）
-- 現在（2026-10-19）：R4 legacy root authorityのdevice不一致で新local teacherのreceipt発行が停止。inodeは一致し元sealは正常だが、既存validatorのdevice検査を解除せず、authority/ledger/checkpointを再封印しない制約の下では正常daily受入を完了できない。高速dailyだけ自然終了後にdisable/bootout済み、通常Converge/search/lint/ingestはlocalで継続。cloud fallbackは無し。Planをblockedとする。
-- 採用水準はQwen low、sealed300悲観一致78.33%、待ち込み中央値41.22秒/p90 79.18秒。新local labelは1件正規保存したがR4正式受入未完。定常の正常cycle throughputと7日継続は未検証で、1324.9件/日は共有負荷を含む事前projectionに留める。
+- 現在（2026-10-19）：R4 legacy root authorityのdevice再採番による技術ブロッカーは解消。same inode・現在のauthority parentと同一volume・authority作成以前のbirthを共有経路で照合し、旧authorityを変更せず21:56に配備済みverifierが成功、22:02:57に新local teacherの正規R4 receipt、22:19:03に正常daily全体の受入を確認した。高速dailyは保存済み同一plistで再開済み。fresh MCPのhuman_waitも解除され、Planはrunningとしてcold rebuild後の定常測定と7日継続観測を続ける。
+- 採用水準はQwen low、sealed300悲観一致78.33%、待ち込み中央値41.22秒/p90 79.18秒。新sourceのlocal labelとR4 receiptは正規保存され、旧sourceでreceipt未発行だったlabelも保持する。定常の正常cycle throughputと7日継続は未検証で、1324.9件/日は共有負荷を含む事前projectionに留める。
 - local profileの昇格はteacher_models_not_distinct、教師/各class/control/probe/CFの既存floor、split/holdout等でheld。旧native認証の合格項目を新local profileへ引き継がず、既存Luna集合へlocal labelを混ぜない。
 - 旧native認証の履歴（現localの受入とは別）：2026-10-18 22:55 JSTの364811daによるsealed baselineと対応snapshotでは、固定split・時系列・assignment・row integrityとblind repeatが通過し、残るgate理由はcounterfactual_pairs_below_floorだけ。CFは5/100、post-cutoff・distinct judge・両順序一致・既存validator・selected-only条件は維持する。適格workの実完了時刻によるrolling24hは4組/日（今回の通常formal観測を含む）へ減り、同率が続く場合の100組到達参考日は2026-11-11 JSTへ更新した。一方、18:51の復帰以後4.059時間の適格増分は0で、2回の正式成功も適格CF増とは一致しない。短時間の0件を持続的な0件/日とは断定せず、11/11も確定日・自動運転の保証率にはしない。この旧native条件の予測を現local運転の所要時間へ転用しない。固定blind repeatは200組・stable161・unstable39・Wilson下限0.74455956で既存floor100/0.60を維持。
 - 7日無人継続は未完。別モデルA300件の独立比較測定は完了し、一致率72.6667%。低一致率を理由とする日次Luna継続判断は2026-10-18の決定4改訂で撤回し、local切替を実施中。補助比較Bも300件終端し、有効287件の一致165/287（57.4913%）、技術失敗13件を分母から除外した。モデル不変性の合格とは扱わず、品質昇格は保留したままlocalへ切り替えた。旧09:15 cloud automationは更新済みpromptを保持してPAUSED、現在の追跡はlocal receiptとhealth/initで行う。
@@ -1133,3 +1141,13 @@ created_at: 2026-10-13T20:52:29+09:00
 
 
 - 2026-10-19 21:22 JST — Background比較完了: 同じ修正後read-only前処理はwall385.720秒（profile本体378.994秒）、Standardは23.933秒（profile本体23.702秒）。検証数は5241→5247で通常workerの6件進捗による差だけで、model呼出0。設定解析reuseだけでは残るI/O throttleをsearch専用のStandard化で解消する判断を確定。初回CIはlaunchd構成hash記録の更新漏れだけでquality/Python3.14が不合格、HNSW/semantic smokeは成功。旧不合格SHAは配備せず、不要になった同SHAのSecurity runを取り消して証跡を保持した。生成scanからsearch plistのmanifest1項目だけを更新し、architecture edge/例外ceiling/validatorを緩めていない。修正後のarchitecture検査と36 tests成功。全必須CIを最終SHAでやり直す。
+
+- 2026-10-19 21:56 JST — 最終package aa8a82d5のquality・Python3.14・Securityがすべて成功。quality実JUnitは7410 tests、failure/error0、skip4（7406 passed）。既存周期workerの自然終了とingest/distillation lease解放を待ち、21:56に一度だけ配備した。常駐5サービスと通常daily childの実archive/direct_urlは同commit、MCP1.30.0。supervisorは元PID・起動時刻・disabled・active0・実child0を保持し、稼働workerへのsignal0。LIVEの既存untracked資料は全hash一致。clean attestation checkoutは同じパスでtargetへ進め、設定はruntime.sourceだけを更新した。
+
+- 2026-10-19 21:56 JST — 配備済みverifierで旧legacy root authorityを正常読取し、前後bytes一致・runtime drift=false・新source binding一致を確認した。旧authorityのseal/hashと観測statへ結びつく証拠だけをprivateの新しいsealed attestationへ加算保存し、旧authorityは変更しない。search専用plistのStandard/LowPriorityIOだけを同一署名者で反映し、runnerと他service plistは全bytes不変。所有maintenanceを解除し、3周期jobと保存済み完全同一bytesのfast daily plistを通常登録へ復帰した。R4 root mismatchの原因修正は確認済みだが、正常dailyの新R4 receipt受入・human_wait解除・数時間の定常排出は以後の実観測で確認する。
+
+- 2026-10-19 22:05 JST — 22:02:57の通常local teacher labelと新sourceのsealed R4 receiptをread-onlyで結合し、outcome valid・schema/coverage valid・local routeを確認。旧authorityの書換えなしでR4発行が実際に進んだため、技術ブロッカー記述を解消済みに更新した。最初のdaily全体は281.911秒でmaterialization_budget_exhaustedとして正規deferし、次cycleへ継続。まだ全cycle成功やhuman_wait解除へ読み替えない。source切替のcold rebuildは165257行中dirty105282まで進行しており、この期間を定常容量から除外する。HTTP200・drift=falseは確認したが、health materializationはstaleで旧失敗を含むためfresh受入を待つ。平均763.7/平日1052.4の元資料はcandidate catalogのteacher_items（top-three-plus-last、最大4件/rally）であることも再確認した。
+
+- 2026-10-19 22:25 JST — 最初の正常dailyは22:19:03.712958にcapture_onlyで完走（190.006秒、label1件、同cycle内の新source/local/validなR4 receipt1件をseal検証付きで結合）。正式last_successは22:19:02.942170へ更新し、旧R4エラー欄は空になった。freshな新規stdio MCPでinit/statusとも成功、実commit=expected=aa8a82d5・drift=false、human_waitなしを確認。残るalertは既存のchronological_split_incomplete/data_waitで、health分類コードは変更していない。旧authorityとdaily plistの全bytes一致を再確認した。3-2/local5/identity4を完了へ更新する。当初のlocal切替で2回配備した履歴は取り消さず、今回の整合修復は1回配備として区別する。
+
+- 2026-10-19 22:25 JST — 既存Codex MCP接続はセッション開始時の92814f75を保持しており、同接続のruntimeは旧版と正しく表示された。稼働セッションを切断しない判断とし、新規MCP processを配備済みarchiveから起動して上記の現行受入を検証、検証用processは正常終了した。初回再構築と配備確認用MCP/HTTP読取の一時負荷を排除するため、定常窓の下界を22:25:17へ加算記録し、以後の最初のqueue snapshotから3時間以上を測る。shared slot、research待ち/preemption、role別生成時間欠測、通常cycle、queue流入と終端、process CPUをmetadataだけで観測する。7日継続は未完のまま。
