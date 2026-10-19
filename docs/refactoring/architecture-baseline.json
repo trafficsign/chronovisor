@@ -90147,7 +90147,7 @@
     },
     {
       "path": "launchd/com.trafficsign.chronovisor-search-label-drain.plist",
-      "sha256": "9e95a07962810dab6a8535610ca54493207c19d307e3db16f36a90528ad3ce26",
+      "sha256": "af0d8cf64d318b8fd5aff6b0469824b1876c1e8e465196009d3ea7639e3d35f4",
       "label": "@@LAUNCHD_LABEL_PREFIX@@search-label-drain",
       "program_arguments": [
         "@@PROJECT_ROOT@@/scripts/chronovisor-search-label-drain"
