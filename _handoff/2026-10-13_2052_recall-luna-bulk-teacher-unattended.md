@@ -141,7 +141,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] flow1：再発CFのcauseを確定し、固定上限拒否を理由付きper-item outcomeへ変更、本線継続とfailure内訳を回帰で確認する。
 - [ ] flow2：共有slot・秒/件・割込み・検証費用を再集計し、lowのままteacherをbacklog-only処理より優先する。配備後の実効容量と流入差引ETAを確認する。
 - [x] flow3：cloud無効後のcode-repairとingest-frontierの実consumerを確認する。
-- [ ] flow4：candidateの必須CI後、周期jobをidle保留した安全境界でmain更新・一度配備し、drift=falseとhuman_waitなしの正式成功2回を確認する。
+- [x] flow4：candidateの必須CI後、周期jobをidle保留した安全境界でmain更新・一度配備し、drift=falseとhuman_waitなしの正式成功2回を確認する。
 
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
@@ -170,7 +170,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - 配備後、runtime の drift が false であること。
 
 ## ブロッカー（発生時のみ）
-- 現在（2026-10-20 12:10 JST）：旧R4 device再採番の整合修復は保持。再発human_waitの根因は固定12000-byte CF入力拒否のrun failure分類で、per-item隔離・quota実試行計上・Raw/catalog並行更新のdefer・teacher優先を180013eeへまとめ、必須CI後12:03:38に一度配備した。5常駐archiveと通常daily child、HTTPは同commit/drift=false、scheduleは元通り。新sourceのcold materializationが進行中で、11:55の旧failure_count2によるhuman_waitはまだ継承されている。通常本線での解除、正式成功2回、定常容量は受入待ち。state手編集で解除せず、Planはrunningを維持する。
+- 現在（2026-10-20 13:23 JST）：固定12000-byte CF入力拒否のrun failure分類をper-item隔離へ直し、quota実試行計上・Raw/catalog並行更新のdefer・teacher優先と共に180013eeへまとめ、必須CI後12:03:38に一度配備した。常駐5archiveと通常dailyは同commit、HTTP drift=false、schedule復帰済み。通常更新でfailure_count0となり、13:16:26・13:21:23 JSTの正式成功2回とlocal R4、成功後health6観測のhuman_wait0を受入済み。cold rebuildは完了。現時点で未完なのは流入対比の定常容量・水準判断と下記の長期品質条件で、Planはrunningを維持する。
 - 採用水準はQwen lowを保持。定常のvalid local R4受入は351.806件/日で、平均新規流入763.714との差−411.908件/日、平日1052.4との差−700.594件/日。現在の共有負荷ではbacklogが増えるためteacher解消ETAはない。事前projection1324.9件/日を運用容量として使わず、この実測へ更新する。検索は実流入0・再open調整後の純減831.542件/日、残27742件、同条件33.362日。lintは処理191.894件/日−実流入55.969件/日＝純減135.925件/日、残15件、同条件2.649時間。これらは3時間の実流入・共有負荷が続く場合の条件付きETAである。
 - 現local profileはchronological_split_incomplete/data_wait、verified_truth0・paired_denominator0・rollout0%。独立性、教師/各class/control/probe/CFのfloor、split/holdoutを保持し、旧native認証の合格項目を新local profileへ引き継がず、既存Luna集合へlocal labelを混ぜない。旧sourceでR4未発行の既知1件は、当時のsealed pending証明がなく跨sourceで帰属させられないためlabel/completionを保持して未完とする。現sourceの定常44 labelsは全44件R4受入済み。
 - 旧native認証の履歴（現localの受入とは別）：2026-10-18 22:55 JSTの364811daによるsealed baselineと対応snapshotでは、固定split・時系列・assignment・row integrityとblind repeatが通過し、残るgate理由はcounterfactual_pairs_below_floorだけ。CFは5/100、post-cutoff・distinct judge・両順序一致・既存validator・selected-only条件は維持する。適格workの実完了時刻によるrolling24hは4組/日（今回の通常formal観測を含む）へ減り、同率が続く場合の100組到達参考日は2026-11-11 JSTへ更新した。一方、18:51の復帰以後4.059時間の適格増分は0で、2回の正式成功も適格CF増とは一致しない。短時間の0件を持続的な0件/日とは断定せず、11/11も確定日・自動運転の保証率にはしない。この旧native条件の予測を現local運転の所要時間へ転用しない。固定blind repeatは200組・stable161・unstable39・Wilson下限0.74455956で既存floor100/0.60を維持。
@@ -1272,3 +1272,11 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-20 12:08 JST — 4周期jobを自然終了後にidle保留し、通常ingest/distillation両leaseの安全境界で12:03:38 JSTに180013eeを一度配備。必須CI成功済みexact SHAをmainへpushしてから常駐5serviceを切替、5実archive/direct_urlと通常launchd daily childは同commit/MCP1.30.0を確認。元の3管理scheduleとbyte-identicalな10秒daily plistを復帰し、所有maintenanceのみ解除した。supervisorとmodel serverは元PID/起動時刻、supervisor disabled/active0・実child0、09:15 automationは同hash/PAUSED。runtime.source以外のTOMLは完全同一。稼働workerへの停止signal0・supervisor再起動0。
 
 - 2026-10-20 12:08 JST — 初回HTTP healthは30秒timeout、続くfresh MCP init/statusは成功、HTTPは新版commit/drift=falseを確認。Recallのhuman_waitは11:55の旧failure_count2が引き継がれたもので、まだ解除とは報告しない。新sourceに対するmaterializationの正規cold再構築（165397行中dirty161618を観測）が進行中のため、定常容量窓は通常成功・R4・dirty0の後に開始する。ledger/checkpoint/state/authorityへ手編集せず、通常mainlineの成功で解除することを待つ。
+
+- 2026-10-20 12:35 JST — cold再構築は12:26:54.324619の通常正式成功時にdirty0へ到達し、通常daily/local R4の結合も確認した。ただし旧CF failure_count2はCF未実行cycleで保持する既存仕様のため、12:30/12:33のteacher成功だけをhuman_wait解除に数えない。RO診断で通常FIFO先頭100件は現在payloadへ100/100解決でき、実データ欠落ではない。一方cold_start_lane_turnの4回中3回はtest/embargoのmodel scopeへ絞られ、scope外trainのclaimは既存経路でpayload_missingへ隔離される。今回のcap再発とは異なる既存のscope/claim挙動として証拠を保存し、4回目の通常CFを観測する。queue/stateの手補正やfrozen入力・split gateの変更は行わない。12:29からの容量窓は旧失敗とquota偏りを含む暫定観測で、解除後の正式受入と区別する。
+
+- 2026-10-20 13:14 JST — 通常cycle（13:07:54–13:12:36）が固定cap 1件をcounterfactual_input_limitとして隔離し、既存state更新でfailure_count 2→0・CF model_calls 5→6を確認。HTTPは180013ee/drift=false、human_waitなし・chronological_split_incomplete/data_waitのみ。cycle自体はteacher slot待ちでdeferredのため、残っている12:57のlast_successは解除後の成功に数えず、13:12:36より後のsealed formal成功を2回要求する。既存ledger/state/checkpointの手編集0。実archive監査は常駐5件と周期worker全て新版、旧MCP3接続はclient sessionであり重複workerではない。
+
+- 2026-10-20 13:23 JST — flow4受入。通常dailyのsealed formal successは13:16:26.509384・13:21:23.444291 JSTの2回で、両cycleの新local R4とsource180013eeが一致。初回以後のon-target HTTP health6観測はhuman_wait0、failure_count0、dirty0。固定上限拒否2件はquarantined/counterfactual_input_limitのまま既存work itemに保持し、失敗内訳から除外しない。旧last_successを後からclean stateへ組み合わせて成功に数えることを避け、解除cycle終了後だけを受入範囲とした。flow4を完了、flow2は定常容量と水準判断が残る。
+
+- 2026-10-20 13:23 JST — 容量の暫定分解では共有待ちを除いたproductive normal 4cycle/5labelsのresearch実行区間外の検証等551.402秒、child183.627秒、既存10秒cadenceを含めlow557.398件/日、model時間をゼロにした楽観上限730.468件/日。deferred全費用を除く小標本の上限で、定常能力の証明ではない。判断: model生成slot単独の2289.773件/日を本線容量へ読み替えず、最低1時間の通常観測を確定してから一段下のthinking offを同じsealed300で測る。offが速くても本線volumeと全gateを満たす証明なしには変更せず、試験中のmodel負荷を通常運転のthroughput窓へ混ぜない。
