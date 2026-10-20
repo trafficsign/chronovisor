@@ -146,7 +146,7 @@ created_at: 2026-10-13T20:52:29+09:00
 
 ### 2026-10-20 cycle固定費の最適化
 - [x] cost1：既存cycle receiptで起動/import・setup・model・training preparation・persist・waitを測定し、productive 4cycle以上の変更前内訳を記録する。
-- [ ] cost2：実測の大きい固定費から共有経路を最小修正し、全caller・検証同等性・300秒とquota保持を確認する。
+- [x] cost2：実測の大きい固定費から共有経路を最小修正し、全caller・検証同等性・300秒とquota保持を確認する。
 - [ ] cost3：candidate branchの必須CI成功後、安全境界で周期jobをidle保留し、一度配備・drift=false・human_waitなしを受け入れる。
 - [ ] cost4：cold rebuildを除く3時間以上の同方式容量と流入差引backlog ETAを測定し、reasoning水準とprovenanceを確定する。
 
@@ -1321,3 +1321,9 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-20 20:10 JST — 配備前の最終確認で、CF順番到来時に残時間が220秒以上あっても最初の反復案はcycleを終了していた点を補正。同じ既存blockをcycle内で再評価し、CF3対1と220秒floorを守ってからteacherへ戻る。CF後はteacher130秒floorを再確認し、batch/CFの結果とmodel_callsを正確に合算する。CF成功後も配分条件を満たし残時間があればlocal teacherを続行、native supervised importの分離は維持。短いCF no-op、成功、CFが残時間を消費する場合を追加し、setup/training各1回・label head再読・配分・残時間・集計を確認。最初の追加testは空batchなのにlabelをappendする矛盾したstubで失敗し、stubを実際の無進捗へ直して389tests/Ruff/mypy98source成功。production純増90行、tests純増125行へ確定。増分はCFの既存配分とfloorを緩めずcycle固定費を共有するためで、新しい制御moduleはなし。e9af8926のCI/取得済packageは中間証跡として保持し、補正後exact SHAの全必須CIを改めて通すまでmain/本番は変更しない。
 
 - 2026-10-20 20:24 JST — 水準再判定の前提を全caller grepで確認すると、productionのlocal_reasoningはlow/medium/xhighのみで、teacher・classification・lint・ingest・answerの5用途が単一levelを共有していた。後からoffが必要になっても配備を2回にせず、他用途の水準を変えないため、既存config resolverにrole別level上書きとoffを追加し、既存structured sessionでoffをboolean falseへ変換する最小の経路を今回に含める。現configはlowのまま。teacher provenanceは既存workerがconfigured level=offとfinal_attempt_level=falseを分けて記録し、既存R4 bindingはlevel/budget完全一致を保つ。classification authorityの許容gateは変更しない。invalid table/levelはfail closed。graphは該当箇所が古い/未追跡のため現sourceで補った。テスト追加時のpytest import漏れはcollection/Ruffが検出し修正済み。関連247tests、Ruff、mypy98sourceが成功。累積は本体（example含む）純増97行、tests純増151行、新production moduleなし。追加理由は既存承認済みの水準選択をteacherだけに適用し、1回配備の制約を守るため。
+
+- 2026-10-20 20:26 JST — cost2完了。最終candidate649f801cをGitHubへ取得用に公開し、配備で使う7環境のdirect_url commitとMCP1.30.0制約を確認。必須quality/Python3.14/Securityは同SHAで実行中、main/source/常駐serviceは未変更。cost3はCI完了・自然終了境界・通常R4受入を待つ。配備後は全research待ちを除いた従来容量と実calendar受入を併記し、後者を楽観projectionへ読み替えずETAを算出する。
+
+- 2026-10-20 20:46 JST — 649f801cの必須CIはquality 39414368091、Python3.14 39414368194、Security 39414368154すべて成功。隔離full suiteは7472 passed / 4 skipped / 58 deselectedを2環境で確認、architecture36・HNSW・semantic79も通過。取得用candidate push以外にmain/本番変更はまだなく、周期4jobの自然idle保留へ進む。safe boundaryは既存ingest/distillation leaseで確定し、supervisor/model serverへのsignalは行わない。
+
+- 2026-10-20 21:06 JST — cost3配備操作は1回完了。自然終了待ちでdaily/converge/search-label-drain/Librarianをidle保留し、既存ingest/distillation lease内でorigin/main・clean main・attested checkoutを649f801cへ進め、runtime.sourceだけをCAS更新。対象常駐5serviceの実archive/direct_urlが同SHA・MCP1.30.0。4周期jobは同plist/同managerで復帰し、通常daily子と検索/Librarianの実archiveも同SHAを受入。HTTPは649f801c/drift=false/human_waitなし、supervisorは同PID・disabled・active0、model serverへのrestartなし、cloud禁止・low維持。Librarianのfull sweep自然終了を待った時間と配備後cold rebuildは定常容量窓から除外する。通常R4を伴うclean formal success2回は次に確認するためcost3のチェックはまだ付けない。
