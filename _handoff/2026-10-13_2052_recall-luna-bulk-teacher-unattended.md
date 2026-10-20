@@ -1411,3 +1411,5 @@ created_at: 2026-10-13T20:52:29+09:00
 
 
 - 2026-10-21 07:08 JST — 指定の05:35以降ログを先に読了し、所有者代理の07:10決定をユーザーの決定8/9へ記録して再開。前回の一度制約と平日1316目標は今回の判断を妨げない。accec0afはsource純増19行・test98行の既存関数修正で、追加production module/daemon/cacheなし。新しいcode変更を先に足さず、この候補だけをCI branchへpushして必須CIを確認する判断。通常dailyの保留・同じplist・low、09:15 PAUSEDとsupervisor保全をlive照合してから安全境界で配備する。
+
+- 2026-10-21 07:12 JST — accec0afのrequired Securityでcertifi 2026.2.25にPYSEC-2026-4320を検出。再試行で隠さず、PyPI公式metadataとupstream releaseで修正版2026.10.19を確認した（https://pypi.org/project/certifi/2026.10.19/）。稼働制約の2026.7.22も対象だったため、最小後継として既存transitive依存certifiの下限1行とuv.lockだけを更新し、配備対象の既存constraintファイルも同じ版へ揃える判断。ほかの依存版・MCP1.30.0・モデル設定は保持する。constraint候補はprivateで事前解決し、本番への適用はidle配備境界に限る。新しいproduction module/監視層は追加しない。graphは10/14世代で位置が古いため、原因関数・両caller・native daily呼出箇所・runtime wrapperを現sourceで補った。
