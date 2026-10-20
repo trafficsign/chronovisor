@@ -154,7 +154,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] throughput1：CF blind comparison rejectを個別データ結果へ分類し、gate/retry履歴とfailure breakdownを保持する。
 - [x] throughput2：通常launchd dailyのsetup/otherを既存profilerで帰属し、原因とbatch反復の重複計算を既存コード内で修正する。
 - [x] throughput3：共有lease・stale・watchdog・配備境界・claim TTLを確認し、実測でlocal daily budgetを選ぶ。
-- [ ] throughput4：候補必須CI後に安全境界で一度配備し、通常R4・drift=false・human_waitなしを確認する。
+- [x] throughput4：候補必須CI後に安全境界で一度配備し、通常R4・drift=false・human_waitなしを確認する。
 - [ ] throughput5：cold rebuildだけを除く固定3時間を測り、1316件/日・流入差引ETA・最高reasoningを確定する。必要なら既存経路のpayload再キー履歴を含めoffを実測する。
 
 ### Phase 5：別件の修理
@@ -184,7 +184,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - 配備後、runtime の drift が false であること。
 
 ## ブロッカー（発生時のみ）
-- 現在（2026-10-21 03:21 JST）：最終候補f5b9a4feのrequired CI成功後、安全境界で今回1回のpackage配備を完了。throughput1–3の原因修正と900秒のlocal dailyが稼働し、HTTPは同SHA・drift=false・human_waitなし。cold rebuild完了時の新source valid R4は15件、materialization dirty0、通常state遷移で旧CF data rejectのworker failure countは7→0。完了cycleはresource_busyによりdeferredだったため、それを理由に後続warm時間を除外せず、固定窓を10/21 03:20:38.653901–06:20:38.653901 JSTへ設定。正式成功2回と3時間容量の受入は継続中。lowを保持し、cost4/throughput4–5は未完、Planはrunning。
+- 現在（2026-10-21 04:59 JST）：f5b9a4feの原因修正とlocal daily 900秒はrequired CI後に今回1回配備し、throughput1–4完了。04:27:39・04:57:25 JSTの通常daily clean formal success2回を新source valid R4へ照合し、最初の成功後30 health標本でhuman_wait0、HTTPはdrift=false。途中のformal停滞alertとその自然解消は実行ログに保持。cold rebuildだけを除いた固定窓03:20:38.653901–06:20:38.653901 JSTをlowで観測中。90分中間は57/57件・907.619件/日で、1316件/日の合否と最高reasoningは未確定。cost4/throughput5は未完、Planはrunning。
 - 前回測定（2026-10-20 16:15 JST、今回の固定費修正前）：Qwen low、通常1.009750時間でvalid local R4受入12件=285.219件/日、平均流入763.714差−478.495/日、平日1052.4差−767.181/日でbacklog増、teacher ETAなし。検索は新規/再open0・純減1235.949件/日、残27557件、同率条件22.296日。検索終了後も現検証費用が続く条件では本線の楽観上限620.771件/日（平均差−142.943）で解消ETAなし。旧0ab4d779の3時間352件/日と旧1324.9件/日projectionは比較資料として保持し、現容量へ転用しない。実model生成slotの理論容量と本線calendar容量を分け、同sealed300のoffは231/300一致77.00%・終端失敗0・model中央値13.448秒/p9018.629秒だが、model時間ゼロの本線上限808.444件/日でも平日量と約20%余裕を満たせないため不採用。全gate・独立性条件を保持し、lowのまま増加を受け入れる。
 - 現local profileはchronological_split_incomplete/data_wait、verified_truth0・paired_denominator0・rollout0%。独立性、教師/各class/control/probe/CFのfloor、split/holdoutを保持し、旧native認証の合格項目を新local profileへ引き継がず、既存Luna集合へlocal labelを混ぜない。旧sourceでR4未発行の既知1件は、当時のsealed pending証明がなく跨sourceで帰属させられないためlabel/completionを保持して未完とする。旧0ab4d779の定常44 labelsは全44件R4受入済みで、新180013eeの通常1時間窓は12/12件を受入済み。
 - 旧native認証の履歴（現localの受入とは別）：2026-10-18 22:55 JSTの364811daによるsealed baselineと対応snapshotでは、固定split・時系列・assignment・row integrityとblind repeatが通過し、残るgate理由はcounterfactual_pairs_below_floorだけ。CFは5/100、post-cutoff・distinct judge・両順序一致・既存validator・selected-only条件は維持する。適格workの実完了時刻によるrolling24hは4組/日（今回の通常formal観測を含む）へ減り、同率が続く場合の100組到達参考日は2026-11-11 JSTへ更新した。一方、18:51の復帰以後4.059時間の適格増分は0で、2回の正式成功も適格CF増とは一致しない。短時間の0件を持続的な0件/日とは断定せず、11/11も確定日・自動運転の保証率にはしない。この旧native条件の予測を現local運転の所要時間へ転用しない。固定blind repeatは200組・stable161・unstable39・Wilson下限0.74455956で既存floor100/0.60を維持。
@@ -1391,3 +1391,5 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-21 04:30 JST — 14labels/807.001秒の通常daily cycleがcapture_onlyで完了し、04:27:39.462751 JSTの最初のclean formal successをsealed formal progress・clean state・同cycleの新source valid R4へ照合した。human_waitは通常の成功watermark更新で解消し、直後2標本で0、HTTPはdrift=false。配備idle保留・cold rebuild・その後の連続deferredに跨ったformal停滞の31 health標本は削除せず保持。閾値/validatorの変更、成功stateの手編集、追加package配備はない。正式受入は2回必要なためthroughput4は未チェック、固定3時間窓も維持する。
 
 - 2026-10-21 04:51 JST — 中間1.507241時間は57/57 local valid R4、通常daily区間外0、907.619件/日。CF worksetはinput cap隔離+6・payload_missing隔離+48、旧invalid/timeout履歴を保持し、worker failureは0。窓内完了15cycle（capture_only1/deferred14）のR4時刻joinは55件、平均3.666667件/cycle。平均秒/cycleはsetup28.121548・model113.213966・training21.880850・persist0.008874・wait137.783181・other20.649285・total321.657705、import別0.919227。cold完了以後dirty89標本はすべて0。後半も窓を動かさず、CF/共有待ち/無進捗を含めて計測し、3時間でlowの合否を決める。
+
+- 2026-10-21 04:59 JST — throughput4受入完了。通常dailyのclean formal successは04:27:39.462751・04:57:25.822722 JSTの2回で、sealed formal progress・clean state・各cycle内の新source local valid R4へ一致。最初の成功後30 health標本はhuman_wait0、dirty0、worker failure0、HTTPはf5b9a4fe/drift=false。途中のformal停滞31標本は保持し、無かったことにはしない。package配備回数は1、以後の変更はPlanのlocal commitのみ。残りは固定窓の容量判定・水準選択と最終保全確認。
