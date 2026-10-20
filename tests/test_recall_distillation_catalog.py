@@ -2008,3 +2008,25 @@ def test_catalog_and_candidate_index_survive_mount_renumbering_without_rebuild(
     )
     assert checkpoint_path.read_bytes() == checkpoint_bytes
     assert catalog.catalog_path(tmp_path).read_bytes() == database_bytes
+
+
+def test_catalog_watermark_distinguishes_concurrent_append_from_invalid_schema(
+    tmp_path: Path,
+) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(tmp_path, "save-initial.md", "a" * 24, [
+        _message("assistant", "synthetic answer", "2026-08-01T00:00:00Z"),
+    ])
+    catalog.advance(raw_dir, tmp_path, 4096)
+    checkpoint = catalog._catalog_checkpoint_path(tmp_path).read_bytes()
+    _capture(tmp_path, "save-appended.md", "b" * 24, [
+        _message("assistant", "synthetic later answer", "2026-08-02T00:00:00Z"),
+    ])
+    with pytest.raises(catalog.CatalogSourceChanged):
+        catalog.sync_historical_index(raw_dir, tmp_path)
+    assert catalog._catalog_checkpoint_path(tmp_path).read_bytes() == checkpoint
+    with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
+        connection.execute("UPDATE metadata SET value='invalid' WHERE key='schema'")
+    with pytest.raises(catalog.CatalogError) as raised:
+        catalog.sync_historical_index(raw_dir, tmp_path)
+    assert type(raised.value) is catalog.CatalogError

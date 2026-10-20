@@ -16462,11 +16462,16 @@ def _prepare_distillation_chunk(
             try:
                 index_sha256 = catalog.sync_historical_index(raw_dir, root)
                 break
-            except catalog.CatalogError:
+            except catalog.CatalogSourceChanged as exc:
                 # Ingest can append committed Raw between advance and sync.
                 # Retry only a changed inventory, never a corrupt same source.
-                if attempt == 2 or advanced.watermark == committed_raw_watermark(raw_dir):
+                if advanced.watermark == committed_raw_watermark(raw_dir):
                     raise
+                if attempt == 2:
+                    from chronovisor.recall.recall_distillation_materialization import (
+                        MaterializationSourceChanged,
+                    )
+                    raise MaterializationSourceChanged from exc
                 advanced = catalog.advance(raw_dir, root, config.max_input_bytes)
     native_sources = config.teacher_profile in {NATIVE_LUNA_SINGLE_PROFILE, LOCAL_SINGLE_PROFILE}
     rallies = (

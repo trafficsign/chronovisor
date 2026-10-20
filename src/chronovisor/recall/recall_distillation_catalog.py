@@ -45,6 +45,10 @@ class CatalogError(ValueError):
     """The derived catalog cannot safely represent the committed Raw inventory."""
 
 
+class CatalogSourceChanged(CatalogError):
+    """Committed Raw advanced after the catalog snapshot was verified."""
+
+
 class _CatalogRepairRequired(CatalogError):
     """The text-backed session rebuild is needed to repair a missing tail."""
 
@@ -2722,11 +2726,10 @@ def _catalog_watermark(raw_dir: Path, root: Path) -> str:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
             connection.row_factory = sqlite3.Row
             metadata = dict(connection.execute("SELECT key,value FROM metadata"))
-            if (
-                metadata.get("schema") != CATALOG_SCHEMA
-                or metadata.get("watermark") != watermark
-            ):
+            if metadata.get("schema") != CATALOG_SCHEMA:
                 raise CatalogError("historical catalog is not current")
+            if metadata.get("watermark") != watermark:
+                raise CatalogSourceChanged("historical catalog is not current")
     except sqlite3.DatabaseError as exc:
         raise CatalogError("historical catalog is unreadable") from exc
     return watermark

@@ -4331,6 +4331,9 @@ def test_catalog_sync_retries_only_changed_raw_inventory_with_a_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     changed: bool, always_fail: bool, calls: int,
 ) -> None:
+    from chronovisor.recall.recall_distillation_materialization import (
+        MaterializationSourceChanged,
+    )
     raw_dir = _raw(tmp_path)
     config = _config(tmp_path)
     watermark = distill.committed_raw_watermark(raw_dir)
@@ -4343,7 +4346,7 @@ def test_catalog_sync_retries_only_changed_raw_inventory_with_a_bound(
     def sync(*args: Any) -> str:
         observed.append(1)
         if len(observed) == 1 or always_fail:
-            raise catalog.CatalogError("historical catalog is not current")
+            raise catalog.CatalogSourceChanged("historical catalog is not current")
         return original_sync(*args)
 
     def stop(_root: Path) -> list:
@@ -4352,7 +4355,8 @@ def test_catalog_sync_retries_only_changed_raw_inventory_with_a_bound(
     monkeypatch.setattr(catalog, "sync_historical_index", sync)
     monkeypatch.setattr(catalog, "rallies", stop)
     monkeypatch.setattr(distill, "committed_raw_watermark", lambda _raw: "f" * 64 if changed else watermark)
-    with pytest.raises(Prepared if changed and not always_fail else catalog.CatalogError):
+    expected = MaterializationSourceChanged if changed and always_fail else Prepared if changed else catalog.CatalogError
+    with pytest.raises(expected):
         distill._prepare_distillation_chunk(
             root=tmp_path, raw_dir=raw_dir, config_path=config,
             teachers={}, counterfactual=None, structural_verifier=None,
@@ -13404,3 +13408,51 @@ def test_r4_persisted_root_identity_across_mounts(
         with pytest.raises(distill.DistillationError, match="authority changed"):
             distill._r4_distillation_root_authority(root, register=False)
     assert authority_path.read_bytes() == authority_bytes
+
+
+def test_catalog_append_race_defers_without_recording_repeated_worker_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_dir = _raw(tmp_path)
+    config = _config(tmp_path)
+    calls: list[int] = []
+
+    def changing(*_args: Any) -> str:
+        calls.append(1)
+        raise catalog.CatalogSourceChanged("historical catalog is not current")
+
+    monkeypatch.setattr(catalog, "sync_historical_index", changing)
+    monkeypatch.setattr(distill, "committed_raw_watermark", lambda _raw: "f" * 64)
+    for _ in range(2):
+        result = distill.run_distillation_chunk(
+            root=tmp_path, raw_dir=raw_dir, config_path=config,
+            teachers={}, cold_start=True,
+        )
+        assert result["status"] == "deferred"
+        assert result["reason"] == "materialization_source_changed"
+    assert len(calls) == 6
+    assert not (store.distillation_dir(tmp_path) / store.STATE_FILE).exists()
+
+
+def test_catalog_integrity_error_is_not_retried_when_raw_also_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_dir = _raw(tmp_path)
+    config = _config(tmp_path)
+    calls: list[int] = []
+
+    def invalid(*_args: Any) -> str:
+        calls.append(1)
+        raise catalog.CatalogError("historical catalog is not current")
+
+    monkeypatch.setattr(catalog, "sync_historical_index", invalid)
+    monkeypatch.setattr(distill, "committed_raw_watermark", lambda _raw: "f" * 64)
+    with pytest.raises(catalog.CatalogError):
+        distill.run_distillation_chunk(
+            root=tmp_path, raw_dir=raw_dir, config_path=config,
+            teachers={}, cold_start=True,
+        )
+    assert len(calls) == 1
+    state = store.read_sealed(store.distillation_dir(tmp_path) / store.STATE_FILE)
+    assert state["worker_error_type"] == "CatalogError"
+    assert state["worker_failure_count"] == 1
