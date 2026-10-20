@@ -1289,6 +1289,12 @@ def test_counterfactual_reservation_requires_structure_without_verdict_filter(
     reserved = materialization._counterfactual_reservations(view, limit=4)
 
     assert [row["rally_id"] for row in reserved] == ["cf-uncertain"]
+    plan = view.connection.execute(
+        "EXPLAIN QUERY PLAN SELECT row_json FROM rows WHERE row_json IS NOT NULL "
+        "AND json_extract(row_json, '$.source') = ? ORDER BY epoch,rally_id,sequence",
+        ("counterfactual-label",),
+    ).fetchall()
+    assert any("materialization_counterfactual" in row[3] for row in plan)
     view.connection.close()
 
 

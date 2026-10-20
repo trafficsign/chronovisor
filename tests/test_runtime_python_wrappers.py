@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 RUNTIME_COMMAND = 'chronovisor_exec_uvx --python "$CHRONOVISOR_PYTHON"'
@@ -69,12 +71,21 @@ def test_shared_runtime_resolver_uses_safe_portable_defaults() -> None:
     assert "/Users/" not in resolver
 
 
-def test_shared_runtime_resolver_reads_configured_source(tmp_path: Path) -> None:
+@pytest.mark.parametrize("wrapper,revision,refresh", [
+    ("chronovisor-dashboard", "", True),
+    ("chronovisor-recall-local-daily", "", True),
+    ("chronovisor-recall-local-daily", "@main", True),
+    ("chronovisor-recall-local-daily", "@" + "a" * 40, False),
+])
+def test_shared_runtime_resolver_reads_configured_source(
+    tmp_path: Path, wrapper: str, revision: str, refresh: bool,
+) -> None:
     home = tmp_path / "home"
     root = home / ".chronovisor with spaces"
     root.mkdir(parents=True)
+    source = "git+https://github.com/example/fork.git" + revision
     (root / "config.toml").write_text(
-        '[runtime]\nsource = "git+https://github.com/example/fork.git"\n',
+        f'[runtime]\nsource = "{source}"\n',
         encoding="utf-8",
     )
     uvx = tmp_path / "uvx"
@@ -84,7 +95,7 @@ def test_shared_runtime_resolver_reads_configured_source(tmp_path: Path) -> None
         encoding="utf-8",
     )
     uvx.chmod(0o755)
-    constraints = root / "runtime/dependency-constraints/chronovisor-dashboard.txt"
+    constraints = root / f"runtime/dependency-constraints/{wrapper}.txt"
     for use_constraints, override in ((False, None), (True, None), (True, "custom.txt")):
         if use_constraints:
             constraints.parent.mkdir(parents=True, exist_ok=True)
@@ -100,7 +111,7 @@ def test_shared_runtime_resolver_reads_configured_source(tmp_path: Path) -> None
         if override is not None:
             environment["UV_CONSTRAINT"] = override
         completed = subprocess.run(
-            [str(SCRIPTS / "chronovisor-dashboard")],
+            [str(SCRIPTS / wrapper)],
             check=True,
             capture_output=True,
             text=True,
@@ -108,7 +119,8 @@ def test_shared_runtime_resolver_reads_configured_source(tmp_path: Path) -> None
         )
         result = json.loads(completed.stdout)
         args = result["args"]
-        assert args[args.index("--from") + 1] == "git+https://github.com/example/fork.git"
+        assert args[args.index("--from") + 1] == source
+        assert ("--refresh-package" in args) is refresh
         assert args[args.index("--python") + 1] == sys.executable
         if use_constraints and override is None:
             assert args[args.index("--constraints") + 1] == str(constraints)

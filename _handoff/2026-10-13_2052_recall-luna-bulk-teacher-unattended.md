@@ -145,7 +145,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] flow4：candidateの必須CI後、周期jobをidle保留した安全境界でmain更新・一度配備し、drift=falseとhuman_waitなしの正式成功2回を確認する。
 
 ### 2026-10-20 cycle固定費の最適化
-- [ ] cost1：既存cycle receiptで起動/import・setup・model・training preparation・persist・waitを測定し、productive 4cycle以上の変更前内訳を記録する。
+- [x] cost1：既存cycle receiptで起動/import・setup・model・training preparation・persist・waitを測定し、productive 4cycle以上の変更前内訳を記録する。
 - [ ] cost2：実測の大きい固定費から共有経路を最小修正し、全caller・検証同等性・300秒とquota保持を確認する。
 - [ ] cost3：candidate branchの必須CI成功後、安全境界で周期jobをidle保留し、一度配備・drift=false・human_waitなしを受け入れる。
 - [ ] cost4：cold rebuildを除く3時間以上の同方式容量と流入差引backlog ETAを測定し、reasoning水準とprovenanceを確定する。
@@ -1307,3 +1307,12 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-20 16:25 JST — 最終整理: 今回の観測process5本はowner用stopで正常終了し、本番worker/supervisorへのsignalなし。候補worktreeは利用processなし・tracked clean・mainへfast-forward済みを確認して削除、稼働中attested checkoutとprivate測定証跡は保持した。4周期jobは登録復帰済み、最終HTTPは180013ee/drift=false・human_waitなし。Librarianのexit1は今回配備前から継続するunresolved_link品質保留で、直近full sweep更新済み・worker_failure0を確認し、既存gateを保持した。最終比較・判断・後片付けの文書commitはlocalのみ、配備source/required CI対象のコードとテストに追加変更なし。
 
 - 2026-10-20 19:19 JST — Astraが711673c3の13:00以後実行ログを先に読了し、所有者のcycle固定費最適化へ着手。現mainは711673c3、配備source180013ee。独立candidate worktreeで計測だけを先に追加し、自然終了したdailyの既存排他を使う限定計測後に元scheduleを復帰する。常駐serviceの切替は最終版1回へまとめる。stage計測は既存receipt/既存module内のみ。graphは10/14世代で対象sourceにmetadata変更と未収録があるため直接sourceと全caller grepで補った。現cold_start_dueはp5未達でも真で、単純な置換効果は未立証。判断は4productive cyclesの後とし、コード最適化はまだ行わない。追加agent/cloud呼出0。
+
+- 2026-10-20 19:37 JST — cost1完了。配備済み180013eeの処理本体・model child・全validatorを変えず、既存cycle receiptへの計測のみで6cycle中productive4cycle/5labelsを採取。productive平均秒/cycleはprocess_start_import=0.460192, setup=24.557439, model=41.092805, training_preparation=22.152144, persist=0.002887, waits=36.102261, other=7.567451, cycle_total=131.474987、既存cadence10秒。待ちを重複計上せず、teacher_batchはmodel/waitsを含む内訳として別扱い。詳細を追加した最後のcycleではtraining selection14.579475秒（materialization19.684401秒）、candidate snapshot読込11.654864秒（capture17.331202秒）、split合計0.252149秒。判断: 最大のselection全JSON走査、次にsnapshot再検証とbatch当たり固定費を優先し、split再計算そのものの変更は採用しない。baselineでは中間配備を避けるためinstalled関数を観測用に包んだだけで、チェック・引数・戻値・例外は同一。計測script各revision hashと6つの原receiptをprivateに保持、dailyはbyte-identical plistで復帰済み。常駐service切替0・supervisor/worker signal0。
+
+
+- 2026-10-20 19:55 JST — cost2候補を実装。追加の観測専用1cycleはproductive1labelで正常終了しdailyを再復帰。profileではselection13.221秒のうちSQLite execute10.799秒、CF integrity1.286秒（うちexposure全群再読1.254秒/6625 sealed reads）。private SQLite複製上で同じPython3.14.7/SQLite3.53.4を使うと、既存query11.950468秒→CF専用partial index後0.000129秒、順序を含む全10行のhash完全一致。先行したsystem SQLite測定0.981秒は別runtimeなので採用根拠を差し替え、両証跡を保持した。indexは既存materialization schemaへ追加し通常cold rebuildで生成、projection/label/seal/gate検証は省略しない。CFが参照するexposureだけを既存shared readerへ指定し、参照の全binding/hash/sealを毎使用時に検証する。snapshotでは916021回のSHA形式検査を同じ許容集合の正規表現へ置換、synthetic2028境界値の同値確認と同回数benchmark0.958→0.343秒。payload自体のhash/shape検証は保持した。
+
+- 2026-10-20 19:55 JST — 同じshared chunk内でlocal-singleのteacher batchを反復し、setup/training/persistをcycle1回へ集約。次batch前に既存130秒残時間・CF3対1条件・defer/stop/無進捗を確認し、最新label projectionを再読してR4復旧のhead整合を保持する。他profileは従来1batch、300秒cap・claim/input quota・prompt/schema・frozen入力・全独立性gateは不変。重複していたworkset status読込を削除。cold_start=Trueは未完了のcold_start_pending/P5準備を継続する既存設計で、現cold_start_dueも常に真のため単純置換は採らない。productive cycleはlabel headが変わるのでtraining全体の結果cacheも採らず、測定された不要走査だけを減らす。snapshotのsealed ledger headだけではnested snapshotの検証済みを証明できないため、それを理由にチェックを省略する案も不採用。判断理由: gateの厳密性と最小差分を優先し、新しい永続cache層を追加しない。
+
+- 2026-10-20 19:55 JST — 固定commitでのuvx交互比較8回はrefresh平均0.472199秒、cache平均0.337504秒。既存daily wrapperのみfull40桁git commit pin時のrefreshを省き、可変参照では維持、配備precacheではrefreshする。candidateのproduction差分は計測込み純増72行、test純増106行（新module/daemon/supervisorなし）。純増理由は要求されたreceipt計測、quota/残時間を守る反復とその回帰保護、索引、pin分岐に限定。関連388tests、catalog/materialization等148tests、wrapper/policy33tests、architecture36tests、Ruff・mypy98sourceが成功。最初のmypy直呼出は別worktreeのeditable importを解決して既存152errorを出したが、PYTHONPATH=srcでcandidateを固定した実行は成功。必須CIは次にcandidate exact SHAで行い、配備はその後1回。GitHub pinで配備packageを取得するためcandidate/main pushは今回の必要範囲と判断した。

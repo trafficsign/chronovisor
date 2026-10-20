@@ -3501,7 +3501,7 @@ def test_nonblocking_page_and_exact_receipts_write_nothing_when_busy(
 
 
 def test_exposure_join_requires_one_receipt_bound_inside_the_rally(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     raw_dir = _raw(tmp_path)
     rally = distill.extract_rallies(raw_dir, root=tmp_path)[1]
@@ -3510,7 +3510,7 @@ def test_exposure_join_requires_one_receipt_bound_inside_the_rally(
     evidence_ref = distill.extract_rallies(raw_dir, root=tmp_path)[0][
         "actual_answer_refs"
     ][0]
-    distill.record_exact_exposure(
+    first = distill.record_exact_exposure(
         decision_id="inside",
         host="codex",
         session_id="session-one",
@@ -3550,6 +3550,24 @@ def test_exposure_join_requires_one_receipt_bound_inside_the_rally(
     )
     ambiguous = distill.extract_rallies(raw_dir, root=tmp_path)[1]
     assert ambiguous["eligibility"]["reason"] == "ambiguous_exact_exposure"
+    target = first["exposure_artifact_id"]
+    full = distill._exposure_map(tmp_path)
+    checked: list[str] = []
+    original = store.read_sealed
+
+    def read(path: Path, **kwargs: Any) -> dict:
+        if path.parent.name == "exposures":
+            checked.append(path.stem)
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(store, "read_sealed", read)
+    selected = distill._exposure_map(tmp_path, exposure_artifact_id=target)
+    assert selected == {key: [row for row in rows if row["exposure_artifact_id"] == target]
+                        for key, rows in full.items()}
+    assert checked == [target]
+    artifact = store.distillation_dir(tmp_path) / "exposures" / f"{target}.json"
+    artifact.write_text(artifact.read_text().replace('"inside"', '"tampered"'))
+    assert not distill._exposure_map(tmp_path, exposure_artifact_id=target)
 
 
 def test_exact_page_exposure_seals_canonical_live_features(tmp_path: Path) -> None:
@@ -4428,6 +4446,58 @@ def test_deferred_native_counterfactual_turn_keeps_supervised_import_separate(
             teachers={}, counterfactual=None, structural_verifier=None,
             dry_run=False, cold_start=True, max_elapsed_seconds=300,
         )
+
+
+@pytest.mark.parametrize("stop,expected", [
+    ("budget", 3), ("counterfactual", 2), ("empty", 1),
+    ("deferred", 1), ("stopped", 1), ("legacy", 1),
+])
+def test_local_teacher_amortizes_setup_within_budget_and_counterfactual_quota(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str, expected: int,
+) -> None:
+    raw_dir = _raw(tmp_path)
+    config = distill.DistillationConfig(
+        enabled=True, teacher_profile=(
+            distill.LOCAL_TRIAD_PROFILE if stop == "legacy" else distill.LOCAL_SINGLE_PROFILE
+        ),
+    )
+    clock = [0.0]
+    monkeypatch.setattr(distill.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(distill, "load_distillation_config", lambda _path: config)
+    monkeypatch.setattr(distill, "_capture_candidate_snapshots", lambda **_kwargs: distill._CandidateCaptureResult({}, [], {}, False))
+    monkeypatch.setattr(distill, "_run_counterfactual_block", lambda **_kwargs: distill._CounterfactualBlockResult(pending=stop == "counterfactual"))
+    setup = distill._prepare_distillation_chunk(
+        root=tmp_path, raw_dir=raw_dir, config_path=None, teachers={}, counterfactual=None,
+        structural_verifier=None, dry_run=False, cold_start=True, max_elapsed_seconds=300,
+    )
+    setup.update(teachers_available=True, teacher_model_calls=1)
+    stages: list[str] = []
+
+    def prepare(**_kwargs: Any) -> dict:
+        stages.append("setup")
+        return setup
+
+    def batch(**kwargs: Any) -> distill._TeacherBatchResult:
+        assert len(kwargs["label_rows"]) == stages.count("batch")
+        stages.append("batch")
+        clock[0] += 60
+        store.append_chain(kwargs["label_path"], {
+            "kind": "teacher-label", "profile": distill.LOCAL_SINGLE_PROFILE,
+            "rally_id": "synthetic", "candidate_id": str(clock[0]),
+        })
+        return distill._TeacherBatchResult(
+            labels_written=0 if stop == "empty" else 1, model_calls=1,
+            deferred=stop == "deferred", profile_stopped=stop == "stopped",
+        )
+
+    monkeypatch.setattr(distill, "_prepare_distillation_chunk", prepare)
+    monkeypatch.setattr(distill, "_run_teacher_batch", batch)
+    monkeypatch.setattr(distill, "_prepare_distillation_training", lambda **_kwargs: stages.append("training"))
+    monkeypatch.setattr(distill, "_persist_distillation_chunk", lambda **kwargs: kwargs)
+    result = distill._run_distillation_chunk_impl(root=tmp_path, cold_start=True)
+    assert stages == ["setup", *(["batch"] * expected), "training"]
+    assert result["teacher_model_calls"] == 1 + expected
+    assert result["teacher_result"].labels_written == (0 if stop == "empty" else expected)
 
 
 @pytest.mark.parametrize("new_label", [False, True])

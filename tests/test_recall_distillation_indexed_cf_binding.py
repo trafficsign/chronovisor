@@ -182,7 +182,7 @@ def test_counterfactual_binding_preserves_hash_predicate_with_targeted_snapshot(
     monkeypatch.setattr(
         distill,
         "_exposure_map",
-        lambda _root: {
+        lambda _root, **_kwargs: {
             ("host-1", "session-1", "query-1"): rally["exposure_receipts"]
         },
     )

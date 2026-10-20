@@ -87,6 +87,15 @@ def _schema(connection: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS assignments(rally_id TEXT PRIMARY KEY,split TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS compatible(plan_id TEXT PRIMARY KEY);
     """)
+    try:
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS materialization_counterfactual "
+            "ON rows(epoch,rally_id,sequence) WHERE row_json IS NOT NULL "
+            "AND json_extract(row_json, '$.source')='counterfactual-label'"
+        )
+    except sqlite3.OperationalError as exc:
+        if "no such function: json_extract" not in str(exc):
+            raise
 
 
 def _read_metadata(connection: sqlite3.Connection) -> dict[str, Any]:

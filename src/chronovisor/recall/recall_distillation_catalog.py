@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import sqlite3
 import stat
@@ -1725,8 +1726,7 @@ def _candidate_sha(value: object, *, allow_empty: bool = False) -> str:
         return ""
     if (
         not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
+        or re.fullmatch(r"[0-9a-f]{64}", value) is None
     ):
         raise CatalogError("candidate ledger digest is invalid")
     return value

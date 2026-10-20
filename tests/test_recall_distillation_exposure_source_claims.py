@@ -430,7 +430,7 @@ def test_selected_only_counterfactual_gate_still_rejects_unselected_pool(
     monkeypatch.setattr(
         distill,
         "_exposure_map",
-        lambda _root: {
+        lambda _root, **_kwargs: {
             (_HOST, _SESSION_ID_SHA256, _QUERY_SHA256): [receipt]
         },
     )
@@ -477,7 +477,7 @@ def test_selected_gate_binds_same_exact_exposure_as_materialization(
     }
     monkeypatch.setattr(
         distill, "_exposure_map",
-        lambda _root: {(_HOST, _SESSION_ID_SHA256, _QUERY_SHA256): [receipt]},
+        lambda _root, **_kwargs: {(_HOST, _SESSION_ID_SHA256, _QUERY_SHA256): [receipt]},
     )
     monkeypatch.setattr(
         distill, "_materialization_snapshots",

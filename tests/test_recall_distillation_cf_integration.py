@@ -140,7 +140,7 @@ def _source_fixture(
     monkeypatch.setattr(
         distill,
         "_exposure_map",
-        lambda _root: {
+        lambda _root, **_kwargs: {
             (rally["host"], rally["session_id_sha256"], rally["query_sha256"]): [
                 canonical
             ]

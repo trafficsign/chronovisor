@@ -23,7 +23,7 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -3472,10 +3472,14 @@ def _prompt_hash(text: str) -> str:
     return hashlib.sha1(normalized.encode()).hexdigest()[:16]
 
 
-def _exposure_map(root: Path) -> dict[tuple[str, str, str], list[dict[str, Any]]]:
+def _exposure_map(
+    root: Path, *, exposure_artifact_id: str | None = None,
+) -> dict[tuple[str, str, str], list[dict[str, Any]]]:
     path = store.distillation_dir(root) / "exposure-receipts.jsonl"
     result: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in _read_chain(path):
+        if exposure_artifact_id is not None and row.get("exposure_artifact_id") != exposure_artifact_id:
+            continue
         binding = {
             key: row.get(key)
             for key in (
@@ -6608,7 +6612,7 @@ def _sealed_counterfactual_exposure_binding(
     if len(matching_rally_receipts) != 1:
         return False
     try:
-        exact_receipts = _exposure_map(root).get(
+        exact_receipts = _exposure_map(root, exposure_artifact_id=reference).get(
             (
                 str(rally.get("host") or ""),
                 str(rally.get("session_id_sha256") or ""),
@@ -17134,8 +17138,8 @@ def _run_distillation_chunk_impl(
             or config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
         )
     teacher_result = _TeacherBatchResult()
-    if teachers_available and not prefer_counterfactual and not model_deferred:
-        teacher_result = _run_teacher_batch(
+    while teachers_available and not prefer_counterfactual and not model_deferred:
+        batch = _run_teacher_batch(
             root=root,
             raw_dir=raw_dir,
             config=config,
@@ -17148,17 +17152,29 @@ def _run_distillation_chunk_impl(
             candidate_indexed=ox_teacher_available,
             structural_verifier=structural_verifier,
         )
+        teacher_result = replace(
+            batch,
+            labels_written=teacher_result.labels_written + batch.labels_written,
+            model_calls=teacher_result.model_calls + batch.model_calls,
+        )
+        if (
+            config.teacher_profile != LOCAL_SINGLE_PROFILE
+            or not batch.labels_written or batch.deferred or batch.profile_stopped
+            or deadline - time.monotonic() < 130
+            or _is_counterfactual_turn(
+                teacher_model_calls + teacher_result.model_calls,
+                counterfactual_model_calls + counterfactual_result.model_calls,
+                available=counterfactual_probe.pending,
+            )
+        ):
+            break
+        label_rows = _local_single_label_rows(label_path)
     labels_written = teacher_result.labels_written
     teacher_model_calls += teacher_result.model_calls
     model_deferred = model_deferred or teacher_result.deferred
     ox_workset = dict(teacher_result.workset_status or {})
     local_workset: dict[str, Any] = {}
     if config.teacher_profile in LOCAL_TEACHER_PROFILES:
-        from chronovisor.recall.recall_distillation_workset import DistillationWorkset
-
-        local_workset = DistillationWorkset(
-            _local_teacher_workset_path(root, config.teacher_profile)
-        ).status(include_timing=True)
         ox_workset = {}
     ox_ramp_fields: dict[str, Any] = {}
     if config.teacher_profile == OX_SINGLE_PROFILE:

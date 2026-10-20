@@ -6,5 +6,9 @@ export CHRONOVISOR_CYCLE_STARTED_AT
 CHRONOVISOR_WRAPPER_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
 . "$CHRONOVISOR_WRAPPER_DIR/chronovisor-runtime-env"
 
-chronovisor_exec_uvx --python "$CHRONOVISOR_PYTHON" --refresh-package chronovisor \
+set -- --refresh-package chronovisor
+if printf '%s\n' "$RUNTIME_SOURCE" | grep -Eq '^git\+[^[:space:]]+@[0-9a-f]{40}$'; then
+  set --
+fi
+chronovisor_exec_uvx --python "$CHRONOVISOR_PYTHON" "$@" \
   --from "$RUNTIME_SOURCE" python -m chronovisor.recall.recall_local_daily
