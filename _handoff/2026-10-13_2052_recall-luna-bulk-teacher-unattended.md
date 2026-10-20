@@ -1,7 +1,7 @@
 ---
 task_id: plan_f1af8dd28d254ae0a5fa2c431b1dfb3f
 created_at: 2026-10-13T20:52:29+09:00
-状態: blocked
+状態: running
 ---
 
 # Recall：既存の Luna ラベルを保持し、ローカルで無人運転を続ける
@@ -22,6 +22,9 @@ created_at: 2026-10-13T20:52:29+09:00
 5. 実行中、ユーザーに許可を求めない。ユーザーは別の作業に入っており、確認には答えられない。判断が要る点は自分で決め、理由を実行ログに残して進む。
 6. 作ったあと、ユーザーが何もしなくても回り続けること。
 7. **2026-10-20 19:30 JST 所有者決定**：teacherは流入に追いつくこと。前回の検証・準備・cadence約107秒/labelとlow model約29秒/label、約1.3 labels/cycleを根拠に、cycle固定費の原因を既存本線で最適化する。検証の厳しさを維持し、再実行する頻度と量だけを減らす。先に既存cycle receiptへstage wall timeを追加してproductive 4cycle以上を測り、測定した大きい費用順に修正する。cold rebuildを除く3時間以上の定常容量で平均764/日・平日1052/日と既存約20%余裕を評価し、流量を満たす最高reasoningを選ぶ。lowが満たせば維持し、offだけなら既測定sealed300（77.00%、low78.33%）に基づきprovenanceを記録してoffへ切替可能。当初は300秒を保持。2026-10-21の今回指示により、2026-10-20の流入追随決定を優先し、local dailyのみ実測とlease/stale/watchdog/safe-boundary確認に基づきcycle budget延長を認める。130/220秒floor、claim TTL、CF3対1、quota、全gate・独立性・prompt/schema・凍結入力を保持。新supervisor/monitor/daemon/repair/self-heal層を足さず、candidate必須CI後に安全境界で一度配備する。追加質問なし、自動Luna/cloudなし、09:15 PAUSED維持。
+
+8. **2026-10-21 07:10 JST、所有者を代理するClaudeの決定**：今回の復旧のため2回目の配備を承認する。「一度配備」は前回runの上限であり、teacher停止を継続する理由にしない。accec0af（CIで実問題があれば最小後継）の必須CIを通し、周期jobを自然idleで保留した安全境界で今回一度配備する。同じ保存済みplistで通常dailyを再開する。
+9. **同時刻の水準判断の訂正**：reasoningはlowを維持し、今回はoffを測らない。2026-10-18の「実日次量に約20%余裕を持つ最高水準」は平均流入763.7件/日を基準とする。前回low実測976件/日は27.8%余裕、平日不足約76件/日は週末に吸収され、週純減は約1486件。Claudeの厳しい解釈だった平日1316件/日目標は撤回する。accec0afのcohort/split原因修正は将来の水準変更にも必要なので保持する。復旧cold rebuild後の固定3時間を同じcalendar方式で再測定し、平均764件/日への20%以上の余裕でcost4/throughput5を判定する。
 
 決定 5 と 6 から、設定の変更（`~/.chronovisor/config.toml`）と配備もこの Plan の範囲に含める。これは Plan を書いた Claude の解釈で、ユーザーの言葉は「実装してほしい」「とにかく仕上げてくれ」「何もしなくても回るように」である。配備は 10/9 と同じ手順で行う。
 
@@ -148,14 +151,14 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] cost1：既存cycle receiptで起動/import・setup・model・training preparation・persist・waitを測定し、productive 4cycle以上の変更前内訳を記録する。
 - [x] cost2：実測の大きい固定費から共有経路を最小修正し、全caller・検証同等性・300秒とquota保持を確認する。
 - [x] cost3：candidate branchの必須CI成功後、安全境界で周期jobをidle保留し、一度配備・drift=false・human_waitなしを受け入れる。
-- [ ] cost4：cold rebuildを除く3時間以上の同方式容量と流入差引backlog ETAを測定し、reasoning水準とprovenanceを確定する。3時間測定は完了したが、必要流量を満たす水準は未確定。設定をlowへ復帰したがdailyは保留中で、流入追随は未完。
+- [ ] cost4：復旧cold rebuild後の固定3時間を同じcalendar方式で測定し、平均764件/日への20%以上の余裕と流入差引backlog ETAを確認する。決定9によりlowを維持しoffは測らない。
 
 ### 2026-10-21 流入追随の完遂
 - [x] throughput1：CF blind comparison rejectを個別データ結果へ分類し、gate/retry履歴とfailure breakdownを保持する。
 - [x] throughput2：通常launchd dailyのsetup/otherを既存profilerで帰属し、原因とbatch反復の重複計算を既存コード内で修正する。
 - [x] throughput3：共有lease・stale・watchdog・配備境界・claim TTLを確認し、実測でlocal daily budgetを選ぶ。
-- [ ] throughput4：候補必須CI後に安全境界で一度配備し、通常R4・drift=false・human_waitなしを確認する。配備後lowの正式受入は完了したが、off切替時の別の進捗整合性エラーで最終運転確認を再開する。
-- [ ] throughput5：cold rebuildだけを除く固定3時間を測り、1316件/日・流入差引ETA・最高reasoningを確定する。必要なら既存経路のpayload再キー履歴を含めoffを実測する。
+- [ ] throughput4：復帰候補の必須CI後、安全境界で今回一度配備し同じplistの通常dailyをlowで再開する。新source local valid R4を伴うclean formal success2回、通常成功によるhuman_wait解除、worker failure0、materialization dirty0、実serviceのdrift=falseを受け入れる。
+- [ ] throughput5：復旧cold rebuildだけを除く固定3時間を同じcalendar方式で測り、平均764件/日への20%以上の余裕・流入差引ETAを確認する。決定9によりlow維持、off測定と1316件/日目標は撤回。
 
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
@@ -184,7 +187,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - 配備後、runtime の drift が false であること。
 
 ## ブロッカー（発生時のみ）
-- 現在（2026-10-21 07:01 JST）：blocked。f5b9a4feを1回配備し、lowの固定3時間は122/122 valid R4・976件/日で1316未達。off切替で既存cohort/split参照の進捗整合性エラーが発生。設定は元のlowへ戻したが、設定復帰だけでは直らずdailyを自然idle保留中。human_wait/distillation_run_repeated_failureが残る。復帰候補accec0af（隔離branch fix/recall-cohort-transition-20261021）は実metadataコピーのlow/off replay・関連525 tests・全体7486 passed/1 skipped/58 deselected、skipしたHNSWはCIの固定依存で別途1 passed、全static検査成功。source+19/test+98行、guardや履歴の手編集なし。今回は1回配備制約のため追加push/配備はせず、mainのcodeはf5b9a4feのまま。残件は候補の必須CIと追加配備、daily再開/human_wait解消、off定常3時間と1316達成確認。throughput4/5・cost4は未完。
+- 現在：決定8/9に基づき復旧作業中。dailyは前回の自然idle保留、low設定を維持。accec0afの必須CI・今回一度の安全配備・通常成功2回・復旧後固定3時間の再測定を進める。前回07:01のblocked証跡は実行ログに保持し、未達の受入は完了扱いしない。
 - 前回測定（2026-10-20 16:15 JST、今回の固定費修正前）：Qwen low、通常1.009750時間でvalid local R4受入12件=285.219件/日、平均流入763.714差−478.495/日、平日1052.4差−767.181/日でbacklog増、teacher ETAなし。検索は新規/再open0・純減1235.949件/日、残27557件、同率条件22.296日。検索終了後も現検証費用が続く条件では本線の楽観上限620.771件/日（平均差−142.943）で解消ETAなし。旧0ab4d779の3時間352件/日と旧1324.9件/日projectionは比較資料として保持し、現容量へ転用しない。実model生成slotの理論容量と本線calendar容量を分け、同sealed300のoffは231/300一致77.00%・終端失敗0・model中央値13.448秒/p9018.629秒だが、model時間ゼロの本線上限808.444件/日でも平日量と約20%余裕を満たせないため不採用。全gate・独立性条件を保持し、lowのまま増加を受け入れる。
 - 現local profileはchronological_split_incomplete/data_wait、verified_truth0・paired_denominator0・rollout0%。独立性、教師/各class/control/probe/CFのfloor、split/holdoutを保持し、旧native認証の合格項目を新local profileへ引き継がず、既存Luna集合へlocal labelを混ぜない。旧sourceでR4未発行の既知1件は、当時のsealed pending証明がなく跨sourceで帰属させられないためlabel/completionを保持して未完とする。旧0ab4d779の定常44 labelsは全44件R4受入済みで、新180013eeの通常1時間窓は12/12件を受入済み。
 - 旧native認証の履歴（現localの受入とは別）：2026-10-18 22:55 JSTの364811daによるsealed baselineと対応snapshotでは、固定split・時系列・assignment・row integrityとblind repeatが通過し、残るgate理由はcounterfactual_pairs_below_floorだけ。CFは5/100、post-cutoff・distinct judge・両順序一致・既存validator・selected-only条件は維持する。適格workの実完了時刻によるrolling24hは4組/日（今回の通常formal観測を含む）へ減り、同率が続く場合の100組到達参考日は2026-11-11 JSTへ更新した。一方、18:51の復帰以後4.059時間の適格増分は0で、2回の正式成功も適格CF増とは一致しない。短時間の0件を持続的な0件/日とは断定せず、11/11も確定日・自動運転の保証率にはしない。この旧native条件の予測を現local運転の所要時間へ転用しない。固定blind repeatは200組・stable161・unstable39・Wilson下限0.74455956で既存floor100/0.60を維持。
@@ -1405,3 +1408,6 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-21 07:01 JST — 復帰候補accec0afb8ace6d1ca17dfc247907cca5b6f2dd5を隔離branchへcommitし、tracked clean。通常cohort切替・中断後再開・凍結anchor欠落の回帰を含む関連525 tests、全体7486 passed/1 skipped/58 deselected（既存fork warning1）、skipのHNSWをCI固定依存で別途1 passed。Ruff/mypy/import/architecture/compile/whitespaceも成功。実17,302件のコピーでlow/off双方の復帰とteacher/CF progress・receipt head完全一致、本番書込/model呼出0。GitHub required CIはこの未配備候補では未実行で、ローカル検証と区別する。追加push/配備は今回の1回制約により行わず、source/test差分はmainへ動かさない。必要な純増は既存関数の凍結参照選択と2callerへのprofile伝達19行、3種の回帰98行。配備済みf5b9a4feは本体+63/test+101行で、新production module/cache/daemonは0。
 
 - 2026-10-21 07:01 JST — 最終保全: immutable64945件は変更0、ledger5本の既存prefix一致、teacher queue2797項目と遷移receipt4188行のprefix保持。offはsetupで止まったため新key0、既存ready2246件は残り、再キー化の通常claim処理はfixtureでのみ検証した。今後のoff ETAはcurrent reasoningの未完keyで数え、旧low completedをoffの完了扱いにしない。通常low固定窓のpending2248に対する平均流入条件ETA10.590日は当時の条件付き値で、平日ETAはなく、現在daily保留中の解消ETAも未確定。5常駐serviceの実archive/direct_urlはf5b9a4fe/MCP1.30.0、fresh MCP statusはdrift=falseだがhuman_waitを確認。off初回4失敗に続き、通常converge側のlowでも同一エラーとなりworker failure5。supervisor/model serverのPID・起動時刻、authority bytes/inode/device/mtime、daily plist、他3周期jobの登録/manager/plist、09:15 PAUSED/hashは不変。設定差分は配備sourceのみへ復帰済み。今回のprivate observer2本は正常停止し、証跡と未配備候補worktreeを再利用のため保持、無関係なuntracked4件は保持。復帰・容量・human_wait受入が残るため状態をblockedとし、完了扱いしない。
+
+
+- 2026-10-21 07:08 JST — 指定の05:35以降ログを先に読了し、所有者代理の07:10決定をユーザーの決定8/9へ記録して再開。前回の一度制約と平日1316目標は今回の判断を妨げない。accec0afはsource純増19行・test98行の既存関数修正で、追加production module/daemon/cacheなし。新しいcode変更を先に足さず、この候補だけをCI branchへpushして必須CIを確認する判断。通常dailyの保留・同じplist・low、09:15 PAUSEDとsupervisor保全をlive照合してから安全境界で配備する。
