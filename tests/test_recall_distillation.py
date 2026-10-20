@@ -4858,6 +4858,7 @@ def test_counterfactual_attempt_failure_differs_from_unattempted_wait(
     )
     assert result.deferred
     assert result.failure_class == ("counterfactual_timeout" if attempted else "")
+    assert result.model_calls == int(attempted)
     assert bool(commits) is attempted
     assert bool(releases) is not attempted
     if commits:

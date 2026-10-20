@@ -98,6 +98,8 @@ def test_early_input_rejection_quarantines_only_the_item(
         config=distill.DistillationConfig(),
     )
     assert result.failure_class == "counterfactual_input_limit" and not result.deferred
+    assert result.model_calls == 1
+    assert not distill._is_counterfactual_turn(3, result.model_calls, available=True)
     assert commits[0][1] == [{
         "status": "quarantined",
         "error_class": "counterfactual_input_limit",
@@ -149,3 +151,32 @@ def test_oversize_first_input_still_rejects_before_any_generation(
     with pytest.raises(distill.DistillationError, match="input exceeds fixed byte limit"):
         worker.compare(_payload("q" * 12_000))
     assert not calls and not leases
+    assert worker.attempted is False
+
+
+@pytest.mark.parametrize("completed_answers", [0, 1])
+def test_capacity_wait_counts_only_a_turn_that_already_generated_an_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, completed_answers: int,
+) -> None:
+    worker, calls, _leases = _worker(monkeypatch, ["first answer"])
+    original = research_scheduler.run_cancellable_command
+
+    def command(*args: Any, **kwargs: Any):
+        if len(calls) < completed_answers:
+            return original(*args, **kwargs)
+        return SimpleNamespace(status="deferred", value=None)
+
+    monkeypatch.setattr(research_scheduler, "run_cancellable_command", command)
+    commits: list[Any] = []
+    releases: list[Any] = []
+    queue = SimpleNamespace(commit=lambda *args: commits.append(args), release_unattempted=releases.append)
+    result = distill._compare_and_commit_counterfactual(
+        workset=queue, claim=SimpleNamespace(attempt=1), counterfactual=worker,
+        payload=_payload("synthetic query"), label_path=tmp_path / "labels",
+        root=tmp_path, raw_dir=tmp_path, snapshots={}, exposure={}, exact_features={},
+        rally_id="synthetic-rally", candidate={}, mode="add",
+        config=distill.DistillationConfig(),
+    )
+    assert result.deferred and result.model_calls == completed_answers
+    assert bool(commits) is bool(completed_answers)
+    assert bool(releases) is (not completed_answers)

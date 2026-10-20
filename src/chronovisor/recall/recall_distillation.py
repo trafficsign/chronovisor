@@ -410,8 +410,16 @@ class _WorkerCounterfactual:
         self.deadline_ms = deadline_ms
 
     def compare(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        self.attempted = False
         with ExitStack() as stack:
-            return self._compare(payload, _WorkerModelTurn(stack))
+            turn = _WorkerModelTurn(stack)
+            try:
+                return self._compare(payload, turn)
+            except DistillationDeferred as exc:
+                exc.attempted = exc.attempted or turn.attempted
+                raise
+            finally:
+                self.attempted = turn.attempted
 
     def _compare(
         self, payload: Mapping[str, Any], model_turn: _WorkerModelTurn
@@ -520,6 +528,7 @@ class _WorkerCounterfactual:
 class _WorkerModelTurn:
     stack: ExitStack
     lease: Any = None
+    attempted: bool = False
 
 
 def _check_worker_input_size(payload: Mapping[str, Any], *, max_input_bytes: int) -> None:
@@ -579,6 +588,12 @@ def _worker_call(
             turn.lease,
             timeout_seconds=deadline_ms / 1_000 + 5,
             inherit_model_admission=True,
+        )
+        turn.attempted |= outcome.status not in {"deferred", "cancelled"} and (
+            not isinstance(outcome.value, dict)
+            or outcome.value.get("failure_class") not in {
+                "capacity_unavailable", "foreground_preempted", "resource_busy", "cancelled",
+            }
         )
     if outcome.status != "completed" or not isinstance(outcome.value, dict):
         if outcome.status in {"deferred", "cancelled", "timeout"}:
@@ -15672,7 +15687,7 @@ def _compare_and_commit_counterfactual(
                 }
             ],
         )
-        return _CounterfactualBlockResult(pending=True, deferred=True, failure_class="counterfactual_timeout")
+        return _CounterfactualBlockResult(pending=True, deferred=True, failure_class="counterfactual_timeout", model_calls=int(exc.attempted))
     except OSError:
         workset.commit(
             [claim],
@@ -15684,7 +15699,7 @@ def _compare_and_commit_counterfactual(
                 }
             ],
         )
-        return _CounterfactualBlockResult(pending=True, deferred=True, failure_class="counterfactual_transport")
+        return _CounterfactualBlockResult(pending=True, deferred=True, failure_class="counterfactual_transport", model_calls=int(getattr(counterfactual, "attempted", True)))
     except DistillationError as exc:
         input_limit = isinstance(exc, _WorkerInputLimit)
         failure_class = (
@@ -15706,7 +15721,7 @@ def _compare_and_commit_counterfactual(
                 }
             ],
         )
-        return _CounterfactualBlockResult(pending=True, deferred=not input_limit, failure_class=failure_class)
+        return _CounterfactualBlockResult(pending=True, deferred=not input_limit, failure_class=failure_class, model_calls=int(getattr(counterfactual, "attempted", not input_limit)))
     candidate_id_raw = candidate["candidate_id"]
     candidate_id = str(candidate_id_raw)
     ox_contract_id = _current_profile_contract_id(root, config.teacher_profile)
