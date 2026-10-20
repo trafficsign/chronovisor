@@ -71,6 +71,72 @@ def test_waiter_gets_next_model_turn_before_continuous_drain(tmp_path, monkeypat
         pass
 
 
+def test_teacher_overtakes_waiting_backlog_without_preempting_owner(tmp_path, monkeypatch) -> None:
+    _isolate(tmp_path, monkeypatch)
+    order = []
+    failures = []
+
+    def run(name, **priority):
+        try:
+            turn = (ollama_lease.model_admission_turn(timeout_ms=2000, priority=True)
+                    if priority.get("priority") else
+                    ollama_lease.model_resource_lease(exclusive=True, timeout_ms=2000, backlog=True))
+            with turn:
+                order.append(name)
+        except BaseException as exc:
+            failures.append(exc)
+
+    with ollama_lease.model_resource_lease(exclusive=True):
+        backlog = threading.Thread(target=run, args=("backlog",), kwargs={"backlog": True})
+        backlog.start()
+        _await_locked(tmp_path / "model.lock.admission.queue")
+        teacher = threading.Thread(target=run, args=("teacher",), kwargs={"priority": True})
+        teacher.start()
+        _await_locked(tmp_path / "model.lock.admission.priority")
+        assert not order
+    teacher.join(3)
+    backlog.join(3)
+    assert not teacher.is_alive() and not backlog.is_alive()
+    assert not failures
+    assert order == ["teacher", "backlog"]
+
+
+def test_timed_out_teacher_does_not_leave_backlog_blocked(tmp_path, monkeypatch) -> None:
+    _isolate(tmp_path, monkeypatch)
+    errors = []
+
+    def waiter():
+        try:
+            with ollama_lease.model_admission_turn(timeout_ms=25, priority=True):
+                errors.append("overtook active owner")
+        except TimeoutError:
+            pass
+
+    with ollama_lease.model_resource_lease(exclusive=True):
+        thread = threading.Thread(target=waiter)
+        thread.start()
+        thread.join(2)
+        assert not thread.is_alive()
+    assert not errors
+    with ollama_lease.model_resource_lease(exclusive=True, timeout_ms=0, backlog=True):
+        pass
+
+
+def test_priority_waiter_blocks_only_backlog_and_preserves_foreground(tmp_path, monkeypatch) -> None:
+    _isolate(tmp_path, monkeypatch)
+    with (tmp_path / "model.lock.admission.priority").open("a+") as priority:
+        fcntl.flock(priority, fcntl.LOCK_SH)
+        with pytest.raises(TimeoutError):
+            with ollama_lease.model_resource_lease(exclusive=True, timeout_ms=0, backlog=True):
+                pytest.fail("backlog overtook waiting teacher")
+        # Ingest still uses ordinary admission; foreground retains first priority.
+        with ollama_lease.model_resource_lease(exclusive=True, timeout_ms=0):
+            pass
+        with research_scheduler.foreground_lane():
+            with ollama_lease.model_resource_lease(exclusive=True, timeout_ms=0, backlog=True):
+                pass
+
+
 def test_one_turn_covers_children_but_never_bypasses_model_lock(tmp_path, monkeypatch) -> None:
     _isolate(tmp_path, monkeypatch)
     script = """

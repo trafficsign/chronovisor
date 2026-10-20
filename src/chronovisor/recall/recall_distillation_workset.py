@@ -2273,7 +2273,8 @@ class DistillationWorkset:
         stage_rows: Sequence[sqlite3.Row] = ()
         with closing(self._connect()) as connection:
             rows = connection.execute(
-                f"SELECT state, COUNT(*) AS count FROM work_items{where} GROUP BY state",
+                f"SELECT state, last_error_class, COUNT(*) AS count FROM work_items{where} "
+                "GROUP BY state, last_error_class",
                 parameters,
             ).fetchall()
             self._validate_stages(connection)
@@ -2294,8 +2295,12 @@ class DistillationWorkset:
                     + " GROUP BY stage, state, next_attempt_at, created_at",
                     parameters,
                 ).fetchall()
+        failures: dict[str, int] = {}
         for row in rows:
-            counts[str(row["state"])] = int(row["count"])
+            counts[str(row["state"])] += int(row["count"])
+            if error_class := row["last_error_class"]:
+                failures[error_class] = failures.get(error_class, 0) + int(row["count"])
+        counts["failure_breakdown"] = failures
         counts["backlog"] = counts["ready"] + counts["leased"]
         counts["total"] = sum(
             counts[state] for state in ("ready", "leased", "completed", "quarantined")

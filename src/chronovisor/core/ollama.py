@@ -392,6 +392,7 @@ def model_resource_lease(
     *,
     exclusive: bool,
     timeout_ms: int | None = None,
+    backlog: bool = False,
 ) -> AbstractContextManager[None]:
     """Return a resource lease using the facade's current runtime root."""
 
@@ -399,6 +400,7 @@ def model_resource_lease(
         exclusive=exclusive,
         timeout_ms=timeout_ms,
         root=CHRONOVISOR_ROOT,
+        backlog=backlog,
     )
 
 

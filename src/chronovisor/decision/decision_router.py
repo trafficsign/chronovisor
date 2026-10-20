@@ -4150,7 +4150,7 @@ class DecisionRouter:
 
         def execute() -> DecisionRouterResult:
             if self.live_resource_control and not self._defer_local_control_until_tie:
-                with ollama.model_resource_lease(exclusive=True):
+                with ollama.model_resource_lease(exclusive=True, backlog=self.audit_role in {"search_label", "lint_tag_repair"}):
                     return run_locked()
             return run_locked()
 
@@ -4948,7 +4948,7 @@ class DecisionRouter:
 
         control = contextlib.nullcontext()
         if self._defer_local_control_until_tie:
-            control = ollama.model_resource_lease(exclusive=True)
+            control = ollama.model_resource_lease(exclusive=True, backlog=self.audit_role in {"search_label", "lint_tag_repair"})
         with control:
             if self._defer_local_control_until_tie:
                 residency_plan = self._residency_plan(selected_num_ctx)

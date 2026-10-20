@@ -96,11 +96,22 @@ def _timed_out(deadline_at: float | None) -> bool:
     return deadline_at is not None and time.monotonic() >= deadline_at
 
 
+def _priority_waiting(handle: Any) -> bool:
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    return False
+
+
 @contextmanager
 def _model_admission(
     lock_path: Path,
     *,
     deadline_at: float | None,
+    priority: bool = False,
+    backlog: bool = False,
 ) -> Iterator[Any]:
     """Serialize background inference while giving queued foreground work priority."""
 
@@ -136,17 +147,21 @@ def _model_admission(
         return
     with ExitStack() as stack:
         handle = stack.enter_context(admission_path.open("a+"))
+        priority_handle = stack.enter_context(
+            admission_path.with_suffix(".admission.priority").open("a+")
+        )
+        if priority:
+            _acquire_file_lease(priority_handle, exclusive=False, deadline_at=deadline_at)
         queue = None
-        if not foreground:
-            # Wait outside the current owner's turn, then prevent a busy
-            # drain from reacquiring admission ahead of an existing waiter.
+        if not foreground and not priority:
+            # Teacher waiters bypass this queue; only backlog work yields to them.
             queue = stack.enter_context(
                 admission_path.with_suffix(".admission.queue").open("a+")
             )
             _acquire_file_lease(queue, exclusive=True, deadline_at=deadline_at)
         operation = fcntl.LOCK_SH if foreground else fcntl.LOCK_EX
         while True:
-            if not foreground and sync_pending():
+            if not foreground and (sync_pending() or backlog and _priority_waiting(priority_handle)):
                 if _timed_out(deadline_at):
                     raise TimeoutError("Ollama resource lease acquisition timed out")
                 time.sleep(0.005)
@@ -157,7 +172,7 @@ def _model_admission(
                 if exc.errno not in {errno.EACCES, errno.EAGAIN}:
                     raise
             else:
-                if foreground or not sync_pending():
+                if foreground or not (sync_pending() or backlog and _priority_waiting(priority_handle)):
                     break
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             if _timed_out(deadline_at):
@@ -165,6 +180,8 @@ def _model_admission(
             time.sleep(0.005)
         if queue is not None:
             fcntl.flock(queue.fileno(), fcntl.LOCK_UN)
+        if priority:
+            fcntl.flock(priority_handle.fileno(), fcntl.LOCK_UN)
         try:
             yield handle.fileno()
         finally:
@@ -173,7 +190,7 @@ def _model_admission(
 
 @contextmanager
 def model_admission_turn(
-    *, timeout_ms: int, root: Path = CHRONOVISOR_ROOT
+    *, timeout_ms: int, root: Path = CHRONOVISOR_ROOT, priority: bool = False,
 ) -> Iterator[None]:
     """Keep one background turn across isolated, cancellable model children."""
 
@@ -188,7 +205,7 @@ def model_admission_turn(
     ))
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with _model_admission(
-        lock_path, deadline_at=time.monotonic() + timeout_ms / 1000
+        lock_path, deadline_at=time.monotonic() + timeout_ms / 1000, priority=priority,
     ) as fd:
         _ADMISSION_STATE.fd = fd
         try:
@@ -212,6 +229,7 @@ def model_resource_lease(
     exclusive: bool,
     timeout_ms: int | None = None,
     root: Path = CHRONOVISOR_ROOT,
+    backlog: bool = False,
 ) -> Iterator[None]:
     """Coordinate inference and runner eviction across threads and processes.
 
@@ -247,7 +265,7 @@ def model_resource_lease(
     )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     deadline_at = None if timeout_ms is None else time.monotonic() + (timeout_ms / 1000)
-    with _model_admission(lock_path, deadline_at=deadline_at):
+    with _model_admission(lock_path, deadline_at=deadline_at, backlog=backlog):
         acquired_process_lease = _PROCESS_RESOURCE_LOCK.acquire(
             exclusive=exclusive,
             timeout_s=(

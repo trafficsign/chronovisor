@@ -4802,6 +4802,38 @@ def test_counterfactual_failure_survives_wait_and_clears_only_after_success(
             assert state["last_success_at"] != previous_success
 
 
+def test_counterfactual_input_limit_does_not_defer_formal_mainline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.recall import recall_distillation_progress as progress
+
+    raw_dir = _raw(tmp_path)
+    config = _config(tmp_path)
+    state_path = store.distillation_dir(tmp_path) / store.STATE_FILE
+    store.write_sealed_state(state_path, {
+        "kind": "worker-state", "teacher_model_calls": 1,
+        **distill._counterfactual_failure_fields({}, "counterfactual_invalid", 0),
+    })
+    monkeypatch.setattr(distill, "_run_counterfactual_block", lambda **kwargs:
+        distill._CounterfactualBlockResult(
+            pending=True, failure_class="counterfactual_input_limit" if kwargs["execute"] else "",
+        )
+    )
+    successes = []
+    for _ in range(2):
+        result = distill.run_distillation_chunk(
+            root=tmp_path, raw_dir=raw_dir, config_path=config, teachers={},
+        )
+        state = store.read_sealed(state_path)
+        assert result["status"] == "capture_only"
+        assert state["worker_failure_count"] == 0
+        assert state["worker_error_stage"] == state["error_code"] == ""
+        receipt = progress.read(tmp_path)
+        assert receipt is not None and receipt["last_outcome"] == "succeeded"
+        successes.append(state["last_success_at"])
+    assert successes[1] > successes[0]
+
+
 @pytest.mark.parametrize("attempted,failure_class", [(False, "resource_busy"), (False, "capacity_unavailable"), (True, "timeout")])
 def test_counterfactual_attempt_failure_differs_from_unattempted_wait(
     tmp_path: Path, attempted: bool, failure_class: str,

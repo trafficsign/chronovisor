@@ -321,6 +321,10 @@ class DistillationError(ValueError):
     """A distillation input violates a deterministic or safety contract."""
 
 
+class _WorkerInputLimit(DistillationError):
+    """One item's unchanged input exceeds the fixed worker byte limit."""
+
+
 class _CounterfactualDataRejected(DistillationError):
     """A completed model attempt failed output or blind agreement validation."""
 
@@ -520,7 +524,7 @@ class _WorkerModelTurn:
 
 def _check_worker_input_size(payload: Mapping[str, Any], *, max_input_bytes: int) -> None:
     if len(canonical_json.canonical_json_bytes_strict(payload)) > min(max_input_bytes, 12_000):
-        raise DistillationError("distillation worker input exceeds fixed byte limit")
+        raise _WorkerInputLimit("distillation worker input exceeds fixed byte limit")
 
 
 def _worker_call(
@@ -567,6 +571,7 @@ def _worker_call(
                 needs_model=True,
                 wait_timeout_seconds=60,
                 reserve_model_turn=True,
+                prioritize_model=operation == "teacher",
             ))
         outcome = run_cancellable_command(
             [sys.executable, "-m", "chronovisor.recall.recall_distillation_worker"],
@@ -15681,8 +15686,9 @@ def _compare_and_commit_counterfactual(
         )
         return _CounterfactualBlockResult(pending=True, deferred=True, failure_class="counterfactual_transport")
     except DistillationError as exc:
+        input_limit = isinstance(exc, _WorkerInputLimit)
         failure_class = (
-            "counterfactual_data_reject"
+            "counterfactual_input_limit" if input_limit else "counterfactual_data_reject"
             if isinstance(exc, _CounterfactualDataRejected)
             else "counterfactual_invalid"
         )
@@ -15694,13 +15700,13 @@ def _compare_and_commit_counterfactual(
             [claim],
             [
                 {
-                    "status": "quarantined" if claim.attempt >= 3 else "retry",
-                    "error_class": "counterfactual_invalid",
-                    "retry_after_seconds": 0 if claim.attempt >= 3 else 60,
+                    "status": "quarantined" if input_limit or claim.attempt >= 3 else "retry",
+                    "error_class": failure_class if input_limit else "counterfactual_invalid",
+                    "retry_after_seconds": 0 if input_limit or claim.attempt >= 3 else 60,
                 }
             ],
         )
-        return _CounterfactualBlockResult(pending=True, deferred=True, failure_class=failure_class)
+        return _CounterfactualBlockResult(pending=True, deferred=not input_limit, failure_class=failure_class)
     candidate_id_raw = candidate["candidate_id"]
     candidate_id = str(candidate_id_raw)
     ox_contract_id = _current_profile_contract_id(root, config.teacher_profile)
@@ -17275,7 +17281,7 @@ def _timeout_workset_statuses(root: Path) -> dict[str, dict[str, Any]]:
 def _counterfactual_failure_fields(
     previous: Mapping[str, Any], failure_class: str, written: int
 ) -> dict[str, Any]:
-    """Keep attempted model failures visible until this stage actually succeeds."""
+    """Keep system failures visible; fixed item limits settle in the workset."""
     error_types = {
         "counterfactual_timeout": "CounterfactualTimeout",
         "counterfactual_transport": "CounterfactualTransport",
@@ -17302,12 +17308,13 @@ def _counterfactual_failure_fields(
             "worker_failure_count": int(previous.get("worker_failure_count") or 0) + 1 if same else 1,
             "last_failure_at": datetime.now(UTC).isoformat(),
         }
-    if previous.get("worker_error_stage") == "counterfactual" and not written:
+    if previous.get("worker_error_stage") == "counterfactual" and not written and failure_class != "counterfactual_input_limit":
         return {key: previous[key] for key in (
             "error_code", "worker_error_stage", "worker_error_type", "worker_error_sha256",
             "worker_failure_count", "last_failure_at", "worker_error_kind",
         ) if key in previous}
     return {
+        **({"error_code": ""} if failure_class == "counterfactual_input_limit" else {}),
         "worker_failure_count": 0, "worker_error_sha256": "",
         "worker_error_type": "", "worker_error_stage": "", "worker_error_kind": "",
     }

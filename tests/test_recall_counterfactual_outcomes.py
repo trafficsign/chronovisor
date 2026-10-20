@@ -149,6 +149,30 @@ def _repeated_failure_fields(failure_class: str) -> dict[str, Any]:
     return distill._counterfactual_failure_fields(first, failure_class, 0)
 
 
+def test_input_limit_remains_in_item_failure_breakdown_without_worker_failure(
+    tmp_path: Path,
+) -> None:
+    queue, claim = _claim(tmp_path)
+
+    def oversized(_payload: object) -> dict[str, Any]:
+        distill._check_worker_input_size({"query": "x" * 12_000}, max_input_bytes=12_000)
+        raise AssertionError("oversize input must be rejected")
+
+    result = _compare(tmp_path, queue, claim, SimpleNamespace(compare=oversized))
+    assert not result.deferred and result.written == 0
+    assert queue.status()["quarantined"] == 1
+    assert queue.status()["failure_breakdown"] == {"counterfactual_input_limit": 1}
+    assert not queue.claim("local-counterfactual", 1, "test-owner", 300)
+    assert not (store.distillation_dir(tmp_path) / store.LABEL_LEDGER_FILE).exists()
+    fields = distill._counterfactual_failure_fields(
+        _repeated_failure_fields("counterfactual_invalid"), result.failure_class, 0,
+    )
+    assert fields["worker_failure_count"] == 0
+    _write_health_state(tmp_path, fields)
+    diagnostic = health.recall_distillation_health(tmp_path)
+    assert "distillation_run_repeated_failure" not in diagnostic["reason_codes"]
+
+
 def _native_uncertain_worker(monkeypatch: pytest.MonkeyPatch) -> distill._WorkerCounterfactual:
     routes = {
         "recall.distill.answer_generator": _route(

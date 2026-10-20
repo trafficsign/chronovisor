@@ -307,6 +307,7 @@ def research_lane(
     needs_model: bool,
     wait_timeout_seconds: float = 0,
     reserve_model_turn: bool = False,
+    prioritize_model: bool = False,
 ) -> Iterator[ResearchLease]:
     """Admit research and optionally retain one turn across its model children."""
 
@@ -322,7 +323,7 @@ def research_lane(
                 (wait_timeout_seconds - (time.monotonic() - started)) * 1000
             ))
             try:
-                stack.enter_context(model_admission_turn(timeout_ms=remaining_ms))
+                stack.enter_context(model_admission_turn(timeout_ms=remaining_ms, priority=prioritize_model))
             except TimeoutError:
                 admission = ResearchAdmission(
                     admitted=False, reason="resource_busy", run_id=run_id,

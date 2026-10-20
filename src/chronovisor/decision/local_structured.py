@@ -1120,6 +1120,7 @@ def _default_transport_resource_broker(
     model: str,
     request: _StructuredResourceRequest | None,
     lease_timeout_ms: int | None = None,
+    backlog: bool = False,
 ) -> Iterator[int | None]:
     """Exclusively admit one local-provider runner for a repair session."""
 
@@ -1135,6 +1136,10 @@ def _default_transport_resource_broker(
                 load_default_llm_runtime,
             )
 
+            if backlog:
+                stack.enter_context(ollama.model_resource_lease(
+                    exclusive=True, timeout_ms=lease_timeout_ms, backlog=True,
+                ))
             stack.enter_context(
                 load_default_llm_runtime().resource_lease(
                     runtime_role,
@@ -3872,6 +3877,7 @@ class LocalStructuredSession:
                         model=self.model,
                         request=resource_request,
                         lease_timeout_ms=self.resource_lease_timeout_ms,
+                        backlog=self.role == "lint_tag_repair",
                     ) as admitted_num_ctx:
                         result = (
                             self._run_impl(

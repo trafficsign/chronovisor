@@ -84,7 +84,7 @@ def test_first_answer_that_already_exceeds_utility_limit_skips_second_generation
 
 
 @pytest.mark.parametrize("attempt", [1, 3])
-def test_early_input_rejection_preserves_retry_and_quarantine(
+def test_early_input_rejection_quarantines_only_the_item(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, attempt: int,
 ) -> None:
     worker, calls, leases = _worker(monkeypatch, ["あ" * 600, "second answer"])
@@ -97,11 +97,11 @@ def test_early_input_rejection_preserves_retry_and_quarantine(
         rally_id="synthetic-rally", candidate={}, mode="add",
         config=distill.DistillationConfig(),
     )
-    assert result.failure_class == "counterfactual_invalid" and result.deferred
+    assert result.failure_class == "counterfactual_input_limit" and not result.deferred
     assert commits[0][1] == [{
-        "status": "quarantined" if attempt == 3 else "retry",
-        "error_class": "counterfactual_invalid",
-        "retry_after_seconds": 0 if attempt == 3 else 60,
+        "status": "quarantined",
+        "error_class": "counterfactual_input_limit",
+        "retry_after_seconds": 0,
     }]
     assert len(calls) == 1 and leases == ["enter", "exit"]
     assert not (tmp_path / "labels").exists()
