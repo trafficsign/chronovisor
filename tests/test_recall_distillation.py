@@ -4451,6 +4451,7 @@ def test_deferred_native_counterfactual_turn_keeps_supervised_import_separate(
 @pytest.mark.parametrize("stop,expected", [
     ("budget", 3), ("counterfactual", 2), ("empty", 1),
     ("deferred", 1), ("stopped", 1), ("legacy", 1),
+    ("cf_noop", 5), ("cf_success", 7), ("cf_budget", 1),
 ])
 def test_local_teacher_amortizes_setup_within_budget_and_counterfactual_quota(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str, expected: int,
@@ -4465,13 +4466,27 @@ def test_local_teacher_amortizes_setup_within_budget_and_counterfactual_quota(
     monkeypatch.setattr(distill.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(distill, "load_distillation_config", lambda _path: config)
     monkeypatch.setattr(distill, "_capture_candidate_snapshots", lambda **_kwargs: distill._CandidateCaptureResult({}, [], {}, False))
-    monkeypatch.setattr(distill, "_run_counterfactual_block", lambda **_kwargs: distill._CounterfactualBlockResult(pending=stop == "counterfactual"))
+    stages: list[str] = []
+
+    def counterfactual(**kwargs: Any) -> distill._CounterfactualBlockResult:
+        if kwargs["execute"]:
+            stages.append("cf")
+            assert len(kwargs["label_rows"]) == (0 if stop == "empty" else stages.count("batch"))
+            if stop == "cf_budget":
+                clock[0] += 180
+        success = kwargs["execute"] and stop == "cf_success"
+        return distill._CounterfactualBlockResult(
+            pending=stop == "counterfactual" or stop.startswith("cf_"),
+            written=int(success), model_calls=int(success or (kwargs["execute"] and stop == "cf_budget")),
+        )
+
+    monkeypatch.setattr(distill, "_run_counterfactual_block", counterfactual)
     setup = distill._prepare_distillation_chunk(
         root=tmp_path, raw_dir=raw_dir, config_path=None, teachers={}, counterfactual=None,
         structural_verifier=None, dry_run=False, cold_start=True, max_elapsed_seconds=300,
     )
-    setup.update(teachers_available=True, teacher_model_calls=1)
-    stages: list[str] = []
+    initial_calls = 2 if stop.startswith("cf_") else 1
+    setup.update(teachers_available=True, teacher_model_calls=initial_calls)
 
     def prepare(**_kwargs: Any) -> dict:
         stages.append("setup")
@@ -4480,11 +4495,12 @@ def test_local_teacher_amortizes_setup_within_budget_and_counterfactual_quota(
     def batch(**kwargs: Any) -> distill._TeacherBatchResult:
         assert len(kwargs["label_rows"]) == stages.count("batch")
         stages.append("batch")
-        clock[0] += 60
-        store.append_chain(kwargs["label_path"], {
-            "kind": "teacher-label", "profile": distill.LOCAL_SINGLE_PROFILE,
-            "rally_id": "synthetic", "candidate_id": str(clock[0]),
-        })
+        clock[0] += 20 if stop.startswith("cf_") else 60
+        if stop != "empty":
+            store.append_chain(kwargs["label_path"], {
+                "kind": "teacher-label", "profile": distill.LOCAL_SINGLE_PROFILE,
+                "rally_id": "synthetic", "candidate_id": str(clock[0]),
+            })
         return distill._TeacherBatchResult(
             labels_written=0 if stop == "empty" else 1, model_calls=1,
             deferred=stop == "deferred", profile_stopped=stop == "stopped",
@@ -4495,8 +4511,11 @@ def test_local_teacher_amortizes_setup_within_budget_and_counterfactual_quota(
     monkeypatch.setattr(distill, "_prepare_distillation_training", lambda **_kwargs: stages.append("training"))
     monkeypatch.setattr(distill, "_persist_distillation_chunk", lambda **kwargs: kwargs)
     result = distill._run_distillation_chunk_impl(root=tmp_path, cold_start=True)
-    assert stages == ["setup", *(["batch"] * expected), "training"]
-    assert result["teacher_model_calls"] == 1 + expected
+    assert [stage for stage in stages if stage != "cf"] == ["setup", *(["batch"] * expected), "training"]
+    assert stages.count("cf") == (4 if stop == "cf_noop" else 2 if stop == "cf_success" else 1 if stop in {"cf_budget", "empty"} else 0)
+    assert result["teacher_model_calls"] == initial_calls + expected
+    assert result["counterfactual_model_calls"] == (2 if stop == "cf_success" else int(stop == "cf_budget"))
+    assert result["counterfactual_written"] == (2 if stop == "cf_success" else 0)
     assert result["teacher_result"].labels_written == (0 if stop == "empty" else expected)
 
 

@@ -17117,28 +17117,46 @@ def _run_distillation_chunk_impl(
         pending=counterfactual_probe.pending
     )
     counterfactual_attempted = False
-    if prefer_counterfactual and not model_deferred:
-        counterfactual_result = _run_counterfactual_block(
-            execute=True,
-            root=root,
-            raw_dir=raw_dir,
-            config=config,
-            counterfactual=counterfactual,
-            snapshots=model_snapshots,
-            rally_by_id=rally_by_id,
-            texts=texts,
-            label_path=label_path,
-            label_rows=label_rows,
-        )
-        counterfactual_attempted = True
-        # Native bundle import has its own supervised operation. Do not spend
-        # this CF turn revalidating the same bulk bundle after a deferred model.
-        prefer_counterfactual = (
-            counterfactual_result.written > 0
-            or config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
-        )
     teacher_result = _TeacherBatchResult()
-    while teachers_available and not prefer_counterfactual and not model_deferred:
+    while not model_deferred:
+        if prefer_counterfactual:
+            block = _run_counterfactual_block(
+                execute=True,
+                root=root,
+                raw_dir=raw_dir,
+                config=config,
+                counterfactual=counterfactual,
+                snapshots=model_snapshots,
+                rally_by_id=rally_by_id,
+                texts=texts,
+                label_path=label_path,
+                label_rows=label_rows,
+            )
+            counterfactual_result = replace(
+                block, model_calls=counterfactual_result.model_calls + block.model_calls,
+                written=counterfactual_result.written + block.written,
+            )
+            counterfactual_attempted = True
+            # Native import remains supervised; local work shares this cycle's budget.
+            prefer_counterfactual = (
+                config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
+                or bool(block.written and (
+                    config.teacher_profile != LOCAL_SINGLE_PROFILE
+                    or _is_counterfactual_turn(
+                        teacher_model_calls + teacher_result.model_calls,
+                        counterfactual_model_calls + counterfactual_result.model_calls,
+                        available=block.pending,
+                    )
+                ))
+            )
+        if not teachers_available or prefer_counterfactual:
+            break
+        if (
+            config.teacher_profile == LOCAL_SINGLE_PROFILE and counterfactual_attempted
+            and deadline - time.monotonic() < 130
+        ):
+            model_deferred = not teacher_result.labels_written
+            break
         batch = _run_teacher_batch(
             root=root,
             raw_dir=raw_dir,
@@ -17157,15 +17175,15 @@ def _run_distillation_chunk_impl(
             labels_written=teacher_result.labels_written + batch.labels_written,
             model_calls=teacher_result.model_calls + batch.model_calls,
         )
+        prefer_counterfactual = _is_counterfactual_turn(
+            teacher_model_calls + teacher_result.model_calls,
+            counterfactual_model_calls + counterfactual_result.model_calls,
+            available=counterfactual_result.pending,
+        )
         if (
             config.teacher_profile != LOCAL_SINGLE_PROFILE
             or not batch.labels_written or batch.deferred or batch.profile_stopped
-            or deadline - time.monotonic() < 130
-            or _is_counterfactual_turn(
-                teacher_model_calls + teacher_result.model_calls,
-                counterfactual_model_calls + counterfactual_result.model_calls,
-                available=counterfactual_probe.pending,
-            )
+            or deadline - time.monotonic() < (220 if prefer_counterfactual else 130)
         ):
             break
         label_rows = _local_single_label_rows(label_path)
