@@ -17427,13 +17427,14 @@ def run_distillation_chunk(
                     cold_start=cold_start,
                     max_elapsed_seconds=max_elapsed_seconds,
                 )
-        except (MaterializationDeferred, store.DistillationStoreBusy) as exc:
+        except (MaterializationDeferred, RawStore.SnapshotChanged, store.DistillationStoreBusy) as exc:
             # Native imports may advance source ledgers during a verified join.
             # Incomplete work never authorizes a snapshot or clears a prior error.
             result = {
                 "status": "deferred", "processed": 0,
                 "reason": (
                     exc.reason if isinstance(exc, MaterializationDeferred)
+                    else "raw_snapshot_changed" if isinstance(exc, RawStore.SnapshotChanged)
                     else "distillation_store_busy"
                 ),
                 "atomic_progress_may_be_present": True,

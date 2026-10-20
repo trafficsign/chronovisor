@@ -1295,6 +1295,8 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
     try:
         raw_store = RawStore(raw_dir, mode="v2")
         units, watermark = raw_store.committed_segment_snapshot()
+    except RawStore.SnapshotChanged:
+        raise
     except RawSegmentCorrupt as exc:
         raise CatalogError("committed Raw inventory is invalid") from exc
     current = {unit.raw_id: unit for unit in units}
@@ -2717,6 +2719,8 @@ def _catalog_watermark(raw_dir: Path, root: Path) -> str:
 
     try:
         watermark = committed_raw_watermark(raw_dir)
+    except RawStore.SnapshotChanged:
+        raise
     except RawSegmentCorrupt as exc:
         raise CatalogError("committed Raw inventory is invalid") from exc
     path = catalog_path(root)

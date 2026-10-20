@@ -146,6 +146,9 @@ class RawStore:
     feature flag reversible while shadow comparison is running.
     """
 
+    class SnapshotChanged(RawSegmentCorrupt):
+        """Concurrent index updates exhausted the stable snapshot retry budget."""
+
     # Segment commits are immutable after their journal/manifest is published.
     # Reuse that parsed snapshot across short-lived stores, but only while the
     # authoritative index files retain the same lstat identities.
@@ -419,7 +422,7 @@ class RawStore:
                     while len(self._segment_snapshots) > _SEGMENT_SNAPSHOT_CACHE_SIZE:
                         self._segment_snapshots.popitem(last=False)
             return units, watermark
-        raise RawSegmentCorrupt("Raw segment indexes changed during snapshot")
+        raise self.SnapshotChanged("Raw segment indexes changed during snapshot")
 
     def committed_segment_watermark(self) -> str:
         """Return the signature-bound committed inventory identity."""

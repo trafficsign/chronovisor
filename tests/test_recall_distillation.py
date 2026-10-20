@@ -13456,3 +13456,35 @@ def test_catalog_integrity_error_is_not_retried_when_raw_also_changes(
     state = store.read_sealed(store.distillation_dir(tmp_path) / store.STATE_FILE)
     assert state["worker_error_type"] == "CatalogError"
     assert state["worker_failure_count"] == 1
+
+
+@pytest.mark.parametrize("changing", [True, False])
+def test_raw_snapshot_race_defers_but_corruption_remains_a_worker_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changing: bool,
+) -> None:
+    raw_dir = _raw(tmp_path)
+    config = _config(tmp_path)
+    error_type = distill.RawStore.SnapshotChanged if changing else distill.RawSegmentCorrupt
+
+    def unavailable(_self: Any) -> Any:
+        raise error_type("synthetic snapshot rejection")
+
+    monkeypatch.setattr(distill.RawStore, "committed_segment_snapshot", unavailable)
+    for _ in range(2):
+        if changing:
+            result = distill.run_distillation_chunk(
+                root=tmp_path, raw_dir=raw_dir, config_path=config, teachers={},
+            )
+            assert result["status"] == "deferred" and result["reason"] == "raw_snapshot_changed"
+        else:
+            with pytest.raises(catalog.CatalogError):
+                distill.run_distillation_chunk(
+                    root=tmp_path, raw_dir=raw_dir, config_path=config, teachers={},
+                )
+    state_path = store.distillation_dir(tmp_path) / store.STATE_FILE
+    if changing:
+        assert not state_path.exists()
+        with pytest.raises(distill.RawStore.SnapshotChanged):
+            catalog._catalog_watermark(raw_dir, tmp_path)
+    else:
+        assert store.read_sealed(state_path)["worker_failure_count"] == 2

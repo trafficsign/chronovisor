@@ -538,8 +538,9 @@ def test_committed_snapshot_fails_closed_when_indexes_keep_changing(
         return (*original(self), (str(calls), 0, 0, 0, 0, 0))
 
     monkeypatch.setattr(RawStore, "_segment_snapshot_signature", changing_signature)
-    with pytest.raises(RawSegmentCorrupt, match="changed during snapshot"):
+    with pytest.raises(RawStore.SnapshotChanged, match="changed during snapshot"):
         RawStore(raw_dir, mode="v2").committed_segment_snapshot()
+    assert calls == 6
 
 
 @pytest.mark.parametrize("sealed", [False, True])
