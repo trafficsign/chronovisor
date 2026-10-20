@@ -77,16 +77,18 @@ def test_cached_runtime_rechecks_owner_policy_before_each_cloud_request(tmp_path
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("level", ["low", "medium", "xhigh"])
+@pytest.mark.parametrize("level", ["off", "low", "medium", "xhigh"])
 @pytest.mark.parametrize("model", [None, "qwen3.8-flash-next-chat"])
 def test_supported_reasoning_reaches_template_without_budget_reduction(tmp_path, monkeypatch, level, model):
     monkeypatch.setenv("CHRONOVISOR_ROOT", str(tmp_path))
     (tmp_path / "config.toml").write_text(f'''[model_execution.local_reasoning]
 model="qwen3.8-flash-next-chat"
-roles=["recall.distill.teacher.a"]
-level="{level}"
+roles=["recall.distill.teacher.a", "classification.authority"]
+level="low"
 num_predict=16384
 num_ctx=65536
+[model_execution.local_reasoning.level_by_role]
+"recall.distill.teacher.a"="{level}"
 [llm.roles."recall.distill.teacher.a"]
 model="qwen3.8-flash-next-chat"
 ''')
@@ -95,17 +97,38 @@ model="qwen3.8-flash-next-chat"
         schema=None, effective_num_ctx=65536, requested_num_ctx=65536,
         required_num_ctx=1000, activity_update=None,
     )
-    assert template.think == level
-    assert template.ollama_think == level
+    expected = False if level == "off" else level
+    assert template.think == expected
+    assert template.ollama_think == expected
+    assert session.local_reasoning["level"] == level
+    assert model_execution.local_reasoning_settings("classification.authority", "qwen3.8-flash-next-chat", root=tmp_path)["level"] == "low"
     assert template.num_predict == session._output_reservation() == 16384
     payload = OMLXAdapter()._request_payload(MessageGenerationRequest(
         messages=({"role": "user", "content": "synthetic"},),
         source=SourceDataClassification(SourceDataClass.SYSTEM, SourceSensitivity.HIGH),
-        think=level, max_output_tokens=template.num_predict,
+        think=template.think, max_output_tokens=template.num_predict,
         format=None, num_ctx=65536, keep_alive="0", timeout_ms=1000, max_output_chars=8000,
     ), model="qwen3.8-flash-next-chat")
-    assert payload["reasoning_effort"] == payload["chat_template_kwargs"]["reasoning_effort"] == level
+    if level == "off":
+        assert payload["enable_thinking"] is False
+        assert payload["chat_template_kwargs"]["enable_thinking"] is False
+        assert "reasoning_effort" not in payload
+    else:
+        assert payload["reasoning_effort"] == payload["chat_template_kwargs"]["reasoning_effort"] == level
     assert payload["max_tokens"] == 16384
+
+
+@pytest.mark.parametrize("override", ['level_by_role="off"', '[model_execution.local_reasoning.level_by_role]\n"recall.distill.teacher.a"="invalid"'])
+def test_invalid_role_reasoning_fails_closed(tmp_path, override):
+    (tmp_path / "config.toml").write_text('''[model_execution.local_reasoning]
+model="synthetic"
+roles=["recall.distill.teacher.a"]
+level="low"
+num_predict=16384
+num_ctx=65536
+''' + override)
+    with pytest.raises(ValueError, match="local reasoning"):
+        model_execution.local_reasoning_settings("recall.distill.teacher.a", "synthetic", root=tmp_path)
 
 
 def test_local_profile_preserves_prior_labels_and_requires_old_independence_gate(tmp_path):

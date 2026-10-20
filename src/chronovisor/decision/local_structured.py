@@ -3010,7 +3010,8 @@ class LocalStructuredSession:
         if self.reasoning_disabled:
             return False, "caller_disabled_reasoning"
         if self.local_reasoning is not None:
-            return self.local_reasoning["level"], "configured_local_reasoning"
+            level = self.local_reasoning["level"]
+            return False if level == "off" else level, "configured_local_reasoning"
         profile = _production_reasoning_profile(
             self.model, self.runtime_role, self.reasoning_authority
         )

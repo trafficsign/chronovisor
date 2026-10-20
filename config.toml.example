@@ -100,6 +100,9 @@ roles = ["recall.distill.teacher.a", "classification.authority", "lint.tag_repai
 level = "low"
 num_predict = 16384
 num_ctx = 65536
+# Set only after the teacher capacity rule selects it; other roles keep level.
+# [model_execution.local_reasoning.level_by_role]
+# "recall.distill.teacher.a" = "off"
 
 # Dedicated oMLX 0.6.4 service for auxiliary roles. Per-model residency/PLE/MTP/ANE
 # settings live in ~/.omlx/model_settings.json; this endpoint is loopback-only.

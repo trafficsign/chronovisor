@@ -4,6 +4,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from chronovisor.core import llm_config, ollama
 from chronovisor.core.llm_runtime import GenerationRoute, LLMRuntime, RouteLocation
 from chronovisor.decision.local_structured import (
@@ -145,18 +147,19 @@ def test_worker_session_ceiling_includes_fixed_schema_overhead() -> None:
     assert preflight.ok
 
 
-def test_teacher_provenance_keeps_configured_effort_when_normal_repair_disables_thinking(monkeypatch) -> None:
+@pytest.mark.parametrize("level,repair_turns", [("xhigh", 1), ("off", 0)])
+def test_teacher_provenance_keeps_configured_effort_when_thinking_is_disabled(monkeypatch, level, repair_turns) -> None:
     monkeypatch.setattr(worker, "_resolve_local_route", lambda role: (_route(role), "a" * 64))
 
     class Session:
-        local_reasoning = {"level": "xhigh", "num_predict": 16384, "num_ctx": 65536}
+        local_reasoning = {"level": level, "num_predict": 16384, "num_ctx": 65536}
 
         def __init__(self, **_kwargs):
             pass
 
         def run(self, *_args, **_kwargs):
             return SimpleNamespace(
-                ok=True, think=False, repair_turns=1, num_predict=16384, effective_num_ctx=65536,
+                ok=True, think=False, repair_turns=repair_turns, num_predict=16384, effective_num_ctx=65536,
                 value={"labels": [{
                     "candidate_id": "candidate-1", "verdict": "relevant", "confidence": 0.9,
                     "rationale": "synthetic match", "minimal_atom_ids": ["atom-1"],
@@ -168,7 +171,7 @@ def test_teacher_provenance_keeps_configured_effort_when_normal_repair_disables_
     result = worker.run(_payload())
     assert result["ok"]
     assert result["result"]["_teacher_reasoning"] == {
-        "level": "xhigh", "final_attempt_level": False, "repair_turns": 1,
+        "level": level, "final_attempt_level": False, "repair_turns": repair_turns,
         "output_tokens": 16384, "context_tokens": 65536,
     }
 

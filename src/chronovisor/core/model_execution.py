@@ -49,8 +49,11 @@ def local_reasoning_settings(
         model = str(_config(root).get("llm", {}).get("roles", {}).get(role, {}).get("model") or "")
     if model != settings.get("model"):
         return None
-    level = settings.get("level")
-    if level not in {"low", "medium", "xhigh"}:
+    levels = settings.get("level_by_role", {})
+    if not isinstance(levels, Mapping):
+        raise ValueError("local reasoning level_by_role must be a table")
+    level = levels.get(role, settings.get("level"))
+    if level not in {"off", "low", "medium", "xhigh"}:
         raise ValueError("unsupported local reasoning level")
     budgets: dict[str, int] = {}
     for key in ("num_predict", "num_ctx"):
