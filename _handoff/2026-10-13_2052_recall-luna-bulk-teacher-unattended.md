@@ -151,9 +151,9 @@ created_at: 2026-10-13T20:52:29+09:00
 - [ ] cost4：cold rebuildを除く3時間以上の同方式容量と流入差引backlog ETAを測定し、reasoning水準とprovenanceを確定する。3時間測定は完了したが、必要流量を満たす水準は未確定。lowを暫定維持し、流入追随は未完。
 
 ### 2026-10-21 流入追随の完遂
-- [ ] throughput1：CF blind comparison rejectを個別データ結果へ分類し、gate/retry履歴とfailure breakdownを保持する。
-- [ ] throughput2：通常launchd dailyのsetup/otherを既存profilerで帰属し、原因とbatch反復の重複計算を既存コード内で修正する。
-- [ ] throughput3：共有lease・stale・watchdog・配備境界・claim TTLを確認し、実測でlocal daily budgetを選ぶ。
+- [x] throughput1：CF blind comparison rejectを個別データ結果へ分類し、gate/retry履歴とfailure breakdownを保持する。
+- [x] throughput2：通常launchd dailyのsetup/otherを既存profilerで帰属し、原因とbatch反復の重複計算を既存コード内で修正する。
+- [x] throughput3：共有lease・stale・watchdog・配備境界・claim TTLを確認し、実測でlocal daily budgetを選ぶ。
 - [ ] throughput4：候補必須CI後に安全境界で一度配備し、通常R4・drift=false・human_waitなしを確認する。
 - [ ] throughput5：cold rebuildだけを除く固定3時間を測り、1316件/日・流入差引ETA・最高reasoningを確定する。必要なら既存経路のpayload再キー履歴を含めoffを実測する。
 
@@ -1367,3 +1367,9 @@ created_at: 2026-10-13T20:52:29+09:00
 - 300 秒はユーザーの決定 7 に記載された従来上限。今回の明示指示と 10/20 19:30 の流入追随判断に基づき local daily だけ 900 秒を選択。旧 mean 固定費約 95 秒を周期あたり償却し、setup 約 50 秒と最大開始 floor 220 秒を差し引く開始可能区間を 30→630 秒へ広げる。900 秒は既存 1,800 秒 watchdog/worker 上限の半分、deploy の natural-boundary 待機 3,600 秒以内。130/220 秒 floors、CF 3:1、quota、claim TTL 300 秒は不変。
 - lease 調査: distillation-worker lease は nonblocking、converge/sleep は busy なら deferred で継続し、通常 ingest は別の ingest-orchestrator lease。daily は ingest lease を取らず、model turn は batch/CF block ごとに release。progress stale は label 86,400 秒/formal 7,200 秒であり、300 秒と同一ではない。300 秒は chunk の実行時間と distillation lease 占有を制限していた。
 - 差分追加理由: cycle 内 state の受け渡し、書込結果と head の整合性検証、およびその regression tests が必要。新 module/daemon/supervisor/cache/repair layer は追加しない。CF focused 61 passed、統合 585 passed（architecture import 移動に由来する 7 failure は元 site を保持して解消）、再検証 436 passed、ruff/mypy passed。required CI は candidate 上でこれから実行し、main は未変更。
+
+- 2026-10-21 02:12 JST — throughput1–3のコード/調査/候補検証を完了。候補bc78a822のrequired CI（quality / Python 3.14 compatibility / Security）は全成功、ローカル全体7481 passed・58 deselected、static/architecture/compile/whitespaceも成功。旧6以上のdata-reject failure countは現行healthでhuman_wait対象から既に除外されており、修正元は計数・defer分類。旧記録の書換えはせず、次の通常state遷移で解消する。配備packageはCIを通したbc78a822に固定し、この後のPlan更新はcode差分のないlocal commitとして分離する。
+
+- 2026-10-21 02:12 JST — 一時profile登録は元のlaunchd登録へ復帰済み、plist hash不変。cProfileを含まない最後の通常2cycleはsetup平均34.292秒 / process CPU22.351秒、capture平均23.251秒。残る差にはI/Oと共有負荷が含まれ、単一の競合serviceへ全帰属しない。全snapshot/Rawの反復検証が固定CPU費用で、入力が増える限り残余費用も増えるため、重複削減と900秒による償却を組み合わせた。既存supervisorの30分operation watchdogはlocal dailyを直接監視せず、dailyは既存chunkのSIGALRM上限900秒、共有API上限1800秒で制限される。
+
+- 2026-10-21 02:12 JST — required CI成功後、既存safe-boundary手順でdaily/search-label-drain/convergeを自然終了後に保留。Librarianは既存のbounded local reviewが進行中なので、その終了を待つ判断。running workerを打ち切って配備時間を短縮しない。新しい監視層を追加せず、前回private observerを再利用してmetadataを記録中。配備前のimmutable64945件とledger5本のprefix hashを保存し、09:15はPAUSED、model server/supervisorは起動時刻・PIDを保護。throughput4/5は未完のまま。
