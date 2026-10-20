@@ -3802,6 +3802,104 @@ def test_split_plan_growth_preserves_cohort_and_embargoes_new_rallies(
         )
 
 
+@pytest.mark.parametrize("scenario", ["normal", "interrupted", "missing_anchor"])
+def test_local_cohort_switch_keeps_queued_schedule_and_rekeys_through_claims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str,
+) -> None:
+    rallies = [
+        {"rally_id": f"r{i}", "session_cluster_id": f"s{i}",
+         "as_of": f"2026-08-{i + 1:02}T00:00:00Z"}
+        for i in range(11)
+    ]
+    frozen = distill._ensure_split_plan(
+        tmp_path, rallies[:-1], raw_watermark="a" * 64,
+        model_cohort_sha256="b" * 64,
+    )
+    prior = distill._ensure_split_plan(
+        tmp_path, rallies, raw_watermark="c" * 64,
+        model_cohort_sha256="b" * 64,
+    )
+    queue = workset.DistillationWorkset(
+        distill._local_teacher_workset_path(tmp_path, distill.LOCAL_SINGLE_PROFILE)
+    )
+    watermark = {
+        "progress_kind": "local-teacher-v1", "raw_watermark": "c" * 64,
+        "candidate_count": 11, "candidate_head": "d" * 64,
+        "label_count": 2, "label_head": "e" * 64,
+        "split_plan_id": frozen["artifact_id"],
+        "assignment_revision": distill.ASSIGNMENT_REVISION,
+        "probe_revision": distill.PROBE_REVISION,
+    }
+    snapshots = {"r9": {"snapshot_sha256": "f" * 64,
+                        "candidates": [{"candidate_id": "c", "text_sha256": "a" * 64}]}}
+
+    def prepare(plan: Mapping[str, Any], level: str) -> tuple[Any, Any]:
+        return distill._prepare_local_teacher_work(
+            snapshots=snapshots, rally_by_id={r["rally_id"]: r for r in rallies},
+            split_assignments=plan["assignments"],
+            split_plan_id=distill._scheduling_split_plan_id(plan),
+            age_bands=distill._scheduling_age_bands(tmp_path, plan),
+            profile=distill.LOCAL_SINGLE_PROFILE,
+            reasoning={"level": level, "num_predict": 16384, "num_ctx": 65536},
+        )
+
+    old_tasks, old_items = prepare(prior, "low")
+    distill._advance_local_workset(queue, old_items, watermark)
+    before_progress = queue.progress()
+    if scenario == "missing_anchor":
+        read = distill._read_split_plan_artifact
+        pointer = store.distillation_dir(tmp_path) / "split-plan.json"
+        before_pointer = pointer.read_bytes()
+
+        def missing(root: Path, artifact_id: str) -> dict[str, Any]:
+            if artifact_id == frozen["artifact_id"]:
+                raise distill.DistillationError("frozen scheduling artifact missing")
+            return read(root, artifact_id)
+
+        monkeypatch.setattr(distill, "_read_split_plan_artifact", missing)
+        with pytest.raises(distill.DistillationError, match="artifact missing"):
+            distill._ensure_split_plan(
+                tmp_path, rallies, raw_watermark="f" * 64,
+                model_cohort_sha256="a" * 64,
+                teacher_profile=distill.LOCAL_SINGLE_PROFILE,
+            )
+        assert pointer.read_bytes() == before_pointer
+        assert queue.progress() == before_progress
+        return
+    if scenario == "interrupted":
+        # Reproduce a previously written, unaccepted cohort pointer.
+        distill._ensure_split_plan(
+            tmp_path, rallies, raw_watermark="f" * 64,
+            model_cohort_sha256="a" * 64,
+        )
+    current = distill._ensure_split_plan(
+        tmp_path, rallies, raw_watermark="f" * 64,
+        model_cohort_sha256="a" * 64, teacher_profile=distill.LOCAL_SINGLE_PROFILE,
+    )
+    assert current["model_cohort_sha256"] == "a" * 64
+    assert current["assignments"] == prior["assignments"]
+    assert current["assignments"]["r10"] == "embargo"
+    assert distill._scheduling_split_plan_id(current) == frozen["artifact_id"]
+    new_tasks, new_items = prepare(current, "off")
+    assert set(old_tasks).isdisjoint(new_tasks)
+    distill._advance_local_workset(queue, new_items, watermark)
+    assert queue.progress() == before_progress
+    result = distill._run_local_teacher_route(
+        workset=queue, route=distill.TEACHER_ROLES[0],
+        config=distill.DistillationConfig(
+            teacher_profile=distill.LOCAL_SINGLE_PROFILE, teacher_claim_limit=1,
+        ),
+        teachers={distill.TEACHER_ROLES[0]: SimpleNamespace(local=True)},
+        tasks=new_tasks, texts={}, root=tmp_path, raw_dir=tmp_path / "raw",
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        snapshots=snapshots, label_rows=[], structural_verifier=lambda *_: None,
+    )
+    assert result is None  # Missing old payload settles without a model call.
+    assert queue.status()["quarantined"] == 1
+    assert queue.status()["ready"] == 1
+    assert queue.progress() == before_progress
+
+
 def test_growth_keeps_work_plan_and_age_receipt_frozen(tmp_path: Path) -> None:
     rallies = [
         {

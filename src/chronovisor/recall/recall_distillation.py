@@ -8998,6 +8998,7 @@ def _ensure_split_plan(
     *,
     raw_watermark: str,
     model_cohort_sha256: str,
+    teacher_profile: str = "",
 ) -> dict[str, Any]:
     assignments = grouped_rolling_split(rallies)
     rally_ids = {str(rally["rally_id"]) for rally in rallies}
@@ -9005,10 +9006,26 @@ def _ensure_split_plan(
         prior = _read_split_plan(root)
     except DistillationError, store.DistillationStoreError, KeyError:
         prior = {}
+    pinned_schedule = False
+    if teacher_profile == LOCAL_SINGLE_PROFILE:
+        from chronovisor.recall.recall_distillation_workset import DistillationWorkset
+
+        workset_path = _local_teacher_workset_path(root, teacher_profile)
+        if workset_path.exists():
+            progress = DistillationWorkset(workset_path).progress()
+            if progress is not None:
+                if progress["progress_kind"] != "local-workset-v2":
+                    raise DistillationError("local scheduling progress is invalid")
+                # The queued work owns its frozen schedule. A cohort change or
+                # an interrupted setup must not replace that binding.
+                prior = _read_split_plan_artifact(
+                    root, str(progress["provenance"].get("split_plan_id") or "")
+                )
+                pinned_schedule = True
     if (
         prior.get("feature_revision") == TEXT_FEATURE_REVISION
         and prior.get("split_revision") == "grouped-rolling-v1"
-        and prior.get("model_cohort_sha256") == model_cohort_sha256
+        and (pinned_schedule or prior.get("model_cohort_sha256") == model_cohort_sha256)
         and isinstance(prior.get("assignments"), Mapping)
     ):
         prior_assignments = {
@@ -16337,6 +16354,7 @@ def _capture_candidate_snapshots(
             rallies,
             raw_watermark=committed_raw_watermark(raw_dir),
             model_cohort_sha256=cohort["cohort_sha256"],
+            teacher_profile=config.teacher_profile,
         )
         assignments = split_plan["assignments"]
         planned.sort(
@@ -16790,6 +16808,7 @@ def _prepare_distillation_training(
             rallies,
             raw_watermark=committed_raw_watermark(raw_dir),
             model_cohort_sha256=current_cohort["cohort_sha256"],
+            teacher_profile=config.teacher_profile,
         )
         if (
             not prior_split_id
