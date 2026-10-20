@@ -15740,12 +15740,12 @@ def _compare_and_commit_counterfactual(
             [
                 {
                     "status": "quarantined" if input_limit or claim.attempt >= 3 else "retry",
-                    "error_class": failure_class if input_limit else "counterfactual_invalid",
+                    "error_class": failure_class,
                     "retry_after_seconds": 0 if input_limit or claim.attempt >= 3 else 60,
                 }
             ],
         )
-        return _CounterfactualBlockResult(pending=True, deferred=not input_limit, failure_class=failure_class, model_calls=int(getattr(counterfactual, "attempted", not input_limit)))
+        return _CounterfactualBlockResult(pending=True, deferred=failure_class == "counterfactual_invalid", failure_class=failure_class, model_calls=int(getattr(counterfactual, "attempted", not input_limit)))
     candidate_id_raw = candidate["candidate_id"]
     candidate_id = str(candidate_id_raw)
     ox_contract_id = _current_profile_contract_id(root, config.teacher_profile)
@@ -17358,17 +17358,16 @@ def _timeout_workset_statuses(root: Path) -> dict[str, dict[str, Any]]:
 def _counterfactual_failure_fields(
     previous: Mapping[str, Any], failure_class: str, written: int
 ) -> dict[str, Any]:
-    """Keep system failures visible; fixed item limits settle in the workset."""
+    """Keep system failures visible; item limits and rejects settle in the workset."""
+    item_outcome = failure_class in {"counterfactual_input_limit", "counterfactual_data_reject"}
     error_types = {
         "counterfactual_timeout": "CounterfactualTimeout",
         "counterfactual_transport": "CounterfactualTransport",
         "counterfactual_invalid": "CounterfactualInvalid",
-        "counterfactual_data_reject": "CounterfactualInvalid",
         "counterfactual_binding": "CounterfactualBindingError",
     }
     if failure_class in error_types:
-        identity = "counterfactual_invalid" if failure_class == "counterfactual_data_reject" else failure_class
-        digest = hashlib.sha256(identity.encode()).hexdigest()
+        digest = hashlib.sha256(failure_class.encode()).hexdigest()
         same = (
             previous.get("worker_error_stage") == "counterfactual"
             and previous.get("worker_error_sha256") == digest
@@ -17377,21 +17376,21 @@ def _counterfactual_failure_fields(
             "error_code": "distillation_run_failed",
             "worker_error_stage": "counterfactual",
             "worker_error_type": error_types[failure_class],
-            "worker_error_kind": (
-                "counterfactual_data_reject" if failure_class == "counterfactual_data_reject"
-                else "counterfactual_system_error"
-            ),
+            "worker_error_kind": "counterfactual_system_error",
             "worker_error_sha256": digest,
             "worker_failure_count": int(previous.get("worker_failure_count") or 0) + 1 if same else 1,
             "last_failure_at": datetime.now(UTC).isoformat(),
         }
-    if previous.get("worker_error_stage") == "counterfactual" and not written and failure_class != "counterfactual_input_limit":
+    if (
+        previous.get("worker_error_stage") == "counterfactual" and not written
+        and not item_outcome and previous.get("worker_error_kind") != "counterfactual_data_reject"
+    ):
         return {key: previous[key] for key in (
             "error_code", "worker_error_stage", "worker_error_type", "worker_error_sha256",
             "worker_failure_count", "last_failure_at", "worker_error_kind",
         ) if key in previous}
     return {
-        **({"error_code": ""} if failure_class == "counterfactual_input_limit" else {}),
+        **({"error_code": ""} if item_outcome or previous.get("worker_error_kind") == "counterfactual_data_reject" else {}),
         "worker_failure_count": 0, "worker_error_sha256": "",
         "worker_error_type": "", "worker_error_stage": "", "worker_error_kind": "",
     }

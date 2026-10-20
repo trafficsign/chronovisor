@@ -4895,8 +4895,9 @@ def test_counterfactual_failure_survives_wait_and_clears_only_after_success(
             assert state["last_success_at"] != previous_success
 
 
-def test_counterfactual_input_limit_does_not_defer_formal_mainline(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("failure_class", ["counterfactual_input_limit", "counterfactual_data_reject"])
+def test_counterfactual_item_outcome_does_not_defer_formal_mainline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_class: str,
 ) -> None:
     from chronovisor.recall import recall_distillation_progress as progress
 
@@ -4909,7 +4910,7 @@ def test_counterfactual_input_limit_does_not_defer_formal_mainline(
     })
     monkeypatch.setattr(distill, "_run_counterfactual_block", lambda **kwargs:
         distill._CounterfactualBlockResult(
-            pending=True, failure_class="counterfactual_input_limit" if kwargs["execute"] else "",
+            pending=True, failure_class=failure_class if kwargs["execute"] else "",
         )
     )
     successes = []

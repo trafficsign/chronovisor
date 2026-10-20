@@ -34,10 +34,11 @@ def test_counterfactual_failure_logs_only_cause_digest(
         snapshots={}, exposure={}, exact_features={}, rally_id="synthetic", candidate={},
         mode="full", config=distill.DistillationConfig(),
     )
-    assert result.deferred and result.failure_class == failure_class
+    assert result.deferred is (failure_class == "counterfactual_invalid")
+    assert result.failure_class == failure_class
     assert commits[0][1] == [{
         "status": "quarantined" if attempt == 3 else "retry",
-        "error_class": "counterfactual_invalid",
+        "error_class": failure_class,
         "retry_after_seconds": 0 if attempt == 3 else 60,
     }]
     assert len(caplog.records) == 1

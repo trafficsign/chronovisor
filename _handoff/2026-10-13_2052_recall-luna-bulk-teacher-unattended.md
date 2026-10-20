@@ -21,7 +21,7 @@ created_at: 2026-10-13T20:52:29+09:00
    - **2026-10-18 改訂（repository と ~/.chronovisor の所有者による明示決定）**：日常・無人処理では一致率が低くても Luna を使わない。Chronovisor の全経路で Luna を含む cloud model の自動呼出しと自動fallbackを禁止する。local teacher の reasoning を実日次量と共有モデル資源に対して実用的な最高水準へ上げ、その水準で今から運用し、より良い local model が利用可能になった時に再測定する。従来3-2の「低一致率なら日次Luna継続」と10/17 cleanupの「Luna may act as authority」を撤回・置換する。凍結入力・prompt/schema・品質gate・独立性検査・過去履歴は維持する。
 5. 実行中、ユーザーに許可を求めない。ユーザーは別の作業に入っており、確認には答えられない。判断が要る点は自分で決め、理由を実行ログに残して進む。
 6. 作ったあと、ユーザーが何もしなくても回り続けること。
-7. **2026-10-20 19:30 JST 所有者決定**：teacherは流入に追いつくこと。前回の検証・準備・cadence約107秒/labelとlow model約29秒/label、約1.3 labels/cycleを根拠に、cycle固定費の原因を既存本線で最適化する。検証の厳しさを維持し、再実行する頻度と量だけを減らす。先に既存cycle receiptへstage wall timeを追加してproductive 4cycle以上を測り、測定した大きい費用順に修正する。cold rebuildを除く3時間以上の定常容量で平均764/日・平日1052/日と既存約20%余裕を評価し、流量を満たす最高reasoningを選ぶ。lowが満たせば維持し、offだけなら既測定sealed300（77.00%、low78.33%）に基づきprovenanceを記録してoffへ切替可能。300秒、quota、全gate・独立性・prompt/schema・凍結入力を保持。新supervisor/monitor/daemon/repair/self-heal層を足さず、candidate必須CI後に安全境界で一度配備する。追加質問なし、自動Luna/cloudなし、09:15 PAUSED維持。
+7. **2026-10-20 19:30 JST 所有者決定**：teacherは流入に追いつくこと。前回の検証・準備・cadence約107秒/labelとlow model約29秒/label、約1.3 labels/cycleを根拠に、cycle固定費の原因を既存本線で最適化する。検証の厳しさを維持し、再実行する頻度と量だけを減らす。先に既存cycle receiptへstage wall timeを追加してproductive 4cycle以上を測り、測定した大きい費用順に修正する。cold rebuildを除く3時間以上の定常容量で平均764/日・平日1052/日と既存約20%余裕を評価し、流量を満たす最高reasoningを選ぶ。lowが満たせば維持し、offだけなら既測定sealed300（77.00%、low78.33%）に基づきprovenanceを記録してoffへ切替可能。当初は300秒を保持。2026-10-21の今回指示により、2026-10-20の流入追随決定を優先し、local dailyのみ実測とlease/stale/watchdog/safe-boundary確認に基づきcycle budget延長を認める。130/220秒floor、claim TTL、CF3対1、quota、全gate・独立性・prompt/schema・凍結入力を保持。新supervisor/monitor/daemon/repair/self-heal層を足さず、candidate必須CI後に安全境界で一度配備する。追加質問なし、自動Luna/cloudなし、09:15 PAUSED維持。
 
 決定 5 と 6 から、設定の変更（`~/.chronovisor/config.toml`）と配備もこの Plan の範囲に含める。これは Plan を書いた Claude の解釈で、ユーザーの言葉は「実装してほしい」「とにかく仕上げてくれ」「何もしなくても回るように」である。配備は 10/9 と同じ手順で行う。
 
@@ -149,6 +149,13 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] cost2：実測の大きい固定費から共有経路を最小修正し、全caller・検証同等性・300秒とquota保持を確認する。
 - [x] cost3：candidate branchの必須CI成功後、安全境界で周期jobをidle保留し、一度配備・drift=false・human_waitなしを受け入れる。
 - [ ] cost4：cold rebuildを除く3時間以上の同方式容量と流入差引backlog ETAを測定し、reasoning水準とprovenanceを確定する。3時間測定は完了したが、必要流量を満たす水準は未確定。lowを暫定維持し、流入追随は未完。
+
+### 2026-10-21 流入追随の完遂
+- [ ] throughput1：CF blind comparison rejectを個別データ結果へ分類し、gate/retry履歴とfailure breakdownを保持する。
+- [ ] throughput2：通常launchd dailyのsetup/otherを既存profilerで帰属し、原因とbatch反復の重複計算を既存コード内で修正する。
+- [ ] throughput3：共有lease・stale・watchdog・配備境界・claim TTLを確認し、実測でlocal daily budgetを選ぶ。
+- [ ] throughput4：候補必須CI後に安全境界で一度配備し、通常R4・drift=false・human_waitなしを確認する。
+- [ ] throughput5：cold rebuildだけを除く固定3時間を測り、1316件/日・流入差引ETA・最高reasoningを確定する。必要なら既存経路のpayload再キー履歴を含めoffを実測する。
 
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
@@ -1347,3 +1354,5 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-21 00:54 JST — 窓内00:35:51・00:39:11にCFのcounterfactual_data_rejectを2回観測。stderrのcause hashはblind comparison rejectedに一致し、生成sessionは成功、両順序の一致条件不成立またはuncertainを既存gateが拒否した。両者の個別内訳は未保存なので断定しない。sealed stateとworksetの正規retry履歴を保持し、failure count2を消さず、後続teacherは通常capture_onlyへ戻りlast_success_at=00:47:25.990779 JSTへ進んだ。窓端のCF worksetは固定input上限隔離+9・payload_missing隔離+50、旧invalid48/timeout3を保持。手動requeue/queue削除0。private集計の旧専用failure-logだけを見る部分は、今回実在する60秒観測のsealed stateへ照合を追加して2回を反映し、完全なevent logとは主張しない。モデル終端329観測はlocal/成功、生成時間欠測0で、モデル成功とCF品質gate受入を区別する。
 
 - 2026-10-21 00:54 JST — 最終fresh MCP init/statusとHTTPを受入。statusは649f801c・drift=false、initはruntimeを省略した仕様のため実packageとstatusでsourceを照合した。alertはchronological_split_incomplete/data_waitのみ、verified_truth0・paired_denominator0・rollout0%、progress_stale=false。初回clean formal後のon-target health180標本でhuman_wait0。常駐5serviceの実archive/direct_urlは649f801c/MCP1.30.0、4周期job登録とmanager/plist hashは元どおり。authorityのhash/inode/device/mtime、model serverとsupervisorのPID/起動時刻、supervisor disabled/active0、09:15 PAUSED/hash、runtime.source以外の全設定は不変。旧immutable64666files変更0、ledger5本の既存prefix保持。観測用2processだけを専用stopで正常終了し残存0、本番workerへのsignal0。candidateと今回のSQLite scratchは既述どおり使用なし確認後に整理済み、稼働attested checkoutとprivate証跡は保持。コード差分は本体/example純増97行・tests純増151行で649f801cの必須CI成功を保持し、以後はPlanのlocal commitのみ、追加配備/pushなし。private最終証跡はruntime/2026-10-20-recall-cycle-cost/final-closeout.json。
+
+- 2026-10-21 01:04 JST — 指定の10/20 19:19以降ログを先に読了し、aa1f7c76から隔離candidateで再開。現行はCF data rejectをworker failureへ加算するがhealthにhuman_wait除外があることをsource確認した。分類元をinput-limitと同じ個別結果へ修正し、拒否gate・3回retry上限・履歴を保持する。300秒はユーザーの決定7に明記されているため、今回の明示指示を10/20流入追随決定の改訂として上記へ反映。1316件/日未達のまま完了とはしない。graphは10/14世代でoffsetが古く対象sourceを全caller grepと直接読込で補う。自動Luna/cloud呼出0、既存worker/supervisorへのsignal0。

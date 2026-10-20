@@ -221,20 +221,29 @@ def test_repeated_data_reject_quarantines_without_label_and_health_is_not_human_
     result = _compare(root, queue, claim, SimpleNamespace(local=True, compare=lambda _payload: response))
 
     assert result.failure_class == "counterfactual_data_reject"
+    assert not result.deferred and result.written == 0
     assert queue.status()["quarantined"] == 1
+    assert queue.status(include_failures=True)["failure_breakdown"] == {"counterfactual_data_reject": 1}
     assert queue.status()["completed"] == 0
     assert not (store.distillation_dir(root) / store.LABEL_LEDGER_FILE).exists()
 
     _write_health_state(root, _repeated_failure_fields("counterfactual_data_reject"))
     diagnostic = health.recall_distillation_health(root)
 
-    assert diagnostic["distillation_mainline_failure"]["worker_failure_count"] == 2
-    assert (
-        diagnostic["distillation_mainline_failure"]["worker_error_kind"]
-        == "counterfactual_data_reject"
-    )
+    assert "distillation_mainline_failure" not in diagnostic
     assert "distillation_run_repeated_failure" not in diagnostic["reason_codes"]
     assert all(item["category"] != "human_wait" for item in diagnostic["alerts"])
+
+
+def test_legacy_data_reject_count_clears_on_normal_run_without_erasing_failure_time() -> None:
+    previous = {
+        "worker_error_stage": "counterfactual", "worker_error_kind": "counterfactual_data_reject",
+        "worker_failure_count": 2, "last_failure_at": "2026-10-20T15:39:11Z",
+        "error_code": "distillation_run_failed",
+    }
+    state = {**previous, **distill._counterfactual_failure_fields(previous, "", 0)}
+    assert state["worker_failure_count"] == 0 and state["error_code"] == ""
+    assert state["last_failure_at"] == previous["last_failure_at"]
 
 
 def test_valid_counterfactual_metadata_still_writes_label_and_completes_claim(
