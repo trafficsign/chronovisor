@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+CHRONOVISOR_CYCLE_STARTED_AT=$("${CHRONOVISOR_PYTHON:-python3.14}" -c 'import time; print(time.time())')
+export CHRONOVISOR_CYCLE_STARTED_AT
 CHRONOVISOR_WRAPPER_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
 . "$CHRONOVISOR_WRAPPER_DIR/chronovisor-runtime-env"
 

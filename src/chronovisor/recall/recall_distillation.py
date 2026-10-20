@@ -20,8 +20,9 @@ import time
 import tomllib
 import unicodedata
 from collections import defaultdict, deque
-from collections.abc import Callable, Mapping, Sequence
-from contextlib import ExitStack
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -76,6 +77,22 @@ from chronovisor.recall.recall_file_identity import (
     persisted_identity_matches,
     stable_file_state,
 )
+
+CYCLE_STAGE_SECONDS: ContextVar[dict[str, float] | None] = ContextVar(
+    "recall_distillation_cycle_stage_seconds", default=None,
+)
+
+
+@contextmanager
+def _cycle_stage(name: str) -> Iterator[None]:
+    timings = CYCLE_STAGE_SECONDS.get()
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        if timings is not None:
+            timings[name] = timings.get(name, 0.0) + time.monotonic() - started
+
 
 RALLY_SCHEMA = "chronovisor.recall-rally.rally-v1"
 BASELINE_SCHEMA = "chronovisor.recall-distill-baseline.v1"
@@ -572,23 +589,25 @@ def _worker_call(
     with ExitStack() as call_stack:
         turn = model_turn or _WorkerModelTurn(call_stack)
         if turn.lease is None:
-            turn.lease = turn.stack.enter_context(research_lane(
-                f"recall-distill-{request_id[:16]}",
-                enabled=True,
-                mode="sleep",
-                purpose="sleep",
-                needs_model=True,
-                wait_timeout_seconds=60,
-                reserve_model_turn=True,
-                prioritize_model=operation == "teacher",
-            ))
-        outcome = run_cancellable_command(
-            [sys.executable, "-m", "chronovisor.recall.recall_distillation_worker"],
-            encoded,
-            turn.lease,
-            timeout_seconds=deadline_ms / 1_000 + 5,
-            inherit_model_admission=True,
-        )
+            with _cycle_stage("waits"):
+                turn.lease = turn.stack.enter_context(research_lane(
+                    f"recall-distill-{request_id[:16]}",
+                    enabled=True,
+                    mode="sleep",
+                    purpose="sleep",
+                    needs_model=True,
+                    wait_timeout_seconds=60,
+                    reserve_model_turn=True,
+                    prioritize_model=operation == "teacher",
+                ))
+        with _cycle_stage("model"):
+            outcome = run_cancellable_command(
+                [sys.executable, "-m", "chronovisor.recall.recall_distillation_worker"],
+                encoded,
+                turn.lease,
+                timeout_seconds=deadline_ms / 1_000 + 5,
+                inherit_model_admission=True,
+            )
         turn.attempted |= outcome.status not in {"deferred", "cancelled"} and (
             not isinstance(outcome.value, dict)
             or outcome.value.get("failure_class") not in {
@@ -11786,6 +11805,7 @@ def _run_ox_teacher_batch(
     )
 
 
+@_cycle_stage("teacher_batch")
 def _run_teacher_batch(
     *,
     root: Path,
@@ -16400,6 +16420,7 @@ def _worker_state_transition(
     }
 
 
+@_cycle_stage("setup")
 def _prepare_distillation_chunk(
     *,
     root: Path | None,
@@ -16658,6 +16679,7 @@ def _prepare_distillation_chunk(
     }
 
 
+@_cycle_stage("training_preparation")
 def _prepare_distillation_training(
     *,
     root: Path,
@@ -16797,6 +16819,7 @@ def _prepare_distillation_training(
     }
 
 
+@_cycle_stage("persist")
 def _persist_distillation_chunk(
     *,
     setup: Mapping[str, Any],

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +22,9 @@ RECEIPT_SCHEMA = "chronovisor.recall-local-daily-cycle.v1"
 def run_cycle(root: Path) -> dict[str, Any]:
     """Share the worker lease and all existing validation/promotion rules."""
 
+    cycle_started = time.monotonic()
+    launch_time = os.environ.get("CHRONOVISOR_CYCLE_STARTED_AT")
+    process_start_import = max(0.0, time.time() - float(launch_time)) if launch_time else None
     if (root / "runtime/recall-luna-bulk/supervisor-maintenance.json").exists():
         return {"status": "deferred", "reason": "maintenance"}
     config = distill.load_distillation_config(root / "config.toml")
@@ -52,6 +56,8 @@ def run_cycle(root: Path) -> dict[str, Any]:
         }
         store.write_sealed_state(directory / "status.json", status)
         backlog: int | None = None
+        timings: dict[str, float] = {}
+        timing_token = distill.CYCLE_STAGE_SECONDS.set(timings)
         try:
             result = distill.run_distillation_chunk(
                 root=root, config_path=root / "config.toml", cold_start=True,
@@ -70,6 +76,18 @@ def run_cycle(root: Path) -> dict[str, Any]:
                 backlog = workset["backlog"]
         except Exception as exc:
             status.update(status="error", reason=type(exc).__name__)
+        finally:
+            distill.CYCLE_STAGE_SECONDS.reset(timing_token)
+        measured_seconds = time.monotonic() - cycle_started
+        timings["other"] = max(0.0, measured_seconds - sum(
+            timings.get(name, 0.0)
+            for name in ("setup", "model", "waits", "training_preparation", "persist")
+        ))
+        status["stage_wall_seconds"] = {
+            **{name: round(value, 6) for name, value in timings.items()},
+            "process_start_import": round(process_start_import, 6) if process_start_import is not None else None,
+            "cycle_total": round(measured_seconds, 6),
+        }
         status.update(finished_at=datetime.now(UTC).isoformat(), elapsed_seconds=round(time.monotonic() - started, 3))
         rate = status.get("labels_written", 0) * 3600 / status["elapsed_seconds"] if status["elapsed_seconds"] else 0.0
         status["drain"] = {

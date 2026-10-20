@@ -302,6 +302,8 @@ def test_daily_cycle_uses_normal_worker_and_seals_only_local_receipt(tmp_path, m
     receipt = store.read_sealed(directory / "cycles" / f'{status["receipt_id"]}.json', schema=daily.RECEIPT_SCHEMA)
     assert receipt["teacher"]["reasoning"]["level"] == "xhigh"
     assert receipt["teacher"]["location"] == "local"
+    assert receipt["stage_wall_seconds"]["cycle_total"] >= 0
+    assert daily.distill.CYCLE_STAGE_SECONDS.get() is None
     lock = store.acquire_nonblocking_lock(directory / "daily-worker.lock")
     assert lock is not None
     try:
@@ -314,3 +316,19 @@ def test_daily_cycle_uses_normal_worker_and_seals_only_local_receipt(tmp_path, m
     marker.write_text('{}')
     assert daily.run_cycle(tmp_path) == {"status": "deferred", "reason": "maintenance"}
     assert len(calls) == 1
+
+
+def test_cycle_stage_preserves_exception_and_accumulates_only_in_context(monkeypatch):
+    timings = {}
+    clock = iter((1.0, 3.5, 4.0, 5.0))
+    monkeypatch.setattr(distill.time, "monotonic", lambda: next(clock))
+    token = distill.CYCLE_STAGE_SECONDS.set(timings)
+    try:
+        with pytest.raises(RuntimeError, match="interrupted"):
+            with distill._cycle_stage("setup"):
+                raise RuntimeError("interrupted")
+        with distill._cycle_stage("setup"):
+            pass
+    finally:
+        distill.CYCLE_STAGE_SECONDS.reset(token)
+    assert timings == {"setup": 3.5}

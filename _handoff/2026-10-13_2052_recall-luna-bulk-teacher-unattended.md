@@ -21,6 +21,7 @@ created_at: 2026-10-13T20:52:29+09:00
    - **2026-10-18 改訂（repository と ~/.chronovisor の所有者による明示決定）**：日常・無人処理では一致率が低くても Luna を使わない。Chronovisor の全経路で Luna を含む cloud model の自動呼出しと自動fallbackを禁止する。local teacher の reasoning を実日次量と共有モデル資源に対して実用的な最高水準へ上げ、その水準で今から運用し、より良い local model が利用可能になった時に再測定する。従来3-2の「低一致率なら日次Luna継続」と10/17 cleanupの「Luna may act as authority」を撤回・置換する。凍結入力・prompt/schema・品質gate・独立性検査・過去履歴は維持する。
 5. 実行中、ユーザーに許可を求めない。ユーザーは別の作業に入っており、確認には答えられない。判断が要る点は自分で決め、理由を実行ログに残して進む。
 6. 作ったあと、ユーザーが何もしなくても回り続けること。
+7. **2026-10-20 19:30 JST 所有者決定**：teacherは流入に追いつくこと。前回の検証・準備・cadence約107秒/labelとlow model約29秒/label、約1.3 labels/cycleを根拠に、cycle固定費の原因を既存本線で最適化する。検証の厳しさを維持し、再実行する頻度と量だけを減らす。先に既存cycle receiptへstage wall timeを追加してproductive 4cycle以上を測り、測定した大きい費用順に修正する。cold rebuildを除く3時間以上の定常容量で平均764/日・平日1052/日と既存約20%余裕を評価し、流量を満たす最高reasoningを選ぶ。lowが満たせば維持し、offだけなら既測定sealed300（77.00%、low78.33%）に基づきprovenanceを記録してoffへ切替可能。300秒、quota、全gate・独立性・prompt/schema・凍結入力を保持。新supervisor/monitor/daemon/repair/self-heal層を足さず、candidate必須CI後に安全境界で一度配備する。追加質問なし、自動Luna/cloudなし、09:15 PAUSED維持。
 
 決定 5 と 6 から、設定の変更（`~/.chronovisor/config.toml`）と配備もこの Plan の範囲に含める。これは Plan を書いた Claude の解釈で、ユーザーの言葉は「実装してほしい」「とにかく仕上げてくれ」「何もしなくても回るように」である。配備は 10/9 と同じ手順で行う。
 
@@ -142,6 +143,12 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] flow2：共有slot・秒/件・割込み・検証費用を再集計し、lowのままteacherをbacklog-only処理より優先する。配備後の実効容量と流入差引ETAを確認する。
 - [x] flow3：cloud無効後のcode-repairとingest-frontierの実consumerを確認する。
 - [x] flow4：candidateの必須CI後、周期jobをidle保留した安全境界でmain更新・一度配備し、drift=falseとhuman_waitなしの正式成功2回を確認する。
+
+### 2026-10-20 cycle固定費の最適化
+- [ ] cost1：既存cycle receiptで起動/import・setup・model・training preparation・persist・waitを測定し、productive 4cycle以上の変更前内訳を記録する。
+- [ ] cost2：実測の大きい固定費から共有経路を最小修正し、全caller・検証同等性・300秒とquota保持を確認する。
+- [ ] cost3：candidate branchの必須CI成功後、安全境界で周期jobをidle保留し、一度配備・drift=false・human_waitなしを受け入れる。
+- [ ] cost4：cold rebuildを除く3時間以上の同方式容量と流入差引backlog ETAを測定し、reasoning水準とprovenanceを確定する。
 
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
@@ -1298,3 +1305,5 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-20 16:15 JST — 最終fresh MCP init/status成功、alertはchronological_split_incomplete/data_waitのみ、verified_truth0・paired_denominator0・rollout0%。通常sealed正式成功は解除後34回を受入、最初の2回は13:16:26.509384・13:21:23.444291 JST、初回以後のon-target health169観測でhuman_wait再発0。固定capは実workset/status(include_failures=True)でcounterfactual_input_limit13件として保持し、旧invalid48/timeout3は保持、CF成功へ読み替えない。5常駐と実周期workerのarchiveは180013ee、HTTP drift=false。root authorityはbyte/inode/mtime不変、immutable63134files変更0・ledger5本の既存prefix保持。supervisor/model serverは元PID/起動時刻、supervisor disabled/active0、daily plistと09:15 PAUSEDは同hash、runtime.source以外の全設定一致。元untracked14件も同hash。required CIは同sourceの7454 passed/4 skipped×2環境とSecurity成功を保持、配備回数1。
 
 - 2026-10-20 16:25 JST — 最終整理: 今回の観測process5本はowner用stopで正常終了し、本番worker/supervisorへのsignalなし。候補worktreeは利用processなし・tracked clean・mainへfast-forward済みを確認して削除、稼働中attested checkoutとprivate測定証跡は保持した。4周期jobは登録復帰済み、最終HTTPは180013ee/drift=false・human_waitなし。Librarianのexit1は今回配備前から継続するunresolved_link品質保留で、直近full sweep更新済み・worker_failure0を確認し、既存gateを保持した。最終比較・判断・後片付けの文書commitはlocalのみ、配備source/required CI対象のコードとテストに追加変更なし。
+
+- 2026-10-20 19:19 JST — Astraが711673c3の13:00以後実行ログを先に読了し、所有者のcycle固定費最適化へ着手。現mainは711673c3、配備source180013ee。独立candidate worktreeで計測だけを先に追加し、自然終了したdailyの既存排他を使う限定計測後に元scheduleを復帰する。常駐serviceの切替は最終版1回へまとめる。stage計測は既存receipt/既存module内のみ。graphは10/14世代で対象sourceにmetadata変更と未収録があるため直接sourceと全caller grepで補った。現cold_start_dueはp5未達でも真で、単純な置換効果は未立証。判断は4productive cyclesの後とし、コード最適化はまだ行わない。追加agent/cloud呼出0。
