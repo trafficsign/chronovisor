@@ -1,7 +1,7 @@
 ---
 task_id: plan_f1af8dd28d254ae0a5fa2c431b1dfb3f
 created_at: 2026-10-13T20:52:29+09:00
-状態: running
+状態: blocked
 ---
 
 # Recall：既存の Luna ラベルを保持し、ローカルで無人運転を続ける
@@ -148,7 +148,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] cost1：既存cycle receiptで起動/import・setup・model・training preparation・persist・waitを測定し、productive 4cycle以上の変更前内訳を記録する。
 - [x] cost2：実測の大きい固定費から共有経路を最小修正し、全caller・検証同等性・300秒とquota保持を確認する。
 - [x] cost3：candidate branchの必須CI成功後、安全境界で周期jobをidle保留し、一度配備・drift=false・human_waitなしを受け入れる。
-- [ ] cost4：cold rebuildを除く3時間以上の同方式容量と流入差引backlog ETAを測定し、reasoning水準とprovenanceを確定する。3時間測定は完了したが、必要流量を満たす水準は未確定。lowを暫定維持し、流入追随は未完。
+- [ ] cost4：cold rebuildを除く3時間以上の同方式容量と流入差引backlog ETAを測定し、reasoning水準とprovenanceを確定する。3時間測定は完了したが、必要流量を満たす水準は未確定。設定をlowへ復帰したがdailyは保留中で、流入追随は未完。
 
 ### 2026-10-21 流入追随の完遂
 - [x] throughput1：CF blind comparison rejectを個別データ結果へ分類し、gate/retry履歴とfailure breakdownを保持する。
@@ -184,7 +184,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - 配備後、runtime の drift が false であること。
 
 ## ブロッカー（発生時のみ）
-- 現在（2026-10-21 06:41 JST）：f5b9a4feの1回配備後low固定3時間は122/122 valid R4・976件/日、1316未達。06:24のteacher A限定off切替は、cohort変更が凍結済みworksetのsplit参照を変える既存不具合により、setupでprogress cursor identity rewrite is invalidとなり4回失敗。dailyを自然idle境界で保留し、06:32に設定を元のlowへ復帰。進捗guardは保持、履歴/checkpoint/authorityの手編集なし。設定復帰だけでは現在のsplit参照は直らないことを実コピーで確認。既存関数の最小修正候補を隔離branchで検証中だが、追加配備は今回の1回制約外なので行わない。off窓は中断し容量未測定、daily再開・human_wait解消・1316達成は未完。throughput4を再開しcost4/throughput5も未チェック。
+- 現在（2026-10-21 07:01 JST）：blocked。f5b9a4feを1回配備し、lowの固定3時間は122/122 valid R4・976件/日で1316未達。off切替で既存cohort/split参照の進捗整合性エラーが発生。設定は元のlowへ戻したが、設定復帰だけでは直らずdailyを自然idle保留中。human_wait/distillation_run_repeated_failureが残る。復帰候補accec0af（隔離branch fix/recall-cohort-transition-20261021）は実metadataコピーのlow/off replay・関連525 tests・全体7486 passed/1 skipped/58 deselected、skipしたHNSWはCIの固定依存で別途1 passed、全static検査成功。source+19/test+98行、guardや履歴の手編集なし。今回は1回配備制約のため追加push/配備はせず、mainのcodeはf5b9a4feのまま。残件は候補の必須CIと追加配備、daily再開/human_wait解消、off定常3時間と1316達成確認。throughput4/5・cost4は未完。
 - 前回測定（2026-10-20 16:15 JST、今回の固定費修正前）：Qwen low、通常1.009750時間でvalid local R4受入12件=285.219件/日、平均流入763.714差−478.495/日、平日1052.4差−767.181/日でbacklog増、teacher ETAなし。検索は新規/再open0・純減1235.949件/日、残27557件、同率条件22.296日。検索終了後も現検証費用が続く条件では本線の楽観上限620.771件/日（平均差−142.943）で解消ETAなし。旧0ab4d779の3時間352件/日と旧1324.9件/日projectionは比較資料として保持し、現容量へ転用しない。実model生成slotの理論容量と本線calendar容量を分け、同sealed300のoffは231/300一致77.00%・終端失敗0・model中央値13.448秒/p9018.629秒だが、model時間ゼロの本線上限808.444件/日でも平日量と約20%余裕を満たせないため不採用。全gate・独立性条件を保持し、lowのまま増加を受け入れる。
 - 現local profileはchronological_split_incomplete/data_wait、verified_truth0・paired_denominator0・rollout0%。独立性、教師/各class/control/probe/CFのfloor、split/holdoutを保持し、旧native認証の合格項目を新local profileへ引き継がず、既存Luna集合へlocal labelを混ぜない。旧sourceでR4未発行の既知1件は、当時のsealed pending証明がなく跨sourceで帰属させられないためlabel/completionを保持して未完とする。旧0ab4d779の定常44 labelsは全44件R4受入済みで、新180013eeの通常1時間窓は12/12件を受入済み。
 - 旧native認証の履歴（現localの受入とは別）：2026-10-18 22:55 JSTの364811daによるsealed baselineと対応snapshotでは、固定split・時系列・assignment・row integrityとblind repeatが通過し、残るgate理由はcounterfactual_pairs_below_floorだけ。CFは5/100、post-cutoff・distinct judge・両順序一致・既存validator・selected-only条件は維持する。適格workの実完了時刻によるrolling24hは4組/日（今回の通常formal観測を含む）へ減り、同率が続く場合の100組到達参考日は2026-11-11 JSTへ更新した。一方、18:51の復帰以後4.059時間の適格増分は0で、2回の正式成功も適格CF増とは一致しない。短時間の0件を持続的な0件/日とは断定せず、11/11も確定日・自動運転の保証率にはしない。この旧native条件の予測を現local運転の所要時間へ転用しない。固定blind repeatは200組・stable161・unstable39・Wilson下限0.74455956で既存floor100/0.60を維持。
@@ -1401,3 +1401,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-21 06:25 JST — dailyは06:23:28のcycle終了後に既存lease内でidle保留し、06:24:43.525702に既存level_by_roleのteacher Aだけをoffへatomic変更。同じplistで即時登録復帰、running workerへのsignalなし。変更前設定とworkset2797項目のhash集合・遷移receipt4188行のprefix hashをprivate保存した。他role/global low、output16384/context65536、CF generator/judgeの既存設定は実archiveのresolverでも不変を確認。source/packageはf5b9a4feのままで配備回数1。off窓は設定切替時から09:24:43.525702まで固定し、re-keyによるpayload_missing、共有待ち、defer、起動時間を含め、cold除外は追加しない。容量はsealed R4受入で数え、旧/新キーの重複ready行と同じ候補の実backlogを分けてETAを示す。理由: reasoning変更がpayload digestに入るため、単純なready行数は一時的に二重計数となる。
 
 - 2026-10-21 06:41 JST — off初回からsetupでDistillationWorksetError、同一message hashの実因はprogress cursor identity rewrite is invalid。モデル呼出し前の4cycleが失敗し、06:26:52の終了後にdailyを自然idle境界で保留した。CF拒否の分類修正とは別件で、旧progress guardが正しく異なるsplit参照を拒否した。_configured_local_single_cohortにはreasoningが入り、_ensure_split_planはcohort変更時に新規splitを作る一方、teacher/CF worksetは既存の凍結splitを保持している。candidate/label countが進まないため新参照を受け入れられない。06:32に設定bytesを切替前lowへ戻したが、既存コードの通常low再開も同じ不整合になる。判断: checkpointを手で戻す、guardを緩める、架空labelでcursorを進めることは行わない。追加配備も今回の明示1回制約に反するため、隔離branchで既存split選択関数の原因修正まで進める。修正はlocal singleでworksetが保持するimmutable splitを選び、新cohortのmetadataと既存assignment/embargoを共存させる。新しい修復層/cache/daemonなし。実17,302件のコピーで旧codeのlow/off双方が同じエラー、新code双方は成功し、teacher/CF progressとreceipt headは全一致。本番書込0/model呼出0の再現証跡、通常切替・中断後再開・anchor欠落の回帰を含む関連525 tests成功。off定常容量は未測定であり、失敗0labelsを0件/日のsteady能力とは扱わない。
+
+- 2026-10-21 07:01 JST — 復帰候補accec0afb8ace6d1ca17dfc247907cca5b6f2dd5を隔離branchへcommitし、tracked clean。通常cohort切替・中断後再開・凍結anchor欠落の回帰を含む関連525 tests、全体7486 passed/1 skipped/58 deselected（既存fork warning1）、skipのHNSWをCI固定依存で別途1 passed。Ruff/mypy/import/architecture/compile/whitespaceも成功。実17,302件のコピーでlow/off双方の復帰とteacher/CF progress・receipt head完全一致、本番書込/model呼出0。GitHub required CIはこの未配備候補では未実行で、ローカル検証と区別する。追加push/配備は今回の1回制約により行わず、source/test差分はmainへ動かさない。必要な純増は既存関数の凍結参照選択と2callerへのprofile伝達19行、3種の回帰98行。配備済みf5b9a4feは本体+63/test+101行で、新production module/cache/daemonは0。
+
+- 2026-10-21 07:01 JST — 最終保全: immutable64945件は変更0、ledger5本の既存prefix一致、teacher queue2797項目と遷移receipt4188行のprefix保持。offはsetupで止まったため新key0、既存ready2246件は残り、再キー化の通常claim処理はfixtureでのみ検証した。今後のoff ETAはcurrent reasoningの未完keyで数え、旧low completedをoffの完了扱いにしない。通常low固定窓のpending2248に対する平均流入条件ETA10.590日は当時の条件付き値で、平日ETAはなく、現在daily保留中の解消ETAも未確定。5常駐serviceの実archive/direct_urlはf5b9a4fe/MCP1.30.0、fresh MCP statusはdrift=falseだがhuman_waitを確認。off初回4失敗に続き、通常converge側のlowでも同一エラーとなりworker failure5。supervisor/model serverのPID・起動時刻、authority bytes/inode/device/mtime、daily plist、他3周期jobの登録/manager/plist、09:15 PAUSED/hashは不変。設定差分は配備sourceのみへ復帰済み。今回のprivate observer2本は正常停止し、証跡と未配備候補worktreeを再利用のため保持、無関係なuntracked4件は保持。復帰・容量・human_wait受入が残るため状態をblockedとし、完了扱いしない。
