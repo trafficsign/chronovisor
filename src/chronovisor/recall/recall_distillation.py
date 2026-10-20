@@ -16252,6 +16252,7 @@ def _capture_candidate_snapshots(
     cold_start: bool,
     deadline: float,
     labeled_rally_ids: set[str] | None = None,
+    prioritize_test: bool = False,
     rally_loader: (
         Callable[[Sequence[Mapping[str, Any]]], Sequence[Mapping[str, Any]]] | None
     ) = None,
@@ -16290,7 +16291,7 @@ def _capture_candidate_snapshots(
                 )
             if config.teacher_profile == LOCAL_SINGLE_PROFILE:
                 label_rally_ids = _local_single_snapshot_ids(root, known_rally_ids, rallies)
-            snapshots = {
+            snapshots = {} if config.teacher_profile == LOCAL_SINGLE_PROFILE else {
                 rally_id: snapshot
                 for rally_id, snapshot in catalog.read_candidate_snapshots(
                     root, candidate_path, label_rally_ids
@@ -16345,6 +16346,22 @@ def _capture_candidate_snapshots(
                 str(rally["rally_id"]),
             )
         )
+    if config.teacher_profile == LOCAL_SINGLE_PROFILE:
+        # Read only the snapshots the fixed lane will use. The training phase
+        # independently validates its complete native source projection.
+        if prioritize_test and split_plan:
+            from chronovisor.recall.recall_distillation_cf_schedule import read_schedule
+
+            counterfactual_ids = (read_schedule(root) or {}).get("rally_plan_ids", {})
+            label_rally_ids = {
+                rally_id for rally_id in label_rally_ids
+                if split_plan["assignments"].get(rally_id) in {"test", "embargo"}
+                or rally_id in counterfactual_ids
+            }
+        try:
+            snapshots = catalog.read_candidate_snapshots(root, candidate_path, label_rally_ids)
+        except catalog.CatalogError as exc:
+            raise DistillationError("local candidate index is unavailable") from exc
     planned = planned[:candidate_limit]
     if rally_loader is not None:
         planned = [
@@ -16594,6 +16611,7 @@ def _prepare_distillation_chunk(
         index_path=index_path,
         label_rows=label_rows,
         cold_start=cold_start,
+        prioritize_test=cold_start and int(scheduler_state.get("cold_start_lane_turn", 0)) % 4 != 3,
         deadline=deadline,
         labeled_rally_ids=(
             ledger_index(label_path).distinct("rally_id")

@@ -4261,6 +4261,44 @@ def test_native_capture_uses_closed_cohort_without_early_materialization(
     assert requested == [{"recent"}]
 
 
+@pytest.mark.parametrize("prioritize_test", [False, True])
+def test_local_capture_applies_current_lane_before_reading_snapshot_bodies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prioritize_test: bool,
+) -> None:
+    from chronovisor.recall import recall_distillation_cf_schedule as schedule
+
+    assignments = {"test": "test", "embargo": "embargo", "train": "train",
+                   "validation": "validation", "cf": "train"}
+    rallies = [{"rally_id": key, "as_of": "2026-10-10T00:00:00Z"} for key in assignments]
+    calls: list[object] = []
+
+    def plan(*_args: Any, **_kwargs: Any) -> dict:
+        calls.append("current-plan")
+        return {"assignments": assignments}
+
+    def snapshots(_root: Path, _path: Path, ids: set[str]) -> dict:
+        assert calls == ["current-plan"]
+        calls.append(set(ids))
+        return {key: {} for key in ids}
+
+    monkeypatch.setattr(catalog, "sync_candidate_index", lambda *_args: None)
+    monkeypatch.setattr(catalog, "candidate_rally_ids", lambda *_args: set(assignments))
+    monkeypatch.setattr(catalog, "read_candidate_snapshots", snapshots)
+    monkeypatch.setattr(distill, "_local_single_snapshot_ids", lambda *_args: set(assignments))
+    monkeypatch.setattr(schedule, "read_schedule", lambda *_args: {"rally_plan_ids": {"cf": "fixed"}})
+    monkeypatch.setattr(distill, "_ensure_split_plan", plan)
+    monkeypatch.setattr(distill, "committed_raw_watermark", lambda *_args: "b" * 64)
+    result = distill._capture_candidate_snapshots(
+        root=tmp_path, raw_dir=tmp_path / "raw",
+        config=distill.DistillationConfig(teacher_profile=distill.LOCAL_SINGLE_PROFILE),
+        rallies=rallies, texts={}, index_path=tmp_path / "index", label_rows=[],
+        cold_start=True, deadline=time.monotonic() + 900, prioritize_test=prioritize_test,
+    )
+    expected = {"test", "embargo", "cf"} if prioritize_test else set(assignments)
+    assert calls == ["current-plan", expected]
+    assert set(result.snapshots) == expected
+
+
 def test_native_prepare_reads_payloads_only_for_pending_and_selected_rallies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4308,8 +4346,9 @@ def test_native_prepare_reads_payloads_only_for_pending_and_selected_rallies(
     assert distill._source_age_bands(setup["rallies"]) == distill._source_age_bands(expected)
 
 
+@pytest.mark.parametrize("profile", [distill.NATIVE_LUNA_SINGLE_PROFILE, distill.LOCAL_SINGLE_PROFILE])
 def test_native_capture_resolves_payloads_after_the_existing_candidate_limit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: str,
 ) -> None:
     summaries = [
         {"rally_id": f"rally-{index:03}", "as_of": "2026-10-10T00:00:00Z",
@@ -4335,9 +4374,9 @@ def test_native_capture_resolves_payloads_after_the_existing_candidate_limit(
     monkeypatch.setattr(distill, "candidate_snapshot", snapshot)
     result = distill._capture_candidate_snapshots(
         root=tmp_path, raw_dir=tmp_path / "raw",
-        config=distill.DistillationConfig(teacher_profile=distill.NATIVE_LUNA_SINGLE_PROFILE),
+        config=distill.DistillationConfig(teacher_profile=profile),
         rallies=summaries, texts={}, index_path=tmp_path / "index", label_rows=[],
-        cold_start=True, deadline=time.monotonic() + 300, rally_loader=load,
+        cold_start=True, deadline=time.monotonic() + 300, rally_loader=load, prioritize_test=True,
     )
     assert resolved == [row["rally_id"] for row in summaries[:100]]
     assert len(result.work) == 100
