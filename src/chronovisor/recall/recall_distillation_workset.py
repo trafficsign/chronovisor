@@ -2255,7 +2255,8 @@ class DistillationWorkset:
         return totals
 
     def status(
-        self, kind: str | None = None, *, include_timing: bool = False
+        self, kind: str | None = None, *, include_timing: bool = False,
+        include_failures: bool = False,
     ) -> dict[str, Any]:
         """Return state counters without exposing work payloads."""
 
@@ -2300,7 +2301,8 @@ class DistillationWorkset:
             counts[str(row["state"])] += int(row["count"])
             if error_class := row["last_error_class"]:
                 failures[error_class] = failures.get(error_class, 0) + int(row["count"])
-        counts["failure_breakdown"] = failures
+        if include_failures:
+            counts["failure_breakdown"] = failures
         counts["backlog"] = counts["ready"] + counts["leased"]
         counts["total"] = sum(
             counts[state] for state in ("ready", "leased", "completed", "quarantined")

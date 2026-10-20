@@ -704,7 +704,6 @@ def test_status_reports_backlog_by_kind_and_state(tmp_path: Path) -> None:
         "quarantined": 0,
         "backlog": 2,
         "total": 2,
-        "failure_breakdown": {},
     }
     workset.commit(
         claims,
@@ -724,7 +723,6 @@ def test_status_reports_backlog_by_kind_and_state(tmp_path: Path) -> None:
         "quarantined": 1,
         "backlog": 1,
         "total": 3,
-        "failure_breakdown": {"policy_veto": 1},
     }
 
 

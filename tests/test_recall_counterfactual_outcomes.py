@@ -161,7 +161,7 @@ def test_input_limit_remains_in_item_failure_breakdown_without_worker_failure(
     result = _compare(tmp_path, queue, claim, SimpleNamespace(compare=oversized))
     assert not result.deferred and result.written == 0
     assert queue.status()["quarantined"] == 1
-    assert queue.status()["failure_breakdown"] == {"counterfactual_input_limit": 1}
+    assert queue.status(include_failures=True)["failure_breakdown"] == {"counterfactual_input_limit": 1}
     assert not queue.claim("local-counterfactual", 1, "test-owner", 300)
     assert not (store.distillation_dir(tmp_path) / store.LABEL_LEDGER_FILE).exists()
     fields = distill._counterfactual_failure_fields(
