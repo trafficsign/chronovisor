@@ -147,7 +147,7 @@ created_at: 2026-10-13T20:52:29+09:00
 ### 2026-10-20 cycle固定費の最適化
 - [x] cost1：既存cycle receiptで起動/import・setup・model・training preparation・persist・waitを測定し、productive 4cycle以上の変更前内訳を記録する。
 - [x] cost2：実測の大きい固定費から共有経路を最小修正し、全caller・検証同等性・300秒とquota保持を確認する。
-- [ ] cost3：candidate branchの必須CI成功後、安全境界で周期jobをidle保留し、一度配備・drift=false・human_waitなしを受け入れる。
+- [x] cost3：candidate branchの必須CI成功後、安全境界で周期jobをidle保留し、一度配備・drift=false・human_waitなしを受け入れる。
 - [ ] cost4：cold rebuildを除く3時間以上の同方式容量と流入差引backlog ETAを測定し、reasoning水準とprovenanceを確定する。
 
 ### Phase 5：別件の修理
@@ -177,8 +177,8 @@ created_at: 2026-10-13T20:52:29+09:00
 - 配備後、runtime の drift が false であること。
 
 ## ブロッカー（発生時のみ）
-- 現在（2026-10-20 16:17 JST）：再発human_waitの固定12000-byte CF入力拒否は、既存本線でper-item隔離・失敗内訳保持へ修正済み。180013eeを必須CI後に一度配備し、常駐/周期worker archive一致・HTTP drift=false。通常更新でfailure_count0となり、解除後の正式成功34回（最初13:16:26・13:21:23 JST）とlocal R4、health169観測のhuman_wait0を受入。通常1時間容量と同sealed300のoff比較を完了し、teacher優先・low維持を決定。日次流入の余裕は満たせずbacklog増を明記する。flow1–4は完了、下記の長期品質・証跡条件を未完としてPlanはrunningを維持する。
-- 本番水準はQwen lowを保持。優先順位変更後の通常1.009750時間でvalid local R4受入12件=285.219件/日、平均流入763.714差−478.495/日、平日1052.4差−767.181/日でbacklog増、teacher ETAなし。検索は新規/再open0・純減1235.949件/日、残27557件、同率条件22.296日。検索終了後も現検証費用が続く条件では本線の楽観上限620.771件/日（平均差−142.943）で解消ETAなし。旧0ab4d779の3時間352件/日と旧1324.9件/日projectionは比較資料として保持し、現容量へ転用しない。実model生成slotの理論容量と本線calendar容量を分け、同sealed300のoffは231/300一致77.00%・終端失敗0・model中央値13.448秒/p9018.629秒だが、model時間ゼロの本線上限808.444件/日でも平日量と約20%余裕を満たせないため不採用。全gate・独立性条件を保持し、lowのまま増加を受け入れる。
+- 現在（2026-10-20 22:00 JST）：cycle固定費の修正649f801cをcandidate必須CI後に安全境界で1回配備し、常駐5serviceと稼働中周期workerの実archive、drift=false、local R4付きclean formal success3回を確認した。cost1–3完了。cold rebuild後のlow定常窓21:47:51–翌00:47:51 JSTを固定して測定中で、容量・流入差・ETA・水準判断のcost4は未完。長期品質条件・7日継続も未完のためPlanはrunningを維持する。
+- 前回測定（2026-10-20 16:15 JST、今回の固定費修正前）：Qwen low、通常1.009750時間でvalid local R4受入12件=285.219件/日、平均流入763.714差−478.495/日、平日1052.4差−767.181/日でbacklog増、teacher ETAなし。検索は新規/再open0・純減1235.949件/日、残27557件、同率条件22.296日。検索終了後も現検証費用が続く条件では本線の楽観上限620.771件/日（平均差−142.943）で解消ETAなし。旧0ab4d779の3時間352件/日と旧1324.9件/日projectionは比較資料として保持し、現容量へ転用しない。実model生成slotの理論容量と本線calendar容量を分け、同sealed300のoffは231/300一致77.00%・終端失敗0・model中央値13.448秒/p9018.629秒だが、model時間ゼロの本線上限808.444件/日でも平日量と約20%余裕を満たせないため不採用。全gate・独立性条件を保持し、lowのまま増加を受け入れる。
 - 現local profileはchronological_split_incomplete/data_wait、verified_truth0・paired_denominator0・rollout0%。独立性、教師/各class/control/probe/CFのfloor、split/holdoutを保持し、旧native認証の合格項目を新local profileへ引き継がず、既存Luna集合へlocal labelを混ぜない。旧sourceでR4未発行の既知1件は、当時のsealed pending証明がなく跨sourceで帰属させられないためlabel/completionを保持して未完とする。旧0ab4d779の定常44 labelsは全44件R4受入済みで、新180013eeの通常1時間窓は12/12件を受入済み。
 - 旧native認証の履歴（現localの受入とは別）：2026-10-18 22:55 JSTの364811daによるsealed baselineと対応snapshotでは、固定split・時系列・assignment・row integrityとblind repeatが通過し、残るgate理由はcounterfactual_pairs_below_floorだけ。CFは5/100、post-cutoff・distinct judge・両順序一致・既存validator・selected-only条件は維持する。適格workの実完了時刻によるrolling24hは4組/日（今回の通常formal観測を含む）へ減り、同率が続く場合の100組到達参考日は2026-11-11 JSTへ更新した。一方、18:51の復帰以後4.059時間の適格増分は0で、2回の正式成功も適格CF増とは一致しない。短時間の0件を持続的な0件/日とは断定せず、11/11も確定日・自動運転の保証率にはしない。この旧native条件の予測を現local運転の所要時間へ転用しない。固定blind repeatは200組・stable161・unstable39・Wilson下限0.74455956で既存floor100/0.60を維持。
 - 7日無人継続は未完。別モデルA300件の独立比較測定は完了し、一致率72.6667%。低一致率を理由とする日次Luna継続判断は2026-10-18の決定4改訂で撤回し、local切替後の継続を観測中。補助比較Bも300件終端し、有効287件の一致165/287（57.4913%）、技術失敗13件を分母から除外した。モデル不変性の合格とは扱わず、品質昇格は保留したままlocalへ切り替えた。旧09:15 cloud automationは更新済みpromptを保持してPAUSED、現在の追跡はlocal receiptとhealth/initで行う。
@@ -1329,3 +1329,5 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-20 21:06 JST — cost3配備操作は1回完了。自然終了待ちでdaily/converge/search-label-drain/Librarianをidle保留し、既存ingest/distillation lease内でorigin/main・clean main・attested checkoutを649f801cへ進め、runtime.sourceだけをCAS更新。対象常駐5serviceの実archive/direct_urlが同SHA・MCP1.30.0。4周期jobは同plist/同managerで復帰し、通常daily子と検索/Librarianの実archiveも同SHAを受入。HTTPは649f801c/drift=false/human_waitなし、supervisorは同PID・disabled・active0、model serverへのrestartなし、cloud禁止・low維持。Librarianのfull sweep自然終了を待った時間と配備後cold rebuildは定常容量窓から除外する。通常R4を伴うclean formal success2回は次に確認するためcost3のチェックはまだ付けない。
 
 - 2026-10-20 21:52 JST — cold rebuildは通常workerの複数cycleで進み、2026-10-20 21:47:51 JSTのcapture_only cycle終了時にdirty0・新source local R4・clean formal success1回を受入。以後のwarm deferred/CF cycleを都合よく除外しないため、2回目formal成功待ちとは独立にlow定常窓を2026-10-20 21:47:51 JST–2026-10-21 00:47:51 JSTへ先に固定する。cold完了cycleそのものは除外し、その後の共有待ち・CF配分・無進捗もcalendar実効値へ含める。判断理由: 成功cycleが揃うまでwarm区間を捨てると処理量を過大評価するため。cost3の正式成功2回受入は別途継続する。配備後authorityのhash/inode/device/mtime、model serverとsupervisorのPID/起動時刻、daily plist、09:15 PAUSED/hashは不変。candidate worktreeはopen handle0・自分のPlan差分保存を確認して削除、attested checkout/private証跡は保持。
+
+- 2026-10-20 22:00 JST — cost3受入完了。新sourceのsealed formal successは21:47:50.374294・21:56:11.544066・21:58:24.913604 JSTの3回で、各normal dailyの新local R4・source649f801cと一致。materialization dirty0、worker failure0、初回成功後のon-target health12観測でhuman_wait0。最初の成功がcold完了cycleであるため、その終了21:47:51.143006以後だけを既定の3時間窓へ含める。warm deferredも除外しない。09:15 PAUSED、cloud禁止、low、全gate/独立性・300秒・quotaは維持。cost4の水準判断は00:47:51 JST以後の集計を待ち、途中の少数成功を日次容量へ断定しない。
