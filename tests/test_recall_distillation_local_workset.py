@@ -527,8 +527,9 @@ def test_counterfactual_without_sealed_exposure_defers_without_label_or_attempt(
     assert status["last_durable_progress"]["progress_kind"] == "local-workset-v2"
 
 
+@pytest.mark.parametrize("shared_cycle", [False, True])
 def test_local_teacher_defers_cross_rally_duplicate_candidate_id(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, shared_cycle: bool
 ) -> None:
     class Teacher:
         local = True
@@ -590,9 +591,16 @@ def test_local_teacher_defers_cross_rally_duplicate_candidate_id(
         "structural_verifier": lambda *_args: None,
     }
 
+    if shared_cycle:
+        kwargs["local_work"] = {}
     first = distill._run_local_teacher_batch(label_rows=[], **kwargs)
+    if shared_cycle:
+        def forbidden(**_kwargs):
+            raise AssertionError("cycle preparation must not repeat")
+        monkeypatch.setattr(distill, "_prepare_local_teacher_work", forbidden)
+        monkeypatch.setattr(distill, "_repair_r4_local_receipts", forbidden)
     second = distill._run_local_teacher_batch(
-        label_rows=store.read_chain(label_path), **kwargs
+        label_rows=first.appended_labels, **kwargs
     )
 
     assert (first.labels_written, second.labels_written) == (1, 1)
@@ -923,3 +931,20 @@ def test_counterfactual_preserves_raw_candidate_id_in_label(
     tampered["candidate_ids"] = ["evil"]
     exposure_path.write_text(json.dumps(tampered), encoding="utf-8")
     assert distill._materialized_row_integrity(materialized[0], root=tmp_path) is False
+
+
+def test_cycle_label_projection_accepts_own_appends_and_rejects_external_head(tmp_path: Path) -> None:
+    from chronovisor.recall import recall_distillation_store as store
+
+    path = store.distillation_dir(tmp_path) / store.LABEL_LEDGER_FILE
+    rows = []
+    head = store.chain_head(path)
+    own = store.append_chain_batch(path, [{"kind": "teacher-label"}, {"kind": "counterfactual-label"}])
+    distill._extend_local_cycle_labels(path, rows, head, own)
+    assert rows == own and head == store.chain_head(path)
+    store.append_chain(path, {"kind": "teacher-label"})
+    with pytest.raises(store.DistillationStoreBusy, match="cycle ledger changed"):
+        distill._extend_local_cycle_labels(path, rows, head, ())
+    next_own = store.append_chain_batch(path, [{"kind": "teacher-label"}])
+    with pytest.raises(store.DistillationStoreBusy, match="cycle ledger changed"):
+        distill._extend_local_cycle_labels(path, rows, head, next_own)

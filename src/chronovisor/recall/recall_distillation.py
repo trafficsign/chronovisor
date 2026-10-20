@@ -9839,6 +9839,7 @@ class _TeacherBatchResult:
     ramp_provider_attempts: int | None = None
     last_durable_progress: Mapping[str, Any] | None = None
     source_binding: Mapping[str, str] | None = None
+    appended_labels: Sequence[Mapping[str, Any]] = ()
 
 
 @dataclass(frozen=True)
@@ -9848,6 +9849,7 @@ class _CounterfactualBlockResult:
     model_calls: int = 0
     deferred: bool = False
     failure_class: str = ""
+    appended_labels: Sequence[Mapping[str, Any]] = ()
 
 
 @dataclass(frozen=True)
@@ -11822,6 +11824,7 @@ def _run_teacher_batch(
     label_path: Path,
     label_rows: Sequence[Mapping[str, Any]],
     candidate_indexed: bool = False,
+    local_work: dict[str, Any] | None = None,
     structural_verifier: Callable[
         [Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]], str | None
     ],
@@ -11869,6 +11872,7 @@ def _run_teacher_batch(
             structural_verifier=structural_verifier,
         )
     return _run_local_teacher_batch(
+        local_work=local_work,
         root=root,
         raw_dir=raw_dir,
         config=config,
@@ -14817,6 +14821,7 @@ def _commit_local_teacher_labels(
     )
     return _TeacherBatchResult(
         labels_written=len(appended),
+        appended_labels=appended,
         model_calls=1,
         workset_status=workset.status(include_timing=True),
     )
@@ -15168,6 +15173,7 @@ def _run_local_teacher_batch(
     *,
     root: Path,
     raw_dir: Path | None = None,
+    local_work: dict[str, Any] | None = None,
     config: DistillationConfig,
     teachers: Mapping[str, Teacher],
     snapshots: Mapping[str, Mapping[str, Any]],
@@ -15180,58 +15186,66 @@ def _run_local_teacher_batch(
     ],
 ) -> _TeacherBatchResult:
     """Run one durable local teacher batch; bodies stay in the ledgers."""
-    from chronovisor.recall.recall_distillation_workset import DistillationWorkset
+    raw_dir = raw_dir or root / "raw"
+    if local_work:
+        workset, tasks = local_work["workset"], local_work["tasks"]
+    else:
+        from chronovisor.recall.recall_distillation_workset import DistillationWorkset
 
-    workset = DistillationWorkset(
-        _local_teacher_workset_path(root, config.teacher_profile)
-    )
-    raw_dir = raw_dir or root / "raw"  # compatibility for direct test callers
-    try:
-        split_plan = _read_split_plan(root)
-        split_plan_id = _scheduling_split_plan_id(split_plan)
-        split_assignments = split_plan.get("assignments", {})
-        age_bands = _scheduling_age_bands(root, split_plan)
-    except DistillationError, store.DistillationStoreError, KeyError:
-        split_plan_id = ""
-        split_assignments = {}
-        age_bands = {}
-    from chronovisor.core.model_execution import local_reasoning_settings
+        workset = DistillationWorkset(
+            _local_teacher_workset_path(root, config.teacher_profile)
+        )
+        try:
+            split_plan = _read_split_plan(root)
+            split_plan_id = _scheduling_split_plan_id(split_plan)
+            split_assignments = split_plan.get("assignments", {})
+            age_bands = _scheduling_age_bands(root, split_plan)
+        except DistillationError, store.DistillationStoreError, KeyError:
+            split_plan_id = ""
+            split_assignments = {}
+            age_bands = {}
+        from chronovisor.core.model_execution import local_reasoning_settings
 
-    teacher = teachers.get(TEACHER_ROLES[0])
-    reasoning = (
-        local_reasoning_settings(TEACHER_ROLES[0], str(teacher.expected_route["model"]), root=root)
-        if isinstance(teacher, _WorkerTeacher) else None
-    )
-    tasks, work_items = _prepare_local_teacher_work(
-        snapshots=snapshots,
-        rally_by_id=rally_by_id,
-        split_assignments=split_assignments,
-        split_plan_id=split_plan_id,
-        age_bands=age_bands if isinstance(age_bands, Mapping) else None,
-        profile=config.teacher_profile, reasoning=reasoning,
-        prior_pairs=_local_single_prior_pairs(label_path) if config.teacher_profile == LOCAL_SINGLE_PROFILE else None,
-    )
-    _advance_local_workset(
-        workset,
-        work_items,
-        _local_workset_watermark(
-            root=root, raw_dir=raw_dir, label_path=label_path, snapshots=snapshots
-        ),
-    )
-    _repair_r4_local_receipts(
-        root=root,
-        config=config,
-        workset=workset,
-        tasks=tasks,
-        label_path=label_path,
-        label_rows=label_rows,
-    )
-    _repair_local_r4_pending_failure_markers(
-        root=root,
-        config=config,
-        workset=workset,
-        label_path=label_path,
-    )
+        teacher = teachers.get(TEACHER_ROLES[0])
+        reasoning = (
+            local_reasoning_settings(TEACHER_ROLES[0], str(teacher.expected_route["model"]), root=root)
+            if isinstance(teacher, _WorkerTeacher) else None
+        )
+        tasks, work_items = _prepare_local_teacher_work(
+            snapshots=snapshots,
+            rally_by_id=rally_by_id,
+            split_assignments=split_assignments,
+            split_plan_id=split_plan_id,
+            age_bands=age_bands if isinstance(age_bands, Mapping) else None,
+            profile=config.teacher_profile, reasoning=reasoning,
+            prior_pairs=_local_single_prior_pairs(label_path) if config.teacher_profile == LOCAL_SINGLE_PROFILE else None,
+        )
+        _advance_local_workset(
+            workset,
+            work_items,
+            _local_workset_watermark(
+                root=root, raw_dir=raw_dir, label_path=label_path, snapshots=snapshots
+            ),
+        )
+        label_head = store.chain_head(label_path)
+        _repair_r4_local_receipts(
+            root=root,
+            config=config,
+            workset=workset,
+            tasks=tasks,
+            label_path=label_path,
+            label_rows=label_rows,
+        )
+        _repair_local_r4_pending_failure_markers(
+            root=root,
+            config=config,
+            workset=workset,
+            label_path=label_path,
+        )
+        if store.chain_head(label_path) != label_head:
+            raise store.DistillationStoreBusy("local teacher preparation ledger changed")
+        if local_work is not None:
+            local_work.update(workset=workset, tasks=tasks)
     for route in _ordered_teacher_routes(
         {task["route"]: [task] for task in tasks.values() if task["route"] in teachers},
         label_rows,
@@ -15821,7 +15835,7 @@ def _compare_and_commit_counterfactual(
             }
         ],
     )
-    return _CounterfactualBlockResult(pending=True, written=1, model_calls=1)
+    return _CounterfactualBlockResult(pending=True, written=1, model_calls=1, appended_labels=(appended,))
 
 
 def _run_counterfactual_claim(
@@ -17054,6 +17068,20 @@ def _persist_distillation_chunk(
     }
 
 
+def _extend_local_cycle_labels(
+    label_path: Path, label_rows: list[Mapping[str, Any]], label_head: dict[str, Any],
+    appended: Sequence[Mapping[str, Any]],
+) -> None:
+    """Consume only this cycle's writes, checking the full ledger head each time."""
+    for row in appended:
+        if row["previous_sha256"] != label_head["head_sha256"]:
+            raise store.DistillationStoreBusy("local teacher cycle ledger changed")
+        label_head.update(records=label_head["records"] + 1, head_sha256=row["record_sha256"])
+    if store.chain_head(label_path) != label_head:
+        raise store.DistillationStoreBusy("local teacher cycle ledger changed")
+    label_rows.extend(appended)
+
+
 def _run_distillation_chunk_impl(
     *,
     root: Path | None = None,
@@ -17103,7 +17131,7 @@ def _run_distillation_chunk_impl(
     rally_by_id = setup["rally_by_id"]
     candidate_path = setup["candidate_path"]
     label_path = setup["label_path"]
-    label_rows = setup["label_rows"]
+    label_rows: list[Mapping[str, Any]] = list(setup["label_rows"])
     snapshots = setup["snapshots"]
     candidate_work = setup["candidate_work"]
     split_plan = setup["split_plan"]
@@ -17118,6 +17146,8 @@ def _run_distillation_chunk_impl(
     )
     counterfactual_attempted = False
     teacher_result = _TeacherBatchResult()
+    local_work: dict[str, Any] | None = {} if config.teacher_profile == LOCAL_SINGLE_PROFILE else None
+    local_label_head = dict(store.chain_head(label_path)) if local_work is not None else None
     while not model_deferred:
         if prefer_counterfactual:
             block = _run_counterfactual_block(
@@ -17136,6 +17166,10 @@ def _run_distillation_chunk_impl(
                 block, model_calls=counterfactual_result.model_calls + block.model_calls,
                 written=counterfactual_result.written + block.written,
             )
+            if local_label_head is not None:
+                _extend_local_cycle_labels(label_path, label_rows, local_label_head, block.appended_labels)
+            else:
+                label_rows.extend(block.appended_labels)
             counterfactual_attempted = True
             # Native import remains supervised; local work shares this cycle's budget.
             prefer_counterfactual = (
@@ -17158,6 +17192,7 @@ def _run_distillation_chunk_impl(
             model_deferred = not teacher_result.labels_written
             break
         batch = _run_teacher_batch(
+            local_work=local_work,
             root=root,
             raw_dir=raw_dir,
             config=config,
@@ -17170,6 +17205,10 @@ def _run_distillation_chunk_impl(
             candidate_indexed=ox_teacher_available,
             structural_verifier=structural_verifier,
         )
+        if local_label_head is not None:
+            _extend_local_cycle_labels(label_path, label_rows, local_label_head, batch.appended_labels)
+        else:
+            label_rows.extend(batch.appended_labels)
         teacher_result = replace(
             batch,
             labels_written=teacher_result.labels_written + batch.labels_written,
@@ -17186,7 +17225,6 @@ def _run_distillation_chunk_impl(
             or deadline - time.monotonic() < (220 if prefer_counterfactual else 130)
         ):
             break
-        label_rows = _local_single_label_rows(label_path)
     labels_written = teacher_result.labels_written
     teacher_model_calls += teacher_result.model_calls
     model_deferred = model_deferred or teacher_result.deferred

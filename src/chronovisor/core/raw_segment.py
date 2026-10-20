@@ -108,7 +108,9 @@ class RawSegmentCommit:
             raise RawSegmentCorrupt("segment capture timestamp is invalid") from exc
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        # Normal receipts are scalar; preserve asdict's deep copy for unusual callers.
+        value = {name: getattr(self, name) for name in self.__dataclass_fields__}
+        return value if all(type(item) in (str, int, type(None)) for item in value.values()) else asdict(self)
 
 
 @dataclass(frozen=True)

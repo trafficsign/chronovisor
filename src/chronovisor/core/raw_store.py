@@ -200,7 +200,6 @@ class RawStore:
         for manifest_path in sorted(self.raw_dir.glob(pattern)):
             if manifest_path.name.startswith("legacy-part-"):
                 continue
-            self._assert_safe_segment_index_path(manifest_path)
             commits = self._read_segment_index(manifest_path, sealed=True)
             segment_name = manifest_path.name.removesuffix(".manifest.json")
             segment_path = manifest_path.with_name(f"{segment_name}.jsonl.zst")
@@ -270,14 +269,14 @@ class RawStore:
     def _open_units(self) -> Iterator[RawUnit]:
         pattern = "[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]/*.commits.jsonl"
         for commit_path in sorted(self.raw_dir.glob(pattern)):
-            self._assert_safe_segment_index_path(commit_path)
+            commits = self._read_segment_index(commit_path, sealed=False)
             base = commit_path.name.removesuffix(".commits.jsonl")
             data_path = commit_path.with_name(f"{base}.jsonl.open")
             if not data_path.is_file() or data_path.is_symlink():
                 raise RawSegmentCorrupt(
                     f"open segment journal has no safe data file: {commit_path.name}"
                 )
-            for commit in self._read_segment_index(commit_path, sealed=False):
+            for commit in commits:
                 yield RawUnit(
                     raw_id=commit.raw_id,
                     storage="segment_open",
@@ -322,14 +321,14 @@ class RawStore:
     def _assert_safe_segment_index_path(self, path: Path) -> None:
         """Reject journal/manifest symlinks before they define Raw membership."""
 
-        try:
-            relative = path.relative_to(self.raw_dir)
-        except ValueError as exc:
-            raise RawSegmentCorrupt("Raw segment index is outside Raw root") from exc
-        current = self.raw_dir
-        for part in relative.parts:
-            current /= part
-            if current.is_symlink():
+        base = self.raw_dir.parts
+        parts = path.parts
+        if parts[:len(base)] != base:
+            raise RawSegmentCorrupt("Raw segment index is outside Raw root")
+        current = str(self.raw_dir)
+        for part in parts[len(base):]:
+            current = os.path.join(current, part)
+            if os.path.islink(current):
                 raise RawSegmentCorrupt("Raw segment index path is a symlink")
 
     def _segment_snapshot_signature(self) -> SegmentSnapshotSignature:
@@ -347,13 +346,17 @@ class RawStore:
             for path in self.raw_dir.glob(manifest_pattern)
             if not path.name.startswith("legacy-part-")
         )
+        parents = {path.parent for path in paths}
+        for parent in parents:
+            self._assert_safe_segment_index_path(parent)
         signature: list[tuple[str, int, int, int, int, int]] = []
         for path in sorted(paths):
-            self._assert_safe_segment_index_path(path)
             try:
                 identity = path.lstat()
             except FileNotFoundError:
                 continue
+            if stat.S_ISLNK(identity.st_mode):
+                raise RawSegmentCorrupt("Raw segment index path is a symlink")
             signature.append(
                 (
                     path.relative_to(self.raw_dir).as_posix(),
@@ -364,6 +367,8 @@ class RawStore:
                     identity.st_ctime_ns,
                 )
             )
+        for parent in parents:
+            self._assert_safe_segment_index_path(parent)
         return tuple(signature)
 
     def _load_segment_units(self) -> tuple[RawUnit, ...]:

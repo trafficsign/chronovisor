@@ -316,7 +316,7 @@ def test_daily_cycle_uses_normal_worker_and_seals_only_local_receipt(tmp_path, m
 
     monkeypatch.setattr(daily.distill, "run_distillation_chunk", worker)
     result = daily.run_cycle(tmp_path)
-    assert calls == [{"root": tmp_path, "config_path": tmp_path / "config.toml", "cold_start": True, "max_elapsed_seconds": 300}]
+    assert calls == [{"root": tmp_path, "config_path": tmp_path / "config.toml", "cold_start": True, "max_elapsed_seconds": 900}]
     assert result["labels_written"] == 4 and not result["promotion_allowed"]
     assert result["drain"]["pending"] == 100
     assert result["drain"]["basis"] == "last_full_local_cycle_including_shared_runtime_wait"

@@ -337,3 +337,20 @@ def test_append_never_reopens_part_with_published_seal_manifest(
     assert one.commit.part == 1
     assert two.commit.part == 2
     assert two.data_path.read_bytes() == second
+
+
+def test_commit_serialization_retains_exact_fields_hash_and_copy_semantics(tmp_path: Path) -> None:
+    from dataclasses import asdict, replace
+
+    from chronovisor.core.canonical_json import canonical_json_sha256_strict
+
+    source = tmp_path / "source.jsonl"
+    commit = _append(tmp_path / "raw", source, _source(source)).commit
+    for item in (commit, replace(commit, session_id={"unusual": []})):  # type: ignore[arg-type]
+        expected = asdict(item)
+        actual = item.to_dict()
+        assert actual == expected
+        assert canonical_json_sha256_strict(actual) == canonical_json_sha256_strict(expected)
+        if isinstance(actual["session_id"], dict):
+            actual["session_id"]["unusual"].append("independent")
+            assert item.to_dict() == expected

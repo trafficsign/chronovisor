@@ -4467,15 +4467,22 @@ def test_local_teacher_amortizes_setup_within_budget_and_counterfactual_quota(
     monkeypatch.setattr(distill, "load_distillation_config", lambda _path: config)
     monkeypatch.setattr(distill, "_capture_candidate_snapshots", lambda **_kwargs: distill._CandidateCaptureResult({}, [], {}, False))
     stages: list[str] = []
+    appended: list[Mapping[str, Any]] = []
 
     def counterfactual(**kwargs: Any) -> distill._CounterfactualBlockResult:
         if kwargs["execute"]:
             stages.append("cf")
-            assert len(kwargs["label_rows"]) == (0 if stop == "empty" else stages.count("batch"))
+            assert list(kwargs["label_rows"]) == appended
             if stop == "cf_budget":
                 clock[0] += 180
         success = kwargs["execute"] and stop == "cf_success"
+        cf_labels = (store.append_chain(kwargs["label_path"], {
+            "kind": "counterfactual-label", "profile": distill.LOCAL_SINGLE_PROFILE,
+            "rally_id": "synthetic", "candidate_id": "cf" + str(clock[0]),
+        }),) if success else ()
+        appended.extend(cf_labels)
         return distill._CounterfactualBlockResult(
+            appended_labels=cf_labels,
             pending=stop == "counterfactual" or stop.startswith("cf_"),
             written=int(success), model_calls=int(success or (kwargs["execute"] and stop == "cf_budget")),
         )
@@ -4493,16 +4500,18 @@ def test_local_teacher_amortizes_setup_within_budget_and_counterfactual_quota(
         return setup
 
     def batch(**kwargs: Any) -> distill._TeacherBatchResult:
-        assert len(kwargs["label_rows"]) == stages.count("batch")
+        assert list(kwargs["label_rows"]) == appended
         stages.append("batch")
         clock[0] += 20 if stop.startswith("cf_") else 60
+        written = []
         if stop != "empty":
-            store.append_chain(kwargs["label_path"], {
+            written.append(store.append_chain(kwargs["label_path"], {
                 "kind": "teacher-label", "profile": distill.LOCAL_SINGLE_PROFILE,
                 "rally_id": "synthetic", "candidate_id": str(clock[0]),
-            })
+            }))
+        appended.extend(written)
         return distill._TeacherBatchResult(
-            labels_written=0 if stop == "empty" else 1, model_calls=1,
+            labels_written=len(written), appended_labels=written, model_calls=1,
             deferred=stop == "deferred", profile_stopped=stop == "stopped",
         )
 

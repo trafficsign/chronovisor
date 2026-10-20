@@ -61,7 +61,8 @@ def run_cycle(root: Path) -> dict[str, Any]:
         try:
             result = distill.run_distillation_chunk(
                 root=root, config_path=root / "config.toml", cold_start=True,
-                max_elapsed_seconds=300,
+                # Amortize verified source setup; claims and model turns stay per batch.
+                max_elapsed_seconds=900,
             )
             status.update(
                 status=str(result.get("status") or "unknown"),
