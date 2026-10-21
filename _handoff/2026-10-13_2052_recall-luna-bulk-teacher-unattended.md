@@ -1425,3 +1425,5 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-21 08:19 JST — cold完了直後の次health標本でformal停滞のhuman_waitが再表示された。08:17以前のhuman_waitなし標本を最終受入に流用しない。cohort/split errorとは区別し、worker failure0・dirty0・新source R420件を保持したまま、通常dailyのclean formal success2回とその後のalert解除を待つ。閾値変更・state手編集・追加配備は行わず、固定3時間窓も変更しない。
 
 - 2026-10-21 08:48 JST — 中間0.503549時間を同じcalendar集計で照合し、18/18件のnew-source local valid R4・全low・通常daily区間外0、暫定857.910件/日。平均流入763.714との差+94.196/日、pending2306件の条件付ETA24.481日であり、3時間の採用判定には用いない。workset admission32件は既存履歴の展開を含むため実流入率に転用しない。窓内完了6cycleはすべてdeferred、平均秒はsetup27.027・model72.995・training18.263・persist0.007・wait119.018・other18.937・total256.246。dirty29標本すべて0、worker failure0。formal成功は未更新でhuman_wait/distillation_mainline_stalledが続くため、throughput4は未完。窓とlowを維持して観測を続ける。
+
+- 2026-10-21 09:12 JST — 通常dailyの1回目clean formal successは09:11:54.092346 JST。sealed formal progress・clean state・cycle内の新source local valid R4へ一致し、成功後の最初のon-target healthでhuman_wait解除、drift=falseを確認した。worker failure0・dirty0、旧last_failure履歴は保持。throughput4は2回目の成功を待つため未チェック、固定3時間窓も継続する。09:15 automationはPAUSED/hash不変を直前にも確認した。
