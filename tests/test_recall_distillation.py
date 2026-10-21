@@ -6011,6 +6011,16 @@ def test_configured_local_route_binding_rejects_evil_canonical_identities(
         "judge_model_digest": digests[roles[-1]],
     }
     assert distill._configured_local_route_binding(teacher) is True
+    from chronovisor.core import model_execution
+    monkeypatch.setattr(model_execution, "local_reasoning_settings", lambda *_args: {
+        "level": "low", "num_predict": 16_384, "num_ctx": 65_536,
+    })
+    bounded = {**teacher, "profile": distill.LOCAL_SINGLE_PROFILE, "cohort": distill.LOCAL_SINGLE_PROFILE,
+               "assignment_revision": "local-single-assignment-v1", "request_revision": distill.TEACHER_INPUT_VIEW_REVISION,
+               "reasoning": {"level": "low", "output_tokens": 16_384, "context_tokens": 65_536}}
+    assert distill._configured_local_route_binding(bounded) is True
+    assert distill._configured_local_route_binding({**bounded, "request_revision": "unknown-view"}) is False
+    assert distill._configured_local_route_binding({**teacher, "request_revision": distill.TEACHER_INPUT_VIEW_REVISION}) is False
     assert distill._configured_local_route_binding(counterfactual) is True
     assert (
         distill._configured_local_route_binding(

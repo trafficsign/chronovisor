@@ -107,6 +107,61 @@ def test_quarantine_review_receipt_rejects_invalid_delta(tmp_path: Path) -> None
         workset._validate_receipt_payload("quarantine_review", payload)
 
 
+@pytest.mark.parametrize("mismatch", [None, "digest", "split", "priority", "reference", "lineage", "existing"])
+def test_quarantine_review_new_identity_preserves_original_and_is_atomic(
+    tmp_path: Path, mismatch: str | None,
+) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    items = [_item("first"), _item("second")]
+    workset.advance(items, 1, progress=_progress(1))
+    workset.commit(workset.claim(None, 2, "worker", 300),
+                   [{"status": "quarantined", "error_class": "teacher_input_limit"}] * 2)
+    replacements = {item["work_id"]: {**item, "work_id": item["work_id"] + "-bounded",
+        "payload_digest": "b" * 64, "provenance": {**item["provenance"], "unbounded_work_id": item["work_id"]}}
+        for item in items}
+    selected = {item["work_id"]: item["payload_digest"] for item in items}
+    if mismatch == "digest":
+        selected["second"] = "c" * 64
+    elif mismatch == "split":
+        replacements["second"]["temporal_split"] = {"partition": "test"}
+    elif mismatch == "priority":
+        replacements["second"]["priority"] = 1
+    elif mismatch == "reference":
+        replacements["second"]["payload_ref"] = "candidate-ledger:different"
+    elif mismatch == "lineage":
+        replacements["second"]["provenance"]["unbounded_work_id"] = "wrong"
+    elif mismatch == "existing":
+        workset.advance([replacements["second"]], 1)
+    def snapshot():
+        with sqlite3.connect(workset.path) as connection:
+            return tuple(connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+                         for table in ("work_items", "workset_receipts"))
+    before = snapshot()
+    kwargs = dict(expected_error_class="teacher_input_limit", error_class="", evidence_sha256="e" * 64,
+                  replacements=replacements)
+    if mismatch:
+        with pytest.raises(DistillationWorksetError, match="identity or state changed"):
+            workset.review_quarantined(selected, **kwargs)
+        assert snapshot() == before
+    else:
+        assert workset.review_quarantined(selected, **kwargs) == 2
+        after = snapshot()
+        assert all(row in after[0] for row in before[0])
+        assert after[1][:len(before[1])] == before[1]
+        assert workset.audit_transition_receipts()["counts"] == {
+            "ready": 2, "quarantined": 2, "leased": 0, "completed": 0,
+        }
+        assert workset.progress() == _progress(1) and workset.watermark() == 1
+        receipt = workset.recent_transition_receipts(limit=1)[0]
+        assert receipt["operation"] == "quarantine_review"
+        assert "replacement_selection_sha256" in receipt["details"]
+        with pytest.raises(DistillationWorksetError, match="identity or state changed"):
+            workset.review_quarantined(selected, **kwargs)
+        assert snapshot() == after
+        assert all(claim.attempt == 1 for claim in workset.claim(None, 2, "worker", 300))
+    assert workset.audit_transition_receipts()["status"] == "verified"
+
+
 def test_retry_wait_is_due_before_reclaim_and_sealed_in_receipt(tmp_path: Path) -> None:
     now = [100.0]
     workset = DistillationWorkset(tmp_path / "workset.sqlite3", clock=lambda: now[0])

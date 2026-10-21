@@ -15,6 +15,120 @@ from chronovisor.recall.recall_distillation_workset import (
 )
 
 
+@pytest.mark.parametrize("query,candidate", [
+    ("question " * 2_000 + "TRAILING REQUEST?", "short answer"),
+    ("short question", "answer " * 3_000 + "DISCARDED TAIL"),
+    ("資料Ａ\n" * 5_000 + "最後の質問？", "e\u0301\\\"\t回答 " * 3_000),
+    ("a" * 2_047 + "界" * 5_000 + "final?", "b" * 4_095 + "界" * 5_000),
+])
+def test_bounded_teacher_view_preserves_student_windows_and_fills_worker_cap(
+    query: str, candidate: str,
+) -> None:
+    rally = {"rally_id": "rally", "query_sha256": "query", "context_refs": []}
+    evidence = {"candidate_id": "candidate", "text_sha256": "candidate"}
+    texts = {"query": query, "candidate": candidate}
+    assert distill._teacher_payload(rally, evidence, texts, max_input_bytes=12_000) is None
+    payload = distill._teacher_payload(rally, evidence, texts, max_input_bytes=12_000, bounded_view=True)
+    assert payload is not None
+    for field, size in (("query", 2_048), ("candidate", 4_096)):
+        assert payload[field].startswith(distill._student_window_prefix(texts[field], size))
+        assert distill._bounded_normalized_text(payload[field], max_bytes=size) == distill._bounded_normalized_text(texts[field], max_bytes=size)
+    if payload["query"] != query:
+        assert payload["query"].endswith(query[-10:])
+    assert candidate.startswith(payload["candidate"])
+    worker_input = {"schema": "chronovisor.recall-distill-teacher-batch.v1", "candidates": [{
+        "candidate_id": "candidate", "rally_id": "rally", "query": payload["query"],
+        "context": payload["context"], "evidence": payload["candidate"],
+    }]}
+    assert 11_994 <= len(canonical_json.canonical_json_bytes_strict(worker_input)) <= 12_000
+
+
+def test_bounded_teacher_view_preserves_in_cap_payload_and_context_drop_order() -> None:
+    rally = {"rally_id": "rally", "query_sha256": "query", "context_refs": [
+        {"semantic_sha256": name} for name in ("old", "middle", "new")
+    ]}
+    candidate = {"candidate_id": "candidate", "text_sha256": "candidate"}
+    texts = {"query": "question", "candidate": "answer", "old": "o" * 15_000,
+             "middle": "middle context", "new": "最新の文脈"}
+    legacy = distill._teacher_payload(rally, candidate, texts, max_input_bytes=12_000)
+    bounded = distill._teacher_payload(rally, candidate, texts, max_input_bytes=12_000, bounded_view=True)
+    assert bounded == legacy
+    assert bounded["context"] == [texts["middle"], texts["new"]]
+    assert distill._teacher_input_view(bounded, rally, candidate, texts) == {}
+
+
+def test_bounded_teacher_rekeys_only_oversized_work_and_records_label_view(tmp_path: Path) -> None:
+    snapshots = {name: {"candidates": [{"candidate_id": name, "text_sha256": name}]}
+                 for name in ("short", "long")}
+    rallies = {name: {"rally_id": name, "query_sha256": "query", "context_refs": []} for name in snapshots}
+    texts = {"query": "question", "short": "answer", "long": "answer " * 3_000}
+    kwargs = dict(snapshots=snapshots, rally_by_id=rallies, split_assignments={"long": "train", "short": "train"},
+                  split_plan_id="plan", profile=distill.LOCAL_SINGLE_PROFILE)
+    old_tasks, old_items = distill._prepare_local_teacher_work(**kwargs)
+    tasks, items = distill._prepare_local_teacher_work(**kwargs, texts=texts)
+    old_items.sort(key=lambda item: item["payload_ref"], reverse=True)
+    items.sort(key=lambda item: item["payload_ref"], reverse=True)
+    assert items[0] == old_items[0] and tasks[items[0]["work_id"]] == old_tasks[old_items[0]["work_id"]]
+    assert items[1]["work_id"] != old_items[1]["work_id"]
+    assert items[1]["payload_digest"] != old_items[1]["payload_digest"]
+    assert items[1]["provenance"]["unbounded_work_id"] == old_items[1]["work_id"]
+    assert items[1]["provenance"]["input_view"] == {
+        "revision": distill.TEACHER_INPUT_VIEW_REVISION, "truncated": True,
+        "query_truncated": False, "candidate_truncated": True, "evaluation_eligible": False,
+    }
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    workset.advance(items[1:], 1)
+    calls = []
+    def evaluate(payload):
+        calls.append(payload)
+        return {"labels": [{"candidate_id": "long", "verdict": "relevant"}]}
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    result = distill._run_local_teacher_route(
+        workset=workset, route=distill.TEACHER_ROLES[0],
+        config=distill.DistillationConfig(teacher_profile=distill.LOCAL_SINGLE_PROFILE),
+        teachers={distill.TEACHER_ROLES[0]: SimpleNamespace(evaluate=evaluate)}, tasks=tasks,
+        texts=texts, root=tmp_path, raw_dir=tmp_path / "raw", label_path=label_path,
+        snapshots=snapshots, label_rows=[], structural_verifier=lambda *_args: None,
+    )
+    assert result is not None and result.labels_written == 1
+    assert len(calls) == 1 and len(canonical_json.canonical_json_bytes_strict(calls[0])) <= 12_000
+    assert workset.status()["completed"] == 1
+    label = store.read_chain(label_path)[0]
+    assert label["request_revision"] == distill.TEACHER_INPUT_VIEW_REVISION
+    assert label["work_id"] == items[1]["work_id"]
+
+
+def test_bounded_teacher_keeps_irreducible_student_prefix_held() -> None:
+    assert distill._teacher_payload(
+        {"rally_id": "rally", "query_sha256": "query", "context_refs": []},
+        {"candidate_id": "candidate", "text_sha256": "candidate"},
+        {"query": "!" * 13_000 + "question", "candidate": "answer"},
+        max_input_bytes=12_000, bounded_view=True,
+    ) is None
+
+
+def test_unmeasured_bounded_view_is_train_only_without_resplitting(tmp_path: Path, monkeypatch) -> None:
+    splits = {name: name for name in ("train", "validation", "test", "embargo")}
+    rows = [{"rally_id": name, "candidate_id": name, "as_of": "2026-10-01T00:00:00Z",
+             "source": "teacher-label", "profile": distill.LOCAL_SINGLE_PROFILE,
+             "route": distill.TEACHER_ROLES[0], "model_digest": "model",
+             "request_revision": distill.TEACHER_INPUT_VIEW_REVISION,
+             "label_split_plan_id": "plan"} for name in splits]
+    rows.append({**rows[2], "request_revision": "local-teacher-v1"})
+    monkeypatch.setattr(distill, "_materialization_split_context", lambda *_args: ("plan", splits, {"plan"}))
+    artifact = distill._finalize_materialized_training_rows(tmp_path, rows, 100)
+    assert [(row["rally_id"], row["split"]) for row in artifact["rows"]] == [("test", "test"), ("train", "train")]
+    monkeypatch.setattr(distill, "_configured_local_single_cohort", lambda: {
+        "teacher_model_digests": {distill.TEACHER_ROLES[0]: "model"}, "counterfactual_model_digests": [],
+    })
+    selected, _ = distill._active_training_cohort(
+        [{**row, "split": splits[row["rally_id"]]} for row in rows], teacher_profile=distill.LOCAL_SINGLE_PROFILE,
+    )
+    assert [(row["rally_id"], row["request_revision"]) for row in selected] == [
+        ("train", distill.TEACHER_INPUT_VIEW_REVISION), ("test", "local-teacher-v1"),
+    ]
+
+
 @pytest.mark.parametrize("claim_limit", [1, 16])
 def test_teacher_claims_only_prepared_lane(tmp_path: Path, monkeypatch, claim_limit: int) -> None:
     monkeypatch.setattr(distill, "committed_raw_watermark", lambda _path: "raw-1")
