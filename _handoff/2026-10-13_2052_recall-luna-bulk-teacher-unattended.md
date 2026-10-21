@@ -26,6 +26,10 @@ created_at: 2026-10-13T20:52:29+09:00
 8. **2026-10-21 07:10 JST、所有者を代理するClaudeの決定**：今回の復旧のため2回目の配備を承認する。「一度配備」は前回runの上限であり、teacher停止を継続する理由にしない。accec0af（CIで実問題があれば最小後継）の必須CIを通し、周期jobを自然idleで保留した安全境界で今回一度配備する。同じ保存済みplistで通常dailyを再開する。
 9. **同時刻の水準判断の訂正**：reasoningはlowを維持し、今回はoffを測らない。2026-10-18の「実日次量に約20%余裕を持つ最高水準」は平均流入763.7件/日を基準とする。前回low実測976件/日は27.8%余裕、平日不足約76件/日は週末に吸収され、週純減は約1486件。Claudeの厳しい解釈だった平日1316件/日目標は撤回する。accec0afのcohort/split原因修正は将来の水準変更にも必要なので保持する。復旧cold rebuild後の固定3時間を同じcalendar方式で再測定し、平均764件/日への20%以上の余裕でcost4/throughput5を判定する。
 
+10. **2026-10-21 21:00 JST 所有者決定（Claude代理で方式選定）**：入力上限超過のteacher716件は長文会話の欠落を避けるためラベル化する。12000-byte cap・local context・student windowは保持し、cap拡大と分割は不採用。まず716件のquery/candidate/both超過をread-only実測し、共有`_teacher_payload`でover-capだけに上限直前まで使うbounded viewを設ける。studentのnormalized query2048/candidate4096-byteを生むraw prefixは全保持し、paste型queryでは末尾の質問も保持する。in-capのpayload/digest/work identityはbyte-identical。view revisionとtruncated provenanceをwork/labelへ残すための最小additive fieldは承認する。prompt/schemaは変更しない。
+11. **同時決定・検証と復元**：既存Luna labelを先に照合し、新規Luna/cloud callは行わない。参照があれば10/18と同方式でlocal low標本の一致率・混同行列・失敗・秒を測り、sealed300のlow78.33%の標本区間内だけ採用する。参照がなければtrainingへ許可し、未測定viewはevaluation/gateから除外する。元隔離履歴を保持し、既存quarantine_reviewの新receiptで新keyへready復元する。CF over-capは保留を維持する。
+12. **同時決定・配備回数制限の撤回**：7118a7a0（実問題があれば最小後継）のexact SHA必須CIと安全配備をStep0として先行し、通常成功によるhuman_wait解除/failure0/drift=falseとclean formal2回を確認する。その後bounded viewを実装・検証して再配備する。配備は必要な都度、周期job自然idleと既存lease内で行い、各配備後同条件を受入。最終配備の正式成功2回後、calendar方式で固定3時間を測り、label/隔離/bounded labelを別計上、764件/日との比較と716件を含むlabel-only ETAを記録する。low・09:15 PAUSED・no automatic cloud、既存gate/validator/floor/quota、既存履歴を保持。ユーザー不在につき質問せず判断理由を実行ログへ残す。
+
 決定 5 と 6 から、設定の変更（`~/.chronovisor/config.toml`）と配備もこの Plan の範囲に含める。これは Plan を書いた Claude の解釈で、ユーザーの言葉は「実装してほしい」「とにかく仕上げてくれ」「何もしなくても回るように」である。配備は 10/9 と同じ手順で行う。
 
 ## やってはいけないこと（必須）
@@ -165,6 +169,14 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] quarantine2：共有claim経路を最小修正し、誤隔離復元・理由訂正を既存worksetの新receipt遷移として実装、回帰と必須CIを通す。
 - [ ] quarantine3：自然idleと既存lease内で今回一度配備し、履歴を保った正規遷移を適用する。drift=false・human_waitなし・failure0・新source clean formal success2回を確認する。
 - [ ] quarantine4：配備後3時間以上の固定calendar窓で実labelと隔離を別集計し、labels-only ETA・純差分・保全を報告する。
+
+### 2026-10-21 21:00決定に基づく復旧とover-cap受入
+- [ ] bounded0：旧private observerを専用stopで終了確認し証跡を保持。7118a7a0のexact SHA必須CI後、安全境界で配備し通常成功でhuman_wait解除/failure0/drift=false・clean formal2回を受入。
+- [ ] bounded1：716件のfield別超過と既存Luna参照をread-only測定し、student prefixを守るview形状を決める。
+- [ ] bounded2：共有payloadへover-cap限定view/provenanceを最小実装し、in-cap不変・上限・prefix・evaluation隔離・正規復元を検証する。
+- [ ] bounded3：既存Luna参照があればlow標本で採否を判定し、なければtraining限定としてevaluation/gate除外を受入。
+- [ ] bounded4：最終exact SHA必須CI後、安全配備し元隔離履歴を保持したquarantine_reviewで新keyへ復元。CF over-cap保留、drift=false・human_waitなし・failure0・clean formal2回を確認。
+- [ ] bounded5：その後の固定3時間でlabel/隔離/bounded labelとlabel-only ETAを集計し、純差分・保全・未完理由を報告。
 
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
@@ -1481,3 +1493,5 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-21 20:50 JST — 固定窓内で20:45頃からCounterfactualBindingErrorが再発し、failure1→3、human_wait再表示。最新更新項目をread-onlyで照合すると復元821件外の既存待機2件で、ready/attempt_count0、catalog eligibilityはmissing_exact_exposure/answer_utility=false、宣言0。graph位置は古いため現sourceで補い、_counterfactual_snapshot_inputsがmissing/malformed/unverifiable exposureをresumable precondition failureとしてrelease_unattemptedする明示契約を確認した。判断: 欠落が永久に解消不能とは証明できず、受入を通すために既存APIで勝手に恒久隔離するのは避ける。local修正7118a7a0のpre-claim待機が原因への対処であり、追加配備禁止のため未配備を維持。失敗・human_waitの標本と通常教師ラベル12件/CF隔離8件を観測へ含め、最初のclean formal1回を消さず、安定稼働の証拠には読み替えない。
 
 - 2026-10-21 21:14 JST — 固定窓の1.009164時間中間集計は21/21 local valid R4、全low、通常daily区間外0、暫定499.423labels/日。CF label0・新隔離8、teacher新隔離0、payload_missing両queue0。teacher新規workset登録64件は既存履歴の展開を含み、Raw流入率へ転用しない。開始時の直接endpoint pending1596に対し現在1639で、21labelsを数えても残量は43増。dirty59標本すべて0、formal成功1回後にCF bindingが再発して現在failure11/human_waitあり。3時間未満の値で容量判定せず、固定窓の後半も失敗/待ちを含める。追加修正のローカル全体suiteは測定終了後に実行する判断とし、測定中へ人工的なtest負荷を混ぜない。
+
+- 2026-10-21 21:30 JST — 18:00以降の実行ログを最初に読了し再開。Claudeが21:30に前runを停止したとの引継ぎを受け、旧observe.pyの専用steady-observer/stopを設置、証跡を保持。停止理由は未宣言exposureの既存CF2件でCounterfactualBindingError/human_waitが再発し、21:14時failure11・約499labels/日、修正7118a7a0が配備回数制限で未配備だったため。現在のfresh initもfailure14/human_waitを確認。配備制限撤回を優先し、7118a7a0のみ候補branchへpushして必須CIを開始。旧20:12窓は中断された観測として保持し、正式な3時間測定へ読み替えない。生本文/IDのrepo追加0、自動Luna/cloud呼出0。
