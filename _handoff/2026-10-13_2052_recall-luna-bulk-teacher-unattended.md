@@ -162,7 +162,7 @@ created_at: 2026-10-13T20:52:29+09:00
 
 ### 2026-10-21 payload_missing 誤隔離の修復
 - [x] quarantine1：teacher/CF全隔離項目のsnapshot・split・payload digest・現適格性を個別照合し、原因を確定する。
-- [ ] quarantine2：共有claim経路を最小修正し、誤隔離復元・理由訂正を既存worksetの新receipt遷移として実装、回帰と必須CIを通す。
+- [x] quarantine2：共有claim経路を最小修正し、誤隔離復元・理由訂正を既存worksetの新receipt遷移として実装、回帰と必須CIを通す。
 - [ ] quarantine3：自然idleと既存lease内で今回一度配備し、履歴を保った正規遷移を適用する。drift=false・human_waitなし・failure0・新source clean formal success2回を確認する。
 - [ ] quarantine4：配備後3時間以上の固定calendar窓で実labelと隔離を別集計し、labels-only ETA・純差分・保全を報告する。
 
@@ -1461,3 +1461,5 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-21 18:16 JST — 候補78a9b114を配備取得に必要なbranchへpush、mainの実行ログ履歴はlocal mergeで保持し未push。共有caller/CF fallback/空集合/旧reasoning再開の回帰を含む565tests、Ruff/mypy98source/import/architecture baseline/compile/whitespaceが通過。関数縮小で300行未満になったためlarge-function-policyをretained303→decomposed295へ厳格化し、閾値は維持。実コピー上のquarantine_reviewはteacher716件の理由訂正・CF790件復元/7件承認前分類を成功、元receipt全prefix・work identity・attempt・watermark/progressが一致。初期1513件の凍結2planのassignmentと現assignmentも全一致で、accec0afによる対象移動を否定。純増229行（本体72、tests157、policy純増0）、新production module/監視層なし。追加79行のworkset API/validatorは手編集を使わず履歴付き復元/再分類を行うため。required CIと全体suiteの完了前に本番は変更しない。
 
 - 2026-10-21 18:26 JST — isolated full suiteは7500 passed/58 deselected、既存fork DeprecationWarning1のみ。required CIのSecurityは成功、quality/Python3.14は実行中。本番無変更で通常workerを継続している間にCFのpayload_missingが797→816へ増加したため、初期790件に固定せず安全境界で全件を再取得・再監査する。既存completion work identityは初期1513件すべて未存在。判断: cold完了後の最初の境界から待ち/deferを含む固定3時間を測り、teacher/CFのcompleted・新valid label・隔離・admissionを別計上する。ready減少をlabel数に読み替えず、ETAは隔離を除いたlabel速度だけから計算し、実測admission差引が非正なら収束ETAなしと記録する。過去平均流入を用いる値は条件付参考として区別する。
+
+- 2026-10-21 18:35 JST — quarantine2完了。候補78a9b114のrequired CIはquality・Python3.14 compatibility・Securityすべて成功（39575007161/39575006980/39575007022）。ローカル7500全体tests、関連565tests、静的/architecture gateも成功。判断: 安全境界の取得を開始し、自然idleのみで周期scheduleを保留する。既存ingest/distillation lease内で一度配備し、配備済packageから最新隔離の凍結/現split・completion不存在・本文/入力上限・digestを再監査して新receipt遷移を適用する。supervisor/model server/稼働workerへのsignalは送らない。
