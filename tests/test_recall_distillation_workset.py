@@ -38,6 +38,75 @@ def _completed() -> dict[str, str]:
     }
 
 
+@pytest.mark.parametrize("with_progress", [False, True])
+def test_quarantine_review_restores_and_reclassifies_without_erasing_history(
+    tmp_path: Path, with_progress: bool,
+) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path)
+    workset.advance([_item("valid"), _item("oversized")], 1,
+                    **({"progress": _progress(1)} if with_progress else {}))
+    claims = workset.claim(None, 2, "worker", 300)
+    workset.commit(claims, [{"status": "quarantined", "error_class": "payload_missing"}] * 2)
+    before = {claim.work_id: workset.work_item_identity(claim.work_id) for claim in claims}
+    with sqlite3.connect(path) as connection:
+        history = connection.execute("SELECT * FROM workset_receipts ORDER BY generation").fetchall()
+    evidence = "e" * 64
+    assert workset.review_quarantined({"valid": "a" * 64}, expected_error_class="payload_missing",
+        error_class="", evidence_sha256=evidence) == 1
+    assert workset.review_quarantined({"oversized": "a" * 64}, expected_error_class="payload_missing",
+        error_class="teacher_input_limit", evidence_sha256=evidence) == 1
+    audit = workset.audit_transition_receipts()
+    assert audit["status"] == "verified"
+    assert audit["counts"] == {"ready": 1, "quarantined": 1, "leased": 0, "completed": 0}
+    assert workset.watermark() == 1
+    assert workset.progress() == (_progress(1) if with_progress else None)
+    assert {key: workset.work_item_identity(key) for key in before} == before
+    with sqlite3.connect(path) as connection:
+        rows = connection.execute("SELECT * FROM workset_receipts ORDER BY generation").fetchall()
+        assert rows[:len(history)] == history
+        assert connection.execute("SELECT attempt_count FROM work_items").fetchall() == [(1,), (1,)]
+    for receipt in workset.recent_transition_receipts():
+        assert receipt["operation"] == "quarantine_review"
+        assert receipt["details"]["evidence_sha256"] == evidence
+    # A repeated stale decision cannot silently release a different state.
+    with pytest.raises(DistillationWorksetError, match="state changed"):
+        workset.review_quarantined({"valid": "a" * 64}, expected_error_class="payload_missing",
+            error_class="", evidence_sha256=evidence)
+    assert workset.claim(None, 1, "worker", 300)[0].attempt == 2
+
+
+@pytest.mark.parametrize("mismatch", ["digest", "state", "reason", "unknown"])
+def test_quarantine_review_rejects_stale_batch_atomically(tmp_path: Path, mismatch: str) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path)
+    workset.advance([_item("first"), _item("second")], 1)
+    claims = workset.claim(None, 2, "worker", 300)
+    workset.commit(claims, [
+        {"status": "quarantined", "error_class": "payload_missing"},
+        _completed() if mismatch == "state" else {"status": "quarantined", "error_class": "other" if mismatch == "reason" else "payload_missing"},
+    ])
+    before = workset.audit_transition_receipts()
+    with pytest.raises(DistillationWorksetError, match="state changed"):
+        workset.review_quarantined({"first": "a" * 64, "unknown" if mismatch == "unknown" else "second": ("b" if mismatch == "digest" else "a") * 64},
+            expected_error_class="payload_missing", error_class="", evidence_sha256="e" * 64)
+    assert workset.audit_transition_receipts() == before
+
+
+def test_quarantine_review_receipt_rejects_invalid_delta(tmp_path: Path) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    workset.advance([_item("valid")], 1)
+    workset.commit(workset.claim(None, 1, "worker", 300),
+                   [{"status": "quarantined", "error_class": "payload_missing"}])
+    workset.review_quarantined({"valid": "a" * 64}, expected_error_class="payload_missing",
+                              error_class="", evidence_sha256="e" * 64)
+    with sqlite3.connect(workset.path) as connection:
+        payload = json.loads(connection.execute("SELECT payload_json FROM workset_receipts ORDER BY generation DESC LIMIT 1").fetchone()[0])
+    payload["details"]["count"] = 2
+    with pytest.raises(DistillationWorksetError, match="delta is invalid"):
+        workset._validate_receipt_payload("quarantine_review", payload)
+
+
 def test_retry_wait_is_due_before_reclaim_and_sealed_in_receipt(tmp_path: Path) -> None:
     now = [100.0]
     workset = DistillationWorkset(tmp_path / "workset.sqlite3", clock=lambda: now[0])

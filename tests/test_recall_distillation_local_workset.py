@@ -15,6 +15,85 @@ from chronovisor.recall.recall_distillation_workset import (
 )
 
 
+@pytest.mark.parametrize("claim_limit", [1, 16])
+def test_teacher_claims_only_prepared_lane(tmp_path: Path, monkeypatch, claim_limit: int) -> None:
+    monkeypatch.setattr(distill, "committed_raw_watermark", lambda _path: "raw-1")
+    snapshots = {name: {"candidates": [{"candidate_id": name, "text_sha256": "text"}]}
+                 for name in ("old", "current", "later")}
+    rallies = {name: {"rally_id": name, "query_sha256": "query", "context_refs": []}
+               for name in snapshots}
+    tasks, items = distill._prepare_local_teacher_work(
+        snapshots=snapshots, rally_by_id=rallies, split_assignments={},
+        split_plan_id="", profile=distill.LOCAL_SINGLE_PROFILE,
+    )
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    distill._advance_local_workset(workset, sorted(items, key=lambda item: item["payload_ref"] != "candidate-snapshot:old:old"),
+        distill._local_workset_watermark(root=tmp_path, raw_dir=tmp_path / "raw", label_path=label_path, snapshots=snapshots))
+    prepared = {key: value for key, value in tasks.items() if value["rally"]["rally_id"] == "current"}
+    teacher = SimpleNamespace(evaluate=lambda payload: {"labels": [
+        {"candidate_id": item["candidate_id"], "verdict": "relevant"} for item in payload["candidates"]]})
+    result = distill._run_local_teacher_route(
+        workset=workset, route=distill.TEACHER_ROLES[0],
+        config=distill.DistillationConfig(teacher_profile=distill.LOCAL_SINGLE_PROFILE, teacher_claim_limit=claim_limit),
+        teachers={distill.TEACHER_ROLES[0]: teacher}, tasks=prepared,
+        texts={"query": "question", "text": "evidence"}, root=tmp_path, raw_dir=tmp_path / "raw",
+        label_path=label_path, snapshots=snapshots, label_rows=[], structural_verifier=lambda *_args: None,
+    )
+    assert result is not None and result.labels_written == 1
+    assert workset.status()["ready"] == 2
+    assert workset.status()["quarantined"] == 0
+    assert store.read_chain(label_path)[0]["candidate_id"] == "current"
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_counterfactual_claims_only_prepared_lane(tmp_path: Path, monkeypatch, selected: bool) -> None:
+    monkeypatch.setattr(distill, "committed_raw_watermark", lambda _path: "raw-1")
+    snapshots = {name: {"candidates": [{"candidate_id": name, "text_sha256": "text"}]}
+                 for name in ("old", "current")}
+    rallies = {name: {"rally_id": name, "as_of": "2026-10-10T00:00:00Z", "actual_answer_refs": [{"semantic_sha256": "answer"}]}
+               for name in snapshots}
+    items, keys = distill._prepare_counterfactual_work(root=tmp_path, snapshots=snapshots, rally_by_id=rallies)
+    workset = DistillationWorkset(store.distillation_dir(tmp_path) / "local-workset.sqlite3")
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    distill._advance_local_workset(workset, sorted(items, key=lambda item: item["work_id"] != keys[("old", "old")]),
+        distill._local_workset_watermark(root=tmp_path, raw_dir=tmp_path / "raw", label_path=label_path, snapshots=snapshots))
+    prepare = distill._prepare_counterfactual_work
+    def prepare_selected(**kwargs):
+        result = prepare(**kwargs)
+        if selected:
+            kwargs["selected_work_ids"].extend(result[1].values())
+        return result
+    monkeypatch.setattr(distill, "_prepare_counterfactual_work", prepare_selected)
+    def finish(**kwargs):
+        assert kwargs["target"] == ("current", "current")
+        kwargs["workset"].commit([kwargs["claim"]], [{"status": "completed", "completion_ref": "label-ledger:" + "a" * 64, "completion_digest": "a" * 64}])
+        return distill._CounterfactualBlockResult(written=1)
+    monkeypatch.setattr(distill, "_run_counterfactual_claim", finish)
+    kwargs = dict(execute=True, root=tmp_path, config=distill.DistillationConfig(teacher_profile=distill.LOCAL_SINGLE_PROFILE),
+                  counterfactual=SimpleNamespace(local=True), snapshots={"current": snapshots["current"]},
+                  rally_by_id=rallies, texts={}, label_path=label_path, label_rows=[])
+    assert distill._run_counterfactual_block(**kwargs).written == 1
+    assert distill._run_counterfactual_block(**kwargs).written == 0
+    assert workset.status()["ready"] == 1
+    assert workset.status()["quarantined"] == 0
+
+
+@pytest.mark.parametrize("text,reason", [("", "teacher_text_missing"), ("a" * 12_001, "teacher_input_limit")], ids=["missing", "oversized"])
+def test_teacher_rejection_records_actual_payload_rule(tmp_path: Path, text: str, reason: str) -> None:
+    tasks, items = distill._prepare_local_teacher_work(
+        snapshots={"rally": {"candidates": [{"candidate_id": "candidate", "text_sha256": "text"}]}},
+        rally_by_id={"rally": {"rally_id": "rally", "query_sha256": "query", "context_refs": []}},
+        split_assignments={}, split_plan_id="", profile=distill.LOCAL_SINGLE_PROFILE,
+    )
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    workset.advance(items, 1)
+    claims = workset.claim(None, 1, "test", 300)
+    assert distill._prepare_local_teacher_payload_batch(unique_active=claims, tasks=tasks,
+        texts={"query": "question", "text": text}, config=distill.DistillationConfig(), workset=workset) == []
+    assert workset.status(include_failures=True)["failure_breakdown"] == {reason: 1}
+
+
 def _sealed_counterfactual_exposure(
     root: Path, *, candidate_ids: list[object] | None = None
 ) -> dict[str, object]:
