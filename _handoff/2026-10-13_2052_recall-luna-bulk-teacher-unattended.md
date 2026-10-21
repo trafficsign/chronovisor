@@ -160,6 +160,12 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] throughput4：復帰候補の必須CI後、安全境界で今回一度配備し同じplistの通常dailyをlowで再開する。新source local valid R4を伴うclean formal success2回、通常成功によるhuman_wait解除、worker failure0、materialization dirty0、実serviceのdrift=falseを受け入れる。
 - [x] throughput5：復旧cold rebuildだけを除く固定3時間を同じcalendar方式で測り、平均764件/日への20%以上の余裕・流入差引ETAを確認する。決定9によりlow維持、off測定と1316件/日目標は撤回。
 
+### 2026-10-21 payload_missing 誤隔離の修復
+- [x] quarantine1：teacher/CF全隔離項目のsnapshot・split・payload digest・現適格性を個別照合し、原因を確定する。
+- [ ] quarantine2：共有claim経路を最小修正し、誤隔離復元・理由訂正を既存worksetの新receipt遷移として実装、回帰と必須CIを通す。
+- [ ] quarantine3：自然idleと既存lease内で今回一度配備し、履歴を保った正規遷移を適用する。drift=false・human_waitなし・failure0・新source clean formal success2回を確認する。
+- [ ] quarantine4：配備後3時間以上の固定calendar窓で実labelと隔離を別集計し、labels-only ETA・純差分・保全を報告する。
+
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
 - [x] 5-2 ingest：`apple-watch-band-material-tradeoffs/bandwork-leather-band-experience.md` が `missing_create_frontmatter` で失敗している（2026-10-13 19:45、1/3 回目）。再試行で直っていなければ原因を見る。
@@ -1447,3 +1453,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-21 11:26 JST — 残件C完了。5常駐と通常launchd dailyの実archive/direct_urlはc0f149e1、MCP1.30.0/certifi2026.10.19。HTTPとfresh MCP statusはdrift=false、fresh initにもhuman_waitなし、Semantic/Reranker ready・ingest liveness ok。authorityのbytes/inode/device/mtime、supervisor/model serverの起動、同じdaily plist、他3周期jobのmanager/plist/登録、09:15 PAUSED/hashを保持し、runtime.source以外の設定は同一。測定中model audit349 sessionsはremote0で、supervisor disabled/active0とcloud自動禁止を維持した。品質holdはchronological_split_incomplete/data_wait、verified_truth0・paired_denominator0・rollout0%のまま。検索active26721、lint active0/quarantined136の既存残件も完了へ読み替えない。
 
 - 2026-10-21 11:26 JST — 今回の観測processは所有するstopで正常終了、stderr0、通常daily/worker/supervisorへのsignalなし。private証跡、初回検査失敗、復帰候補worktree、稼働attested checkout、無関係なuntrackedは保持した。package差分はf5b9a4fe比+124/−4=純増120行（本体19・test98・依存3）、追加production module/supervisor/monitor/daemon/cache/repair層0。今回の配備は1回、pushは配備packageに必要なc0f149e1まで、Plan更新はlocal commitのみ。cost4/throughput4/throughput5と今回の復旧を完了し、identity6の7日継続と既存品質/残量待ちは未完のためPlan状態runningを維持する。
+
+- 2026-10-21 18:00 JST — 指定どおり10/21 01:04以降の実行ログを先に読了して再開。現teacherはcompleted930/ready1614/leased1/payload_missing716、CFはpayload_missing797。read-only SQLite backupをprivateへ保存し、c0f149e1から隔離worktreeで調査する。グラフは10/14世代で対象4fileのmetadata_changedを確認したため現source/callerで補完。02:19の本文選択前倒しだけでなく、既存model_snapshots選択とDB全体claimの不一致、accec0afの凍結split保持、payload入力制限を個別に検証する。判断: 自動Luna/cloud禁止を委譲にも適用し、新たなmodel callなしでAstra自身が調査・実装する。通常worker/supervisorを継続し、復元は原因修正後の安全境界で新receiptとして行う。既存ledger/queue/lockの手編集・履歴削除はしない。
+
+- 2026-10-21 18:08 JST — 個別監査の初期1513件を確定。teacher716件（14/15時637件と以前79件）は347対象rallyのsealed snapshot・Raw text検証を用いて全payload digest一致、split変更0、snapshot欠落/期限切れ/旧label重複0。全件が固定12000 byteの入力上限超過（最小12003・最大878520 bytes）で実行不能のため復元しない。うち545件は同時刻複数項目の遷移でtask集合外の一括隔離、残171件は単件遷移；同じ誤ったpayload_missing分類でも真の適格性は別と判断。02:19変更は既存model_snapshots絞り込みを本文前へ移したもので、集合外claimの欠陥はそれ以前から存在。accec0af後も対象全項目のsplitは不変。CF797件はdigest一致/欠落0、7件は承認境界前、790件は現split・sealed exposure・payload検証を通過しmodel境界に到達（model呼出0、payload411–12000 bytes）。private個別証跡を保持。claimを既存eligible_work_idsで準備済み集合に限定し、teacher入力上限/本文欠落を明示分類する最小修正を実装。既存APIに隔離復元がないため、digestと元理由をCAS検証して履歴を保持するquarantine_review遷移だけを追加する。attempt/quota/resetなし、新moduleなし。
