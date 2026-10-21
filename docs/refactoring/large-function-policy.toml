@@ -483,9 +483,9 @@ tests = ["tests/test_recall_distillation.py", "tests/test_recall_distillation_re
 path = "src/chronovisor/recall/recall_distillation.py"
 qualname = "_run_local_teacher_route"
 baseline_lines = 303
-disposition = "retained"
-max_lines = 303
-rationale = "One local-teacher route preserves model selection, prompt construction, schema repair, evidence sealing, and terminal work-item transition as one auditable transaction."
+disposition = "decomposed"
+max_lines = 295
+rationale = "Prepared claim selection removes the invalid missing-task quarantine branch, bringing this route below the size threshold while preserving prompt construction, validation, and evidence sealing."
 tests = ["tests/test_recall_distillation.py"]
 
 [[functions]]

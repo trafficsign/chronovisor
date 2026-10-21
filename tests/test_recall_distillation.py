@@ -3884,6 +3884,14 @@ def test_local_cohort_switch_keeps_queued_schedule_and_rekeys_through_claims(
     assert set(old_tasks).isdisjoint(new_tasks)
     distill._advance_local_workset(queue, new_items, watermark)
     assert queue.progress() == before_progress
+    claimed = []
+
+    def release_prepared(**kwargs: Any) -> list[Any]:
+        claimed.extend(claim.work_id for claim in kwargs["unique_active"])
+        kwargs["workset"].release_unattempted(kwargs["unique_active"])
+        return []
+
+    monkeypatch.setattr(distill, "_prepare_local_teacher_payload_batch", release_prepared)
     result = distill._run_local_teacher_route(
         workset=queue, route=distill.TEACHER_ROLES[0],
         config=distill.DistillationConfig(
@@ -3894,9 +3902,10 @@ def test_local_cohort_switch_keeps_queued_schedule_and_rekeys_through_claims(
         label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
         snapshots=snapshots, label_rows=[], structural_verifier=lambda *_: None,
     )
-    assert result is None  # Missing old payload settles without a model call.
-    assert queue.status()["quarantined"] == 1
-    assert queue.status()["ready"] == 1
+    assert result is not None and result.labels_written == 0
+    assert claimed == list(new_tasks)
+    assert queue.status()["quarantined"] == 0
+    assert queue.status()["ready"] == 2
     assert queue.progress() == before_progress
 
 

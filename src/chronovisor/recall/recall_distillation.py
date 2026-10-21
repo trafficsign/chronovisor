@@ -14862,8 +14862,14 @@ def _prepare_local_teacher_payload_batch(
             max_input_bytes=config.max_input_bytes,
         )
         if payload is None:
+            reason = (
+                "teacher_input_limit"
+                if texts.get(str(task["rally"]["query_sha256"]), "")
+                and texts.get(str(task["candidate"]["text_sha256"]), "")
+                else "teacher_text_missing"
+            )
             workset.commit(
-                [claim], [{"status": "quarantined", "error_class": "payload_missing"}]
+                [claim], [{"status": "quarantined", "error_class": reason}]
             )
             continue
         batch.append(
@@ -14900,7 +14906,9 @@ def _run_local_teacher_route(
     ],
 ) -> _TeacherBatchResult | None:
     teacher = teachers[route]
-    claims = list(workset.claim(f"local-teacher:{route}", 1, str(route), 300))
+    claims = list(workset.claim(
+        f"local-teacher:{route}", 1, str(route), 300, eligible_work_ids=tasks.keys(),
+    ))
     if not claims:
         return None
     if isinstance(teacher, _WorkerTeacher):
@@ -14940,6 +14948,7 @@ def _run_local_teacher_route(
                 min(15, config.teacher_claim_limit - 1),
                 str(route),
                 300,
+                eligible_work_ids=tasks.keys(),
             )
         )
     claims = _reconcile_local_teacher_claims(
@@ -14952,22 +14961,12 @@ def _run_local_teacher_route(
         config=config,
     )
 
-    active = [claim for claim in claims if claim.work_id in tasks]
-    missing = [claim for claim in claims if claim.work_id not in tasks]
-    if missing:
-        workset.commit(
-            missing,
-            [
-                {"status": "quarantined", "error_class": "payload_missing"}
-                for _ in missing
-            ],
-        )
-    if not active:
+    if not claims:
         return None
     unique_active: list[Any] = []
     duplicate_claims: list[Any] = []
     batch_candidate_ids: set[str] = set()
-    for claim in active:
+    for claim in claims:
         candidate_id = str(tasks[claim.work_id]["candidate"]["candidate_id"])
         if candidate_id in batch_candidate_ids:
             duplicate_claims.append(claim)
@@ -16081,14 +16080,12 @@ def _run_counterfactual_block(
     if not execute:
         return _CounterfactualBlockResult(pending=pending)
     remove_work_ids = tuple(dict.fromkeys(selected_work_ids))
-    claim_kwargs = (
-        {"eligible_work_ids": remove_work_ids} if remove_work_ids else {}
-    )
     claims = _reconcile_counterfactual_claims(
         workset=workset,
         claims=list(
             workset.claim(
-                "local-counterfactual", 1, "counterfactual", 300, **claim_kwargs
+                "local-counterfactual", 1, "counterfactual", 300,
+                eligible_work_ids=remove_work_ids or keys.values(),
             )
         ),
         keys=keys,
@@ -16096,12 +16093,15 @@ def _run_counterfactual_block(
     )
     if not claims and remove_work_ids:
         # Selected work may have been leased or completed by a concurrent
-        # worker.  Fall back to the normal queue only after the targeted lane
+        # worker. Fall back to the prepared queue only after the targeted lane
         # has no claim, so additions continue to make progress without
         # bypassing the selected/remove lane.
         claims = _reconcile_counterfactual_claims(
             workset=workset,
-            claims=list(workset.claim("local-counterfactual", 1, "counterfactual", 300)),
+            claims=list(workset.claim(
+                "local-counterfactual", 1, "counterfactual", 300,
+                eligible_work_ids=keys.values(),
+            )),
             keys=keys,
             label_rows=label_rows,
         )
@@ -16110,14 +16110,7 @@ def _run_counterfactual_block(
             pending=bool(workset.status("local-counterfactual")["backlog"])
         )
     claim = claims[0]
-    target = next(
-        (key for key, work_id in keys.items() if work_id == claim.work_id), None
-    )
-    if target is None:
-        workset.commit(
-            [claim], [{"status": "quarantined", "error_class": "payload_missing"}]
-        )
-        return _CounterfactualBlockResult(pending=True)
+    target = next(key for key, work_id in keys.items() if work_id == claim.work_id)
     return _run_counterfactual_claim(
         workset=workset,
         claim=claim,

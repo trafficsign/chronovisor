@@ -127,6 +127,7 @@ _RECEIPT_OPERATIONS = {
     "claim",
     "release",
     "commit",
+    "quarantine_review",
 }
 _STAGES = (
     "snapshot",
@@ -1071,6 +1072,24 @@ class DistillationWorkset:
                 }
             if delta != expected:
                 raise DistillationWorksetError("workset lease delta is invalid")
+        elif operation == "quarantine_review":
+            if set(details) != {
+                "count", "previous_error_class", "error_class", "evidence_sha256",
+                "selection_sha256", "work_ids_sha256",
+            }:
+                raise DistillationWorksetError("workset quarantine review is corrupted")
+            count = details["count"]
+            previous_error = _error_class(details["previous_error_class"])
+            error = _error_class(details["error_class"]) if details["error_class"] != "" else ""
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1 or error == previous_error:
+                raise DistillationWorksetError("workset quarantine review is invalid")
+            for field in ("evidence_sha256", "selection_sha256", "work_ids_sha256"):
+                _digest(details[field], field)
+            restored = 0 if error else count
+            if delta != {"ready": restored, "leased": 0, "completed": 0, "quarantined": -restored} or any(
+                before.get(field) != after.get(field) for field in ("watermark", "progress")
+            ):
+                raise DistillationWorksetError("workset quarantine review delta is invalid")
         else:
             legacy_keys = {"completed", "retry", "quarantined", "selection_sha256"}
             timed_keys = {*legacy_keys, "retry_wait", "retry_schedule_sha256"}
@@ -2253,6 +2272,66 @@ class DistillationWorkset:
                     connection.execute("ROLLBACK")
                 raise
         return totals
+
+    def review_quarantined(
+        self,
+        items: Mapping[str, str],
+        *,
+        expected_error_class: str,
+        error_class: str,
+        evidence_sha256: str,
+    ) -> int:
+        """Receipt an evidence-backed reclassification; an empty reason restores ready.
+
+        The caller verifies eligibility. Bind each decision to the original payload
+        digest, preserve attempts and history, and reject stale decisions atomically.
+        """
+        previous_error = _error_class(expected_error_class)
+        error = _error_class(error_class) if error_class != "" else ""
+        evidence = _digest(evidence_sha256, "evidence_sha256")
+        if error == previous_error or not isinstance(items, Mapping) or len(items) > _MAX_COMPLETION_LOOKUP_IDS:
+            raise DistillationWorksetError("quarantine review selection is invalid")
+        selected = {
+            _identifier(key, "work_id"): _digest(value, "payload_digest")
+            for key, value in items.items()
+        }
+        if not selected:
+            return 0
+        now = self._now()
+        state = "quarantined" if error else "ready"
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                before = self._snapshot(connection)
+                self._validate_stages(connection)
+                for work_id, digest in selected.items():
+                    updated = connection.execute(
+                        "UPDATE work_items SET state = ?, last_error_class = ?, updated_at = ? "
+                        "WHERE work_id = ? AND payload_digest = ? AND state = 'quarantined' "
+                        "AND last_error_class = ? AND lease_id IS NULL AND lease_owner IS NULL "
+                        "AND lease_expires_at IS NULL AND next_attempt_at IS NULL "
+                        "AND completion_ref = '' AND completion_digest = ''",
+                        (state, error, now, work_id, digest, previous_error),
+                    )
+                    if updated.rowcount != 1:
+                        raise DistillationWorksetError("quarantine review identity or state changed")
+                self._append_receipt(
+                    connection, "quarantine_review", before, self._snapshot(connection),
+                    {
+                        "count": len(selected), "previous_error_class": previous_error,
+                        "error_class": error, "evidence_sha256": evidence,
+                        "selection_sha256": _selection_sha256(
+                            {"work_id": key, "payload_digest": value} for key, value in selected.items()
+                        ),
+                        "work_ids_sha256": _work_ids_sha256(selected),
+                    },
+                )
+                self._secure_sqlite_files()
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return len(selected)
 
     def status(
         self, kind: str | None = None, *, include_timing: bool = False,
