@@ -112,6 +112,9 @@ OX_TEACHER_ROLE = "recall.distill.teacher.deepseek-v4-flash"
 LOCAL_TRIAD_PROFILE = "local-triad-v1"
 LOCAL_SINGLE_PROFILE = "local-single-v1"
 LOCAL_TEACHER_PROFILES = frozenset({LOCAL_TRIAD_PROFILE, LOCAL_SINGLE_PROFILE})
+TEACHER_INPUT_VIEW_REVISION = "local-teacher-truncated-v1"
+# The existing single-item worker batch is 16 bytes larger than its input payload.
+LOCAL_TEACHER_BATCH_OVERHEAD_BYTES = 16
 # ponytail: legacy OX symbol/file names stay until the completed R6 artifacts
 # no longer consume them; serialized provenance names the real teacher.
 OX_SINGLE_PROFILE = "deepseek-v4-flash-single-v1"
@@ -6164,6 +6167,8 @@ def _finalize_materialized_training_rows(
         ):
             continue
         row_split = split.get(row["rally_id"], "embargo")
+        if row.get("request_revision") == TEACHER_INPUT_VIEW_REVISION and row_split != "train":
+            continue
         if certification and row.get("source") != "counterfactual-label" and (
             row_split not in {"train", "validation", "test"}
         ):
@@ -6755,7 +6760,11 @@ def _configured_local_route_binding(row: Mapping[str, Any]) -> bool:
             "profile_contract_id": "",
             "expires_at": "",
             "identity_revision": "local-teacher-v1",
-            "request_revision": "local-teacher-v1",
+            "request_revision": (
+                TEACHER_INPUT_VIEW_REVISION
+                if profile == LOCAL_SINGLE_PROFILE and row.get("request_revision") == TEACHER_INPUT_VIEW_REVISION
+                else "local-teacher-v1"
+            ),
             "assignment_revision": ("local-single-assignment-v1" if profile == LOCAL_SINGLE_PROFILE else ASSIGNMENT_REVISION),
         }
         return (
@@ -7042,7 +7051,8 @@ def _active_training_cohort(
         cohort = _configured_local_single_cohort()
         teacher = cohort["teacher_model_digests"][TEACHER_ROLES[0]]
         pair = tuple(cohort["counterfactual_model_digests"])
-        selected = [dict(row) for row in rows if row.get("profile") == LOCAL_SINGLE_PROFILE and (
+        selected = [dict(row) for row in rows if row.get("profile") == LOCAL_SINGLE_PROFILE
+                    and (row.get("request_revision") != TEACHER_INPUT_VIEW_REVISION or row.get("split") == "train") and (
             (row.get("source") == "teacher-label" and teacher
              and row.get("route") == TEACHER_ROLES[0] and row.get("model_digest") == teacher)
             or (row.get("source") == "counterfactual-label" and all(pair) and pair[0] != pair[1]
@@ -9621,6 +9631,94 @@ def _matching_p5_baseline(
     return matches[-1] if matches else None
 
 
+def _student_window_prefix(value: str, max_bytes: int) -> str:
+    """Keep enough raw text to fill the normalized student window before a tail."""
+    normalized = _bounded_normalized_text(value, max_bytes=max_bytes + 8).encode()
+    target = normalized[:max_bytes].decode("utf-8", errors="ignore").strip()
+    needed = min(max_bytes, len(normalized))
+    low, high = 0, len(value)
+    while low < high:
+        middle = (low + high) // 2
+        prefix = _bounded_normalized_text(value[:middle], max_bytes=max_bytes + 8).encode()
+        if len(prefix) >= needed and prefix[:max_bytes].decode("utf-8", errors="ignore").strip() == target:
+            high = middle
+        else:
+            low = middle + 1
+    return value[:low]
+
+
+def _json_text_size(value: str) -> int:
+    return len(canonical_json.canonical_json_bytes_strict(value)) - 2
+
+
+def _json_bounded_text(value: str, budget: int, *, tail: bool = False) -> str:
+    low, high = 0, len(value)
+    while low < high:
+        middle = (low + high + 1) // 2
+        part = value[-middle:] if tail else value[:middle]
+        if _json_text_size(part) <= budget:
+            low = middle
+        else:
+            high = middle - 1
+    return value[-low:] if tail and low else value[:low]
+
+
+def _bounded_teacher_input(payload: dict[str, Any], max_input_bytes: int) -> dict[str, Any] | None:
+    query, candidate = payload["query"], payload["candidate"]
+    query_head = _student_window_prefix(query, 2_048)
+    candidate_head = _student_window_prefix(candidate, 4_096)
+    marker = "\n…\n"
+    budget = min(max_input_bytes, 12_000) - LOCAL_TEACHER_BATCH_OVERHEAD_BYTES - len(
+        canonical_json.canonical_json_bytes_strict({**payload, "query": "", "candidate": ""})
+    )
+    query_size, candidate_size = _json_text_size(query), _json_text_size(candidate)
+    query_min = min(query_size, _json_text_size(query_head + marker + query[-1:]))
+    candidate_min = _json_text_size(candidate_head)
+    if query_min + candidate_min > budget:
+        return None
+    if query_size + candidate_min <= budget:
+        query_budget = query_size
+    elif candidate_size + query_min <= budget:
+        query_budget = budget - candidate_size
+    else:
+        query_budget = query_min + (budget - query_min - candidate_min) // 3
+
+    def query_view(available: int) -> str:
+        if query_size <= available:
+            return query
+        tail = _json_bounded_text(
+            query[len(query_head):], available - _json_text_size(query_head + marker), tail=True,
+        )
+        return query_head + marker + tail
+
+    kept_query = query_view(query_budget)
+    kept_candidate = _json_bounded_text(candidate, budget - _json_text_size(kept_query))
+    # Reuse any bytes left by escaping or a multibyte boundary in the other field.
+    for _ in range(2):
+        kept_query = query_view(budget - _json_text_size(kept_candidate))
+        kept_candidate = _json_bounded_text(candidate, budget - _json_text_size(kept_query))
+    if (
+        not kept_query.startswith(query_head)
+        or not kept_candidate.startswith(candidate_head)
+        or _bounded_normalized_text(kept_query, max_bytes=2_048) != _bounded_normalized_text(query, max_bytes=2_048)
+        or _bounded_normalized_text(kept_candidate, max_bytes=4_096) != _bounded_normalized_text(candidate, max_bytes=4_096)
+    ):
+        return None
+    return {**payload, "query": kept_query, "candidate": kept_candidate}
+
+
+def _teacher_input_view(
+    payload: Mapping[str, Any], rally: Mapping[str, Any], candidate: Mapping[str, Any], texts: Mapping[str, str],
+) -> dict[str, Any]:
+    query_truncated = payload["query"] != texts.get(str(rally["query_sha256"]), "")
+    candidate_truncated = payload["candidate"] != texts.get(str(candidate["text_sha256"]), "")
+    return {
+        "revision": TEACHER_INPUT_VIEW_REVISION, "truncated": True,
+        "query_truncated": query_truncated, "candidate_truncated": candidate_truncated,
+        "evaluation_eligible": False,
+    } if query_truncated or candidate_truncated else {}
+
+
 def _teacher_payload(
     rally: Mapping[str, Any],
     candidate: Mapping[str, Any],
@@ -9628,23 +9726,17 @@ def _teacher_payload(
     *,
     max_input_bytes: int,
     include_context: bool = True,
+    bounded_view: bool = False,
 ) -> dict[str, Any] | None:
     if candidate.get("source_kind") == "exact-exposure-page-v1":
         return None
     query = texts.get(str(rally["query_sha256"]), "")
     candidate_text = texts.get(str(candidate["text_sha256"]), "")
-    # UTF-8 uses at least one byte per code point, and the canonical payload
-    # adds keys, quotes, and separators.  These lower bounds therefore reject
-    # oversized text without allocating its JSON representation.  Keep the
-    # actual canonical check below for boundary cases (escaping and multibyte
-    # characters can only increase the encoded size).
-    if (
-        not query
-        or not candidate_text
-        or len(query) > max_input_bytes
-        or len(candidate_text) > max_input_bytes
-        or len(query) + len(candidate_text) > max_input_bytes
-    ):
+    if not query or not candidate_text:
+        return None
+    # Avoid encoding the whole oversized payload; old callers retain rejection.
+    oversized = len(query) + len(candidate_text) > max_input_bytes
+    if oversized and not bounded_view:
         return None
     context: list[str] = []
     payload = {
@@ -9655,11 +9747,15 @@ def _teacher_payload(
         "context": context,
         "candidate": candidate_text,
     }
-    base_payload_bytes = len(
-        canonical_json.canonical_json_bytes_strict(payload)
-    )
+    base_payload_bytes = max_input_bytes + 1 if oversized else len(canonical_json.canonical_json_bytes_strict(payload))
+    context_limit = max_input_bytes
     if base_payload_bytes > max_input_bytes:
-        return None
+        bounded = _bounded_teacher_input(payload, max_input_bytes) if bounded_view else None
+        if bounded is None:
+            return None
+        payload = bounded
+        base_payload_bytes = len(canonical_json.canonical_json_bytes_strict(payload))
+        context_limit = min(max_input_bytes, 12_000) - LOCAL_TEACHER_BATCH_OVERHEAD_BYTES
     if not include_context:
         return payload
     accepted_context: list[str] = []
@@ -9677,7 +9773,7 @@ def _teacher_payload(
             + accepted_context_bytes
             + comma_bytes
             + context_text_bytes
-            > max_input_bytes
+            > context_limit
         ):
             break
         accepted_context.append(context_text)
@@ -12025,6 +12121,8 @@ def _prepare_local_teacher_work(
     profile: str = LOCAL_TRIAD_PROFILE,
     prior_pairs: set[tuple[str, str]] | None = None,
     reasoning: Mapping[str, Any] | None = None,
+    texts: Mapping[str, str] | None = None,
+    max_input_bytes: int = 12_000,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     tasks: dict[str, dict[str, Any]] = {}
     work_items: list[dict[str, Any]] = []
@@ -12120,6 +12218,27 @@ def _prepare_local_teacher_work(
                         },
                     }
                 )
+    if profile == LOCAL_SINGLE_PROFILE and texts is not None:
+        prefetch = getattr(texts, "prefetch", None)
+        if callable(prefetch):
+            prefetch({str(task[source][field]) for task in tasks.values()
+                      for source, field in (("rally", "query_sha256"), ("candidate", "text_sha256"))})
+        for item in work_items:
+            original_id = item["work_id"]
+            task = tasks[original_id]
+            payload = _teacher_payload(task["rally"], task["candidate"], texts,
+                                       max_input_bytes=max_input_bytes, include_context=False, bounded_view=True)
+            view = _teacher_input_view(payload, task["rally"], task["candidate"], texts) if payload is not None else {}
+            if not view:
+                continue
+            item["payload_digest"] = canonical_json.canonical_json_sha256_strict(
+                {"source_payload_digest": item["payload_digest"], "input_view": view}
+            )
+            item["work_id"] = _local_work_id(item["payload_digest"], task["route"], profile)
+            item["provenance"]["input_view"] = view
+            item["provenance"]["unbounded_work_id"] = original_id
+            task["input_view"] = view
+            tasks[item["work_id"]] = tasks.pop(original_id)
     return tasks, work_items
 
 
@@ -14860,6 +14979,7 @@ def _prepare_local_teacher_payload_batch(
             task["candidate"],
             texts,
             max_input_bytes=config.max_input_bytes,
+            bounded_view=config.teacher_profile == LOCAL_SINGLE_PROFILE,
         )
         if payload is None:
             reason = (
@@ -14872,6 +14992,12 @@ def _prepare_local_teacher_payload_batch(
                 [claim], [{"status": "quarantined", "error_class": reason}]
             )
             continue
+        if config.teacher_profile == LOCAL_SINGLE_PROFILE and (
+            _teacher_input_view(payload, task["rally"], task["candidate"], texts)
+            != task.get("input_view", {})
+        ):
+            workset.release_unattempted([claim])
+            raise DistillationError("teacher input view identity changed")
         batch.append(
             {
                 "claim": claim,
@@ -15150,7 +15276,7 @@ def _run_local_teacher_route(
                 "profile_contract_id": "",
                 "expires_at": "",
                 "identity_revision": "local-teacher-v1",
-                "request_revision": "local-teacher-v1",
+                "request_revision": (task.get("input_view") or {}).get("revision", "local-teacher-v1"),
                 "assignment_revision": task["assignment"]["revision"],
                 "captured_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "attempt": item["claim"].attempt,
@@ -15234,6 +15360,7 @@ def _run_local_teacher_batch(
             split_plan_id=split_plan_id,
             age_bands=age_bands if isinstance(age_bands, Mapping) else None,
             profile=config.teacher_profile, reasoning=reasoning,
+            texts=texts, max_input_bytes=config.max_input_bytes,
             prior_pairs=_local_single_prior_pairs(label_path) if config.teacher_profile == LOCAL_SINGLE_PROFILE else None,
         )
         _advance_local_workset(

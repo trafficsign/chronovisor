@@ -1073,20 +1073,25 @@ class DistillationWorkset:
             if delta != expected:
                 raise DistillationWorksetError("workset lease delta is invalid")
         elif operation == "quarantine_review":
+            replacement_keys = {"replacement_selection_sha256", "replacement_work_ids_sha256"}
+            replacing = bool(replacement_keys.intersection(details))
             if set(details) != {
                 "count", "previous_error_class", "error_class", "evidence_sha256",
                 "selection_sha256", "work_ids_sha256",
-            }:
+            } | (replacement_keys if replacing else set()):
                 raise DistillationWorksetError("workset quarantine review is corrupted")
             count = details["count"]
             previous_error = _error_class(details["previous_error_class"])
             error = _error_class(details["error_class"]) if details["error_class"] != "" else ""
-            if isinstance(count, bool) or not isinstance(count, int) or count < 1 or error == previous_error:
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1 or error == previous_error or (replacing and error):
                 raise DistillationWorksetError("workset quarantine review is invalid")
             for field in ("evidence_sha256", "selection_sha256", "work_ids_sha256"):
                 _digest(details[field], field)
+            if replacing:
+                for field in replacement_keys:
+                    _digest(details[field], field)
             restored = 0 if error else count
-            if delta != {"ready": restored, "leased": 0, "completed": 0, "quarantined": -restored} or any(
+            if delta != {"ready": restored, "leased": 0, "completed": 0, "quarantined": 0 if replacing else -restored} or any(
                 before.get(field) != after.get(field) for field in ("watermark", "progress")
             ):
                 raise DistillationWorksetError("workset quarantine review delta is invalid")
@@ -2280,11 +2285,13 @@ class DistillationWorkset:
         expected_error_class: str,
         error_class: str,
         evidence_sha256: str,
+        replacements: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> int:
         """Receipt an evidence-backed reclassification; an empty reason restores ready.
 
         The caller verifies eligibility. Bind each decision to the original payload
         digest, preserve attempts and history, and reject stale decisions atomically.
+        A replacement adds a new ready identity while retaining the original row.
         """
         previous_error = _error_class(expected_error_class)
         error = _error_class(error_class) if error_class != "" else ""
@@ -2295,6 +2302,14 @@ class DistillationWorkset:
             _identifier(key, "work_id"): _digest(value, "payload_digest")
             for key, value in items.items()
         }
+        replacement_records = {
+            key: _item(value, "{}") for key, value in (replacements or {}).items()
+        }
+        if replacements is not None and (
+            error or set(replacement_records) != set(selected)
+            or len({record[0] for record in replacement_records.values()}) != len(selected)
+        ):
+            raise DistillationWorksetError("quarantine replacement selection is invalid")
         if not selected:
             return 0
         now = self._now()
@@ -2305,6 +2320,31 @@ class DistillationWorkset:
                 before = self._snapshot(connection)
                 self._validate_stages(connection)
                 for work_id, digest in selected.items():
+                    if replacement_records:
+                        prior = connection.execute(
+                            "SELECT * FROM work_items WHERE work_id = ? AND payload_digest = ? "
+                            "AND state = 'quarantined' AND last_error_class = ? "
+                            "AND lease_id IS NULL AND lease_owner IS NULL AND lease_expires_at IS NULL "
+                            "AND next_attempt_at IS NULL AND completion_ref = '' AND completion_digest = ''",
+                            (work_id, digest, previous_error),
+                        ).fetchone()
+                        record = replacement_records[work_id]
+                        if (
+                            prior is None or record[0] == work_id or record[3] == digest
+                            or tuple(record[1:3]) != (prior["kind"], prior["payload_ref"])
+                            or record[4] != prior["temporal_split_json"] or record[6] != prior["priority"]
+                            or json.loads(record[5]).get("unbounded_work_id") != work_id
+                            or connection.execute("SELECT 1 FROM work_items WHERE work_id = ?", (record[0],)).fetchone()
+                        ):
+                            raise DistillationWorksetError("quarantine replacement identity or state changed")
+                        connection.execute(
+                            "INSERT INTO work_items (work_id, kind, payload_ref, payload_digest, "
+                            "temporal_split_json, provenance_json, priority, watermark_json, "
+                            "stage, state, created_at, updated_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)",
+                            (*record[:7], prior["watermark_json"], _stage_for_kind(record[1]), now, now),
+                        )
+                        continue
                     updated = connection.execute(
                         "UPDATE work_items SET state = ?, last_error_class = ?, updated_at = ? "
                         "WHERE work_id = ? AND payload_digest = ? AND state = 'quarantined' "
@@ -2324,6 +2364,15 @@ class DistillationWorkset:
                             {"work_id": key, "payload_digest": value} for key, value in selected.items()
                         ),
                         "work_ids_sha256": _work_ids_sha256(selected),
+                        **({
+                            "replacement_selection_sha256": _selection_sha256(
+                                {"source_work_id": key, **dict(replacements[key])}
+                                for key in selected
+                            ),
+                            "replacement_work_ids_sha256": _work_ids_sha256(
+                                record[0] for record in replacement_records.values()
+                            ),
+                        } if replacements is not None else {}),
                     },
                 )
                 self._secure_sqlite_files()
