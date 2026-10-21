@@ -168,7 +168,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] quarantine1：teacher/CF全隔離項目のsnapshot・split・payload digest・現適格性を個別照合し、原因を確定する。
 - [x] quarantine2：共有claim経路を最小修正し、誤隔離復元・理由訂正を既存worksetの新receipt遷移として実装、回帰と必須CIを通す。
 - [x] quarantine3：自然idleと既存lease内で配備し、履歴を保った正規遷移を適用する。配備回数制限は10/21決定で撤回。後継7ae860c3のdrift=false・human_waitなし・failure0・新source clean formal success2回を確認する。
-- [ ] quarantine4：配備後3時間以上の固定calendar窓で実labelと隔離を別集計し、labels-only ETA・純差分・保全を報告する。
+- [x] quarantine4：配備後3時間以上の固定calendar窓で実labelと隔離を別集計し、labels-only ETA・純差分・保全を報告する。
 
 ### 2026-10-21 21:00決定に基づく復旧とover-cap受入
 - [x] bounded0：旧private observerを専用stopで終了確認し証跡を保持。7118a7a0のexact SHA必須CI後、安全境界で配備し通常成功でhuman_wait解除/failure0/drift=false・clean formal2回を受入。
@@ -176,7 +176,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] bounded2：共有payloadへover-cap限定view/provenanceを最小実装し、in-cap不変・上限・prefix・evaluation隔離・正規復元を検証する。
 - [x] bounded3：既存Luna参照があればlow標本で採否を判定し、なければtraining限定としてevaluation/gate除外を受入。
 - [x] bounded4：最終exact SHA必須CI後、安全配備し元隔離履歴を保持したquarantine_reviewで新keyへ復元。CF over-cap保留、drift=false・human_waitなし・failure0・clean formal2回を確認。
-- [ ] bounded5：その後の固定3時間でlabel/隔離/bounded labelとlabel-only ETAを集計し、純差分・保全・未完理由を報告。
+- [x] bounded5：その後の固定3時間でlabel/隔離/bounded labelとlabel-only ETAを集計し、純差分・保全・未完理由を報告。
 
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
@@ -205,7 +205,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - 配備後、runtime の drift が false であること。
 
 ## ブロッカー（発生時のみ）
-- 現在（2026-10-22 07:47 JST）：7ae860c3をexact SHA必須CI後に安全配備し、716件を新keyへ正規復帰済み。元隔離716件と旧履歴を保持。03:20:17/04:44:35 JSTのclean formal2回を受入後、04:44:55.484624–07:44:55.579887 JSTの固定3時間を完了し、141 labels（bounded23）・teacher新隔離0/CF新隔離17、1127.990件/日を確認。07:00のCF timeout1件に由来するfailure1が残りhuman_waitはなしのため、窓を変更せず通常解除と最終保全を継続確認中。bounded trainの実学習反映は既存local cohort受入待ちで、固定native certificationを迂回しない。
+- 現在（2026-10-22 08:01 JST）：7ae860c3の安全配備・716件の正規復帰・正式成功2回・固定3時間測定・保全を完了。141 labels（bounded23）・teacher新隔離0/CF新隔離17、1127.990件/日、残2304件の条件付ETA6.329843日（764件/日流入、復帰716を含む）。窓中のCF timeoutによるfailure1は07:58台に通常CF個別結果で0へ戻り、最終HTTP/fresh MCPはhuman_waitなし・drift=false。元隔離/historyは保持、専用observerは正常終了。復帰分は窓終端76完了/640ready、CF over-cap136とtimeout5は保留。boundedの評価実測・既存local cohortへの実学習反映、既存品質gate/7日継続は未完でPlan状態runningを維持する。
 - 前回測定（2026-10-20 16:15 JST、今回の固定費修正前）：Qwen low、通常1.009750時間でvalid local R4受入12件=285.219件/日、平均流入763.714差−478.495/日、平日1052.4差−767.181/日でbacklog増、teacher ETAなし。検索は新規/再open0・純減1235.949件/日、残27557件、同率条件22.296日。検索終了後も現検証費用が続く条件では本線の楽観上限620.771件/日（平均差−142.943）で解消ETAなし。旧0ab4d779の3時間352件/日と旧1324.9件/日projectionは比較資料として保持し、現容量へ転用しない。実model生成slotの理論容量と本線calendar容量を分け、同sealed300のoffは231/300一致77.00%・終端失敗0・model中央値13.448秒/p9018.629秒だが、model時間ゼロの本線上限808.444件/日でも平日量と約20%余裕を満たせないため不採用。全gate・独立性条件を保持し、lowのまま増加を受け入れる。
 - 現local profileはchronological_split_incomplete/data_wait、verified_truth0・paired_denominator0・rollout0%。独立性、教師/各class/control/probe/CFのfloor、split/holdoutを保持し、旧native認証の合格項目を新local profileへ引き継がず、既存Luna集合へlocal labelを混ぜない。旧sourceでR4未発行の既知1件は、当時のsealed pending証明がなく跨sourceで帰属させられないためlabel/completionを保持して未完とする。旧0ab4d779の定常44 labelsは全44件R4受入済みで、新180013eeの通常1時間窓は12/12件を受入済み。
 - 旧native認証の履歴（現localの受入とは別）：2026-10-18 22:55 JSTの364811daによるsealed baselineと対応snapshotでは、固定split・時系列・assignment・row integrityとblind repeatが通過し、残るgate理由はcounterfactual_pairs_below_floorだけ。CFは5/100、post-cutoff・distinct judge・両順序一致・既存validator・selected-only条件は維持する。適格workの実完了時刻によるrolling24hは4組/日（今回の通常formal観測を含む）へ減り、同率が続く場合の100組到達参考日は2026-11-11 JSTへ更新した。一方、18:51の復帰以後4.059時間の適格増分は0で、2回の正式成功も適格CF増とは一致しない。短時間の0件を持続的な0件/日とは断定せず、11/11も確定日・自動運転の保証率にはしない。この旧native条件の予測を現local運転の所要時間へ転用しない。固定blind repeatは200組・stable161・unstable39・Wilson下限0.74455956で既存floor100/0.60を維持。
@@ -1577,3 +1577,11 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-22 07:47 JST — teacherは1127.990 labels/日、bounded183.998 labels/日。指定平均流入764との差+363.990/日、restored716を既に含む残2304件のlabels-only ETAは同平均流入が続く条件で6.329843日、追加流入なし2.042571日。実workset admission128には過去展開を含み、Raw流入率ではない。同admission率1023.991/日を仮定した別の条件付ETAは22.154121日、実pending減13件を別記する。全27完了cycleの平均368.328秒/4.963 R4 labels、wait189.683秒を含む。dirty178標本は全0、監査model session370件すべてlocal、supervisor active peak0。窓内CF timeoutのsealed failure1件を除外していない。
 
 - 2026-10-22 07:47 JST — 判断: 3時間値は確定して保持し、CF failure1が残る現状態を成功扱いせず、通常経路でfailure0へ戻ることと最終保全を引き続き待つ。後続回復観測を容量窓へ追加しない。07:00/07:12のformal timestampはerror保持のためcleanとして数えず、窓内clean成功は5回に限定する。追加配備・試行回数変更・状態resetは行わない。
+
+- 2026-10-22 08:01 JST — CF failureは07:58台に通常の個別結果保存で1→0、全worker error空へ復帰。cold lane407→408、CF model calls141→145、CF label増0。窓終了後には既存最大3試行でtimeout隔離3→5とinput-limit135→136が通常receiptに記録され、retry待ちのtimeoutは解消した。schedulerには07:47/07:49の約50秒子process timeoutがあり、既存deadline/retry/quotaを変更していない。最後のinput-limit個別結果による通常解除であり、CFをラベルとして加算もしていない。容量値は07:44:55終端のまま保持し、この回復区間を追加しない。
+
+- 2026-10-22 08:01 JST — 最終保全を受入。66115 immutable成果物は全byte一致、ledger5本の既存prefixも不変。全5常駐の実archive/direct_urlは7ae860c3、通常dailyのarchive照合も同SHA。runtime.source以外のconfig、authority bytes/device/inode/mtime、supervisor/model serverのPID/起動、4周期schedule/plist/manager、09:15 PAUSED/hashを保持。08:00:03 JSTのHTTPは同SHA/drift=false/human_waitなし/failure0。新規stdioのMCP init/statusも成功し、initのalertは既存data_waitのみ。旧native certificationをlocalへ転用していない。
+
+- 2026-10-22 08:01 JST — 所有するobserverを専用stopで終了し、08:01:16.267259 JSTのobserver_finished/stopped_by_owner=true・exit0・該当process不存在を確認。停止理由は固定3時間・通常回復・最終保全/MCP照合の完了であり、通常worker/supervisorへのsignal0。観測events10601560bytes、初期/復元/rehearsal/失敗/終端の全private証跡、復帰候補worktreeと稼働attested checkout、無関係untrackedを保持。今回の追加production module/supervisor/monitor/daemon/cache/repair層0。配備累計の純差分は78a9b114比+452行（本体+192、tests+260、Plan除外）。境界計算・view来歴と評価除外・既存復帰遷移のappend型拡張・先行CF/lane原因修正と回帰保護のための追加である。pushは配備package7ae860c3まで、実行ログcommitはlocalのみ。
+
+- 2026-10-22 08:01 JST — bounded0〜5/quarantine3〜4の今回作業を終了。残る復帰teacher640件は窓終端の通常ready backlogであり、再隔離/削除していない。対応Luna参照0のためbounded一致率は未測定、評価/gate除外を維持。学習用ラベルは保持するが、実学習反映は既存local cohort受入待ちで、旧native cohortへの混入やgate緩和をしない。CF over-cap136件は上限不適格、timeout5件は既存最大試行到達として保留。既存before-approval7/invalid49の保留、品質昇格/7日無人継続も未完のまま明示し、Plan全体をcompleteにはしない。
