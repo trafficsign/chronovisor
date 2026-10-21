@@ -16079,7 +16079,17 @@ def _run_counterfactual_block(
     pending = bool(workset.status("local-counterfactual")["backlog"])
     if not execute:
         return _CounterfactualBlockResult(pending=pending)
-    remove_work_ids = tuple(dict.fromkeys(selected_work_ids))
+    # An undeclared historical exposure is a pending input, not a claimable
+    # payload. Declared receipts still pass every existing binding validator.
+    waiting_for_exposure = {
+        key for key in keys
+        if rally_by_id[key[0]].get("exposure_receipts") in (None, [])
+    }
+    keys = {key: value for key, value in keys.items() if key not in waiting_for_exposure}
+    eligible_ids = set(keys.values())
+    remove_work_ids = tuple(dict.fromkeys(
+        work_id for work_id in selected_work_ids if work_id in eligible_ids
+    ))
     claims = _reconcile_counterfactual_claims(
         workset=workset,
         claims=list(
@@ -16107,7 +16117,8 @@ def _run_counterfactual_block(
         )
     if not claims:
         return _CounterfactualBlockResult(
-            pending=bool(workset.status("local-counterfactual")["backlog"])
+            pending=bool(workset.status("local-counterfactual")["backlog"]),
+            deferred=bool(waiting_for_exposure),
         )
     claim = claims[0]
     target = next(key for key, work_id in keys.items() if work_id == claim.work_id)

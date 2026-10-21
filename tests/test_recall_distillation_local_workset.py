@@ -51,7 +51,8 @@ def test_counterfactual_claims_only_prepared_lane(tmp_path: Path, monkeypatch, s
     monkeypatch.setattr(distill, "committed_raw_watermark", lambda _path: "raw-1")
     snapshots = {name: {"candidates": [{"candidate_id": name, "text_sha256": "text"}]}
                  for name in ("old", "current")}
-    rallies = {name: {"rally_id": name, "as_of": "2026-10-10T00:00:00Z", "actual_answer_refs": [{"semantic_sha256": "answer"}]}
+    rallies = {name: {"rally_id": name, "as_of": "2026-10-10T00:00:00Z", "actual_answer_refs": [{"semantic_sha256": "answer"}],
+                     "exposure_receipts": [_sealed_counterfactual_exposure(tmp_path)]}
                for name in snapshots}
     items, keys = distill._prepare_counterfactual_work(root=tmp_path, snapshots=snapshots, rally_by_id=rallies)
     workset = DistillationWorkset(store.distillation_dir(tmp_path) / "local-workset.sqlite3")
@@ -75,6 +76,43 @@ def test_counterfactual_claims_only_prepared_lane(tmp_path: Path, monkeypatch, s
                   rally_by_id=rallies, texts={}, label_path=label_path, label_rows=[])
     assert distill._run_counterfactual_block(**kwargs).written == 1
     assert distill._run_counterfactual_block(**kwargs).written == 0
+    assert workset.status()["ready"] == 1
+    assert workset.status()["quarantined"] == 0
+
+
+def test_counterfactual_skips_unexposed_ready_head_without_spending_attempts(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(distill, "committed_raw_watermark", lambda _path: "raw-1")
+    snapshots = {name: {"candidates": [{"candidate_id": name, "text_sha256": "text"}]}
+                 for name in ("missing", "available")}
+    rallies = {name: {"rally_id": name, "as_of": "2026-10-10T00:00:00Z",
+                      "actual_answer_refs": [{"semantic_sha256": "answer"}],
+                      "exposure_receipts": []}
+               for name in snapshots}
+    rallies["available"]["exposure_receipts"] = [_sealed_counterfactual_exposure(tmp_path)]
+    items, keys = distill._prepare_counterfactual_work(root=tmp_path, snapshots=snapshots, rally_by_id=rallies)
+    for item in items:
+        item["priority"] = 30 if item["work_id"] == keys[("missing", "missing")] else 10
+    workset = DistillationWorkset(store.distillation_dir(tmp_path) / "local-workset.sqlite3")
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    distill._advance_local_workset(workset, items,
+        distill._local_workset_watermark(root=tmp_path, raw_dir=tmp_path / "raw", label_path=label_path, snapshots=snapshots))
+    def finish(**kwargs):
+        assert kwargs["target"] == ("available", "available")
+        kwargs["workset"].commit([kwargs["claim"]], [{"status": "completed", "completion_ref": "label-ledger:" + "a" * 64, "completion_digest": "a" * 64}])
+        return distill._CounterfactualBlockResult(written=1)
+    monkeypatch.setattr(distill, "_run_counterfactual_claim", finish)
+    kwargs = dict(execute=True, root=tmp_path, config=distill.DistillationConfig(teacher_profile=distill.LOCAL_SINGLE_PROFILE),
+                  counterfactual=SimpleNamespace(local=True), snapshots=snapshots,
+                  rally_by_id=rallies, texts={}, label_path=label_path, label_rows=[])
+    assert distill._run_counterfactual_block(**kwargs).written == 1
+    waiting = distill._run_counterfactual_block(**kwargs)
+    assert waiting.pending and waiting.deferred and not waiting.failure_class
+    claims = workset.claim("local-counterfactual", 1, "fixture", 300,
+                           eligible_work_ids=[keys[("missing", "missing")]])
+    assert len(claims) == 1 and claims[0].attempt == 1
+    workset.release_unattempted(claims)
     assert workset.status()["ready"] == 1
     assert workset.status()["quarantined"] == 0
 
@@ -598,11 +636,12 @@ def test_counterfactual_without_sealed_exposure_defers_without_label_or_attempt(
     ).status("local-counterfactual")
     assert result.written == 0
     assert result.deferred is True
+    assert not result.failure_class
     assert counterfactual.calls == 0
     assert not label_path.exists()
     assert status["leased"] == 0
     assert status["ready"] == 1
-    assert status["last_durable_receipt"]["generation"] >= 3
+    assert status["last_durable_receipt"]["generation"] == 1
     assert status["last_durable_progress"]["progress_kind"] == "local-workset-v2"
 
 
