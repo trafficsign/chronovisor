@@ -173,8 +173,8 @@ created_at: 2026-10-13T20:52:29+09:00
 ### 2026-10-21 21:00決定に基づく復旧とover-cap受入
 - [ ] bounded0：旧private observerを専用stopで終了確認し証跡を保持。7118a7a0のexact SHA必須CI後、安全境界で配備し通常成功でhuman_wait解除/failure0/drift=false・clean formal2回を受入。
 - [x] bounded1：716件のfield別超過と既存Luna参照をread-only測定し、student prefixを守るview形状を決める。
-- [ ] bounded2：共有payloadへover-cap限定view/provenanceを最小実装し、in-cap不変・上限・prefix・evaluation隔離・正規復元を検証する。
-- [ ] bounded3：既存Luna参照があればlow標本で採否を判定し、なければtraining限定としてevaluation/gate除外を受入。
+- [x] bounded2：共有payloadへover-cap限定view/provenanceを最小実装し、in-cap不変・上限・prefix・evaluation隔離・正規復元を検証する。
+- [x] bounded3：既存Luna参照があればlow標本で採否を判定し、なければtraining限定としてevaluation/gate除外を受入。
 - [ ] bounded4：最終exact SHA必須CI後、安全配備し元隔離履歴を保持したquarantine_reviewで新keyへ復元。CF over-cap保留、drift=false・human_waitなし・failure0・clean formal2回を確認。
 - [ ] bounded5：その後の固定3時間でlabel/隔離/bounded labelとlabel-only ETAを集計し、純差分・保全・未完理由を報告。
 
@@ -1527,3 +1527,9 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-22 00:47 JST — Luna参照照合は新規model call0。10/16の40316入力を含む10/13–18の240凍結source/162954 native Luna入力を、ID pair・semantic hash pair・実本文hash pairで照合し一致0。同じrallyの別candidate279 labelsは参照として流用しない。全labelファイル163106件の余分152件はretired OXで、現ledgerのnative Luna162954件と対象範囲を照合した。判断: 指定fallbackを採用し、bounded viewは未測定としてtrainingを許可するがevaluation/gateから除外する。凍結train668/test48は移動せず、test48を学習へ転用しない。比較用の新しいLuna/cloud/local推論は不要とし、除外の実装検証後にbounded3を受入する。
 
 - 2026-10-22 00:54 JST — Step0のclean formal1回とその後failure0/human_waitなしを確認したため、2回目の観測を継続しながら隔離worktreeでbounded実装を進める判断。先行修正の通常成功経路が確認済みで、コード作業は本番状態/通常workerを変更しないため。追加配備はStep0の2回受入後に限定し、受入を緩めない。既存local workerでは単一teacher payloadからbatchへ包む際16bytes増えることを確認したため、bounded viewはこの既存wrapperも含む12000bytesを満たすよう詰める。in-cap payload/digest/keyは従来のまま保持し、追加16bytesを理由にcapを増やさない。
+
+- 2026-10-22 01:16 JST — bounded2/3の実装・ローカル検証を受入。候補7ae860c3は共有_teacher_payloadでlocal-singleのover-capだけquery head+tail/candidate headを構成し、実batch wrapperを含め12000bytes以下にする。元716件すべてが新keyになり、raw prefix被覆・学生特徴hash一致716/716、実入力11998bytes141件/11999bytes161件/12000bytes414件。併せてin-cap93件のpayload/digest/key完全一致、凍結split train668/test48とpriority一致を確認。809件のview準備6.938秒、metadata/catalog読取2.088秒。既存CatalogTextCacheの一括読込を使い、新cache/module/monitorを追加しない判断。
+
+- 2026-10-22 01:16 JST — 来歴は既存label request_revisionにlocal-teacher-truncated-v1を記録し、truncatedとview版を識別する。work provenanceにinput_view（truncated/両fieldの切詰め有無/revision/evaluation_eligible=false）と旧work keyへのlineageを加える。新top-level label field・teacher prompt/output schema変更は不要。元quarantine行/attempt/履歴を変更せず、同split/priorityの新ready行を既存quarantine_reviewに新receiptとして追加する最小拡張を選択した。Luna参照0のため一致率は未測定、bounded revisionはmaterialization/cohortでtrainだけ許可しtest/validation/embargoを評価・gateから除外、test48をtrainへ移さない。
+
+- 2026-10-22 01:16 JST — 関連・構造558 tests、最終関連145 tests、route/revision binding1 test、全Ruff/mypy/import contract/architecture baseline/compile/whitespaceを成功。UTF-8境界・escape・学生prefix不足・実batch上限・incap context順序・新key/label revision・評価除外・復元CAS失敗全batch rollback・旧row/receipt保持を回帰検証。候補だけCI branchへpushしexact SHA必須CIを待つ。Step0はvalid R4 62件/failure0/human_waitなし、clean formalは00:35:48の1回で、2回目を継続観測する。追加配備はまだ行わない。
