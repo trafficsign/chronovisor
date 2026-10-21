@@ -157,7 +157,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] throughput1：CF blind comparison rejectを個別データ結果へ分類し、gate/retry履歴とfailure breakdownを保持する。
 - [x] throughput2：通常launchd dailyのsetup/otherを既存profilerで帰属し、原因とbatch反復の重複計算を既存コード内で修正する。
 - [x] throughput3：共有lease・stale・watchdog・配備境界・claim TTLを確認し、実測でlocal daily budgetを選ぶ。
-- [ ] throughput4：復帰候補の必須CI後、安全境界で今回一度配備し同じplistの通常dailyをlowで再開する。新source local valid R4を伴うclean formal success2回、通常成功によるhuman_wait解除、worker failure0、materialization dirty0、実serviceのdrift=falseを受け入れる。
+- [x] throughput4：復帰候補の必須CI後、安全境界で今回一度配備し同じplistの通常dailyをlowで再開する。新source local valid R4を伴うclean formal success2回、通常成功によるhuman_wait解除、worker failure0、materialization dirty0、実serviceのdrift=falseを受け入れる。
 - [ ] throughput5：復旧cold rebuildだけを除く固定3時間を同じcalendar方式で測り、平均764件/日への20%以上の余裕・流入差引ETAを確認する。決定9によりlow維持、off測定と1316件/日目標は撤回。
 
 ### Phase 5：別件の修理
@@ -187,7 +187,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - 配備後、runtime の drift が false であること。
 
 ## ブロッカー（発生時のみ）
-- 現在（2026-10-21 08:18 JST）：c0f149e1を今回一度配備済み。通常dailyは同じplist/lowで再開し、cold rebuildは08:17:36.138435 JSTに完了、dirty0・worker failure0。固定3時間窓08:17:36.138435–11:17:36.138435 JSTを確定して観測中。新source local valid R4付きclean formal success2回は未受入。必須CI・5常駐archive・HTTP/fresh MCPのdrift=falseは確認済み。7日継続と品質gateのデータ待ちは開いたまま。
+- 現在（2026-10-21 10:36 JST）：c0f149e1を今回一度配備済み。通常dailyは同じplist/lowで再開し、cold rebuildは08:17:36.138435 JSTに完了。新source local valid R4付きclean formal successを09:11:54.092346・10:35:11.604198 JSTの2回受入、通常成功後human_wait解除、dirty0・worker failure0。必須CI・5常駐archive・HTTP/fresh MCPのdrift=falseは確認済み。固定3時間窓08:17:36.138435–11:17:36.138435 JSTの最終容量判定と最終保全確認を残す。7日継続と品質gateのデータ待ちは開いたまま。
 - 前回測定（2026-10-20 16:15 JST、今回の固定費修正前）：Qwen low、通常1.009750時間でvalid local R4受入12件=285.219件/日、平均流入763.714差−478.495/日、平日1052.4差−767.181/日でbacklog増、teacher ETAなし。検索は新規/再open0・純減1235.949件/日、残27557件、同率条件22.296日。検索終了後も現検証費用が続く条件では本線の楽観上限620.771件/日（平均差−142.943）で解消ETAなし。旧0ab4d779の3時間352件/日と旧1324.9件/日projectionは比較資料として保持し、現容量へ転用しない。実model生成slotの理論容量と本線calendar容量を分け、同sealed300のoffは231/300一致77.00%・終端失敗0・model中央値13.448秒/p9018.629秒だが、model時間ゼロの本線上限808.444件/日でも平日量と約20%余裕を満たせないため不採用。全gate・独立性条件を保持し、lowのまま増加を受け入れる。
 - 現local profileはchronological_split_incomplete/data_wait、verified_truth0・paired_denominator0・rollout0%。独立性、教師/各class/control/probe/CFのfloor、split/holdoutを保持し、旧native認証の合格項目を新local profileへ引き継がず、既存Luna集合へlocal labelを混ぜない。旧sourceでR4未発行の既知1件は、当時のsealed pending証明がなく跨sourceで帰属させられないためlabel/completionを保持して未完とする。旧0ab4d779の定常44 labelsは全44件R4受入済みで、新180013eeの通常1時間窓は12/12件を受入済み。
 - 旧native認証の履歴（現localの受入とは別）：2026-10-18 22:55 JSTの364811daによるsealed baselineと対応snapshotでは、固定split・時系列・assignment・row integrityとblind repeatが通過し、残るgate理由はcounterfactual_pairs_below_floorだけ。CFは5/100、post-cutoff・distinct judge・両順序一致・既存validator・selected-only条件は維持する。適格workの実完了時刻によるrolling24hは4組/日（今回の通常formal観測を含む）へ減り、同率が続く場合の100組到達参考日は2026-11-11 JSTへ更新した。一方、18:51の復帰以後4.059時間の適格増分は0で、2回の正式成功も適格CF増とは一致しない。短時間の0件を持続的な0件/日とは断定せず、11/11も確定日・自動運転の保証率にはしない。この旧native条件の予測を現local運転の所要時間へ転用しない。固定blind repeatは200組・stable161・unstable39・Wilson下限0.74455956で既存floor100/0.60を維持。
@@ -1433,3 +1433,5 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-21 09:48 JST — 中間1.504823時間は53/53 valid R4・845.282件/日、通常daily区間外0・全low。平均流入763.714との差+81.568/日、pending2302件の条件付ETA28.222日。workset admission64件は既存履歴の展開を含み、実流入率とは区別する。窓内完了19cycle（capture_only1/deferred18）はR4 join53件、平均秒はsetup25.810・model81.549・training18.555・persist0.008・wait127.298・other18.679・total271.901、import別0.862。dirty88標本すべて0、正式成功後35 health標本でhuman_wait0、worker failure0。直近の待ちによる減速を含めて固定窓を維持し、中間値の良い時点への切替やoff測定は行わない。
 
 - 2026-10-21 10:18 JST — 中間2.006295時間は77/77 valid R4・921.101件/日、通常daily区間外0・全low。平均流入763.714との差+157.387/日、pending2310件の条件付ETA14.677日。764件/日への余裕は約20.56%だが、3時間要件前なので合格確定はしない。workset admission96件は既存履歴の展開を含む。窓内完了23cycle（capture_only1/deferred22）のR4 join71件、平均秒はsetup25.439・model87.161・training19.273・persist0.009・wait131.690・other19.238・total282.810、import別0.865。dirty118標本すべて0、正式成功後65 health標本でhuman_wait0、worker failure0。正式成功2回目の受入は未完であり、固定窓と通常dailyを維持して観測を続ける。
+
+- 2026-10-21 10:36 JST — throughput4受入完了。通常dailyのclean formal successは09:11:54.092346・10:35:11.604198 JSTの2回で、各sealed formal progress・clean state・cycle内の新source local valid R4へ一致。最初の成功後83 on-target health標本でhuman_wait再発0、現在dirty0・worker failure0・drift=false。成功前のhuman_wait53標本と旧last_failure履歴は保持した。追加配備・設定変更・state手編集なし。固定3時間窓の終了と最終保全確認へ進み、7日継続は未完のままにする。
