@@ -1567,3 +1567,5 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-22 04:45 JST — 指定順序を満たした直後の04:44:55.484624 JSTを固定3時間の開始とし、最低終了07:44:55.484624 JSTをprivate descriptorへ保存。両queueのRO transactionによるstate/reason/receipt generationとlabel ledgerの完全行prefixを開始endpointとして保存した。restored716は開始前backlogへ既に含まれるためETAへ重複加算しない。判断: 最初の3時間経過後のendpoint読取までの遅延も分母へ含め、shared-resource待ち/defer/隔離を除外せず、窓を移動しない。09:15 PAUSED・low・通常4周期jobのまま観測する。
 
 - 2026-10-22 05:45 JST — 固定窓の約1時間中間記録。valid local R4受理増分52件、うちbounded12件（復帰分の累計完了65）、teacher新隔離0。CFはlabel増分0・input-limit新隔離8件で、開始118→126件保留。teacher pendingは開始2317→2329（ready2327/leased2）、通常workset admission64件を含むため、queue純減やadmissionをラベル数/Raw平均流入へ読み替えない。窓内に追加clean formal3回を確認し、failure0/human_waitなし/dirty0を維持。判断: 中間値で容量合否/ETAを確定せず、開始窓を変えず07:44:55以降の終端まで継続する。
+
+- 2026-10-22 06:45 JST — 固定窓の約2時間中間記録。valid local R4受理増分98件、うちbounded18件（復帰分累計完了71）、teacher新隔離0。CF label増分0・input-limit新隔離15件、同保留133件。teacher pending2315は開始比2件減で、通常admission96件を別計上。窓内の追加clean formalは5回、failure0/human_waitなし/dirty0を維持。既存09:15を起動せず、残る約1時間を同じ開始点から継続し、終端receipt差分とledger/R4で最終値を確定する。
