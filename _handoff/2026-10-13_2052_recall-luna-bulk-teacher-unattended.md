@@ -172,7 +172,7 @@ created_at: 2026-10-13T20:52:29+09:00
 
 ### 2026-10-21 21:00決定に基づく復旧とover-cap受入
 - [ ] bounded0：旧private observerを専用stopで終了確認し証跡を保持。7118a7a0のexact SHA必須CI後、安全境界で配備し通常成功でhuman_wait解除/failure0/drift=false・clean formal2回を受入。
-- [ ] bounded1：716件のfield別超過と既存Luna参照をread-only測定し、student prefixを守るview形状を決める。
+- [x] bounded1：716件のfield別超過と既存Luna参照をread-only測定し、student prefixを守るview形状を決める。
 - [ ] bounded2：共有payloadへover-cap限定view/provenanceを最小実装し、in-cap不変・上限・prefix・evaluation隔離・正規復元を検証する。
 - [ ] bounded3：既存Luna参照があればlow標本で採否を判定し、なければtraining限定としてevaluation/gate除外を受入。
 - [ ] bounded4：最終exact SHA必須CI後、安全配備し元隔離履歴を保持したquarantine_reviewで新keyへ復元。CF over-cap保留、drift=false・human_waitなし・failure0・clean formal2回を確認。
@@ -1517,3 +1517,11 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-22 00:11 JST — 後継1672ab7fの初回daily（23:58:05–翌00:09:38 JST、693.049秒）は2 valid R4を保存し、cold materialization dirty0へ復帰。cold lane359→360、CF model calls96→98と通常経路が前進し、既存state producerでworker failure24→0/error空、HTTP human_wait解除・drift=falseを確認。判断: このcycleはdeferredなのでclean formalへ数えず、sealed formal progress・同時clean state・同cycle新source local R4が一致する2回を引き続き待つ。state/ledger/authorityの手編集なし。
 
 - 2026-10-22 00:34 JST — Step0の通常経路によるfailure0/human_wait解除/drift=falseは00:09以降維持、最新valid R4は19件、clean formalは0回。解除は既存CF input-limit個別結果2件を正常保存した経路であり、隔離をラベルへ加算していない。判断: 修正の先行CI/安全配備と復旧3条件は確認済みのため、正式成功2回の観測を止めずに716件の読み取り専用実測・既存Luna参照照合を並行する。モデル呼出も本番状態変更もなく復旧を妨げないため。bounded0の受入は2回の成立まで未完とし、追加配備へ進む前に必ず閉じる。
+
+- 2026-10-22 00:47 JST — 後継1672ab7fの最初のclean formal成功は00:35:48.038987 JST。sealed formal progress・同時clean state・同cycle新source local R4を一致確認し、最新valid R4は32件、failure0/human_waitなし/drift=falseを維持。2回目は観測中。
+
+- 2026-10-22 00:47 JST — bounded1完了。716件は現queueで全件同digestのteacher_input_limit、train668/test48。Raw・sealed snapshotをRO検証した実JSON（context空）の超過内訳はquery単独578、candidate単独94、両方10、合計のみ34。query中央値17467bytes、candidate1651bytes、最大payload878520bytes。query/candidateの学生特徴hashは全716件で元snapshotと一致し、正規化byte窓を完全に覆うraw prefixの最小payloadは最大7680bytes、12000超0。UTF-8境界で末尾結合が特徴へ入り込まないようnormalized windowのbyte被覆も調べた第3版を正本とし、先行監査をprivateへ保持。
+
+- 2026-10-22 00:47 JST — 形状判断: queryはhead+tail、candidateはhead-only。query超過588件中544件は長い会話要約・引継ぎ、全716件中639件が20行以上、585件で疑問符が学生prefixより後にある（実質問の同定とは区別）。末尾の継続指示/追記を保持するためquery tailを確保する。一方candidate超過104件中82件は末尾に引継ぎ定型文/引用来歴等があり、headを広く残す。query2048/candidate4096正規化bytesを覆うraw prefixを削らず、短いfieldは全文保持し、残る予算を配分して実JSONを12000bytes直下まで使う。contextは従来のdrop-oldestのまま。本文・質問・IDはrepo/Planへ追加していない。
+
+- 2026-10-22 00:47 JST — Luna参照照合は新規model call0。10/16の40316入力を含む10/13–18の240凍結source/162954 native Luna入力を、ID pair・semantic hash pair・実本文hash pairで照合し一致0。同じrallyの別candidate279 labelsは参照として流用しない。全labelファイル163106件の余分152件はretired OXで、現ledgerのnative Luna162954件と対象範囲を照合した。判断: 指定fallbackを採用し、bounded viewは未測定としてtrainingを許可するがevaluation/gateから除外する。凍結train668/test48は移動せず、test48を学習へ転用しない。比較用の新しいLuna/cloud/local推論は不要とし、除外の実装検証後にbounded3を受入する。
