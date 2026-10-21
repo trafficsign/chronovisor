@@ -205,7 +205,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - 配備後、runtime の drift が false であること。
 
 ## ブロッカー（発生時のみ）
-- 現在（2026-10-22 01:38 JST）：Step0は1672ab7fで正式成功2回・failure0/human_waitなし/drift=falseを受入済み。bounded view候補7ae860c3は716件の実入力/特徴/新keyとin-cap不変、評価除外、正規復帰rehearsalを検証済み。必須CIのquality/Python3.14完了を待ち、安全配備・quarantine_review本番復帰・最終正式成功2回・固定3時間を進める。旧20:12窓と先行2観測の証跡は保持し、今回3時間受入へ読み替えない。
+- 現在（2026-10-22 01:42 JST）：Step0の1672ab7fは正式成功2回で受入済み。bounded view最終候補7ae860c3の必須CI3本がexact SHAで成功し、安全境界を確保して配備・716件のquarantine_review本番復帰へ進む。最終sourceの正式成功2回と固定3時間測定は未完。旧中断窓と先行観測の証跡は保持し、今回の3時間受入へ読み替えない。
 - 前回測定（2026-10-20 16:15 JST、今回の固定費修正前）：Qwen low、通常1.009750時間でvalid local R4受入12件=285.219件/日、平均流入763.714差−478.495/日、平日1052.4差−767.181/日でbacklog増、teacher ETAなし。検索は新規/再open0・純減1235.949件/日、残27557件、同率条件22.296日。検索終了後も現検証費用が続く条件では本線の楽観上限620.771件/日（平均差−142.943）で解消ETAなし。旧0ab4d779の3時間352件/日と旧1324.9件/日projectionは比較資料として保持し、現容量へ転用しない。実model生成slotの理論容量と本線calendar容量を分け、同sealed300のoffは231/300一致77.00%・終端失敗0・model中央値13.448秒/p9018.629秒だが、model時間ゼロの本線上限808.444件/日でも平日量と約20%余裕を満たせないため不採用。全gate・独立性条件を保持し、lowのまま増加を受け入れる。
 - 現local profileはchronological_split_incomplete/data_wait、verified_truth0・paired_denominator0・rollout0%。独立性、教師/各class/control/probe/CFのfloor、split/holdoutを保持し、旧native認証の合格項目を新local profileへ引き継がず、既存Luna集合へlocal labelを混ぜない。旧sourceでR4未発行の既知1件は、当時のsealed pending証明がなく跨sourceで帰属させられないためlabel/completionを保持して未完とする。旧0ab4d779の定常44 labelsは全44件R4受入済みで、新180013eeの通常1時間窓は12/12件を受入済み。
 - 旧native認証の履歴（現localの受入とは別）：2026-10-18 22:55 JSTの364811daによるsealed baselineと対応snapshotでは、固定split・時系列・assignment・row integrityとblind repeatが通過し、残るgate理由はcounterfactual_pairs_below_floorだけ。CFは5/100、post-cutoff・distinct judge・両順序一致・既存validator・selected-only条件は維持する。適格workの実完了時刻によるrolling24hは4組/日（今回の通常formal観測を含む）へ減り、同率が続く場合の100組到達参考日は2026-11-11 JSTへ更新した。一方、18:51の復帰以後4.059時間の適格増分は0で、2回の正式成功も適格CF増とは一致しない。短時間の0件を持続的な0件/日とは断定せず、11/11も確定日・自動運転の保証率にはしない。この旧native条件の予測を現local運転の所要時間へ転用しない。固定blind repeatは200組・stable161・unstable39・Wilson下限0.74455956で既存floor100/0.60を維持。
@@ -1543,3 +1543,5 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-22 01:35 JST — Step0専用observerは01:34:04.234452 JSTに設計済stopで正常終了（observer_finished/stopped_by_owner=true）。停止理由は先行配備の正式受入2回成立と最終配備への移行であり、全証跡を保持。最終候補7ae860c3用には同じprivate observer/calendar helperを再使用し、入力view revisionとbounded件数のmetadataだけ追加した。固定3時間は最終配備のclean formal2回確認直後に開始する。CI残2本が通るまでperiodic hold/追加配備は開始しない。
 
 - 2026-10-22 01:38 JST — 現在欄をStep0受入済み・最終candidate CI待ちへ更新。fresh MCP statusも成功し、先行観測を終了した状態と一致させた。通常daily/workerは稼働を継続し、まだ周期holdを開始していない。
+
+- 2026-10-22 01:42 JST — 7ae860c30ff7e1d9ab9e0cac7c41dd1fd60066a2の必須CI全成功: quality39633223319、Python3.14 compatibility39633223325、Security39633223330。quality JUnitは7520 cases/errors0/failures0/skipped4。正規archive precache、原状保持inventory、716件復帰rehearsal、先行Step0の正式成功2回が揃ったため、安全境界の確保を開始する判断。4周期jobの自然idleと既存ingest/distillation leaseを待ち、同一packageを配備後に正規quarantine_reviewを行ってscheduleを復帰する。
