@@ -1557,3 +1557,5 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-22 02:33 JST — 配備後のsealed training snapshot（SHAf8a2d37a40da77ccf5c2531c2348ab98fccd2cac50ef19586884d59dd7105b78）をRO検証。実cacheにmaterializeされたbounded11件は元の凍結test群で、全2272 rowsのtraining snapshot中のbounded rowは0、evaluation/gate rowも0。新revisionの伝播とtest→train移動なしを実データでも確認した。train許可は既存回帰で確認済みであり、未測定viewの評価除外を解除しない。最終sourceのclean formal2回は引き続き観測中。
 
 - 2026-10-22 03:00 JST — 最終sourceの受入観測を継続。復帰bounded35件がvalid local R4として完了し、同viewの追加隔離0、dirty0/failure0/human_waitなし。cold lane377・CF model calls115まで通常経路が前進しており、先行不具合のlane固定は再発していない。直近の短いdeferred cycleはmodel実行ほぼ0秒・既存admission待ち約60秒で、失敗とは区別する。clean formalはまだ0回のため容量窓を開始せず、共有資源の割当・quota・周期jobを変更せずに2回の成立を待つ判断。受入を早めるためのworker再起動やstate編集は行わない。
+
+- 2026-10-22 03:21 JST — 最終7ae860c3のclean formal成功1回目は03:20:17.614552 JST。sealed formal progress・同時clean state・同cycle新source local valid R4の一致を確認し、復帰bounded46件完了/追加隔離0/dirty0/failure0。2回目の確認直後に固定3時間を開始する。最初の成功までの共有資源待ちとdeferred履歴をprivateに保持し、受入判定や計測開始条件の変更はしない。
