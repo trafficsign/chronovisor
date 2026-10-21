@@ -1569,3 +1569,5 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-22 05:45 JST — 固定窓の約1時間中間記録。valid local R4受理増分52件、うちbounded12件（復帰分の累計完了65）、teacher新隔離0。CFはlabel増分0・input-limit新隔離8件で、開始118→126件保留。teacher pendingは開始2317→2329（ready2327/leased2）、通常workset admission64件を含むため、queue純減やadmissionをラベル数/Raw平均流入へ読み替えない。窓内に追加clean formal3回を確認し、failure0/human_waitなし/dirty0を維持。判断: 中間値で容量合否/ETAを確定せず、開始窓を変えず07:44:55以降の終端まで継続する。
 
 - 2026-10-22 06:45 JST — 固定窓の約2時間中間記録。valid local R4受理増分98件、うちbounded18件（復帰分累計完了71）、teacher新隔離0。CF label増分0・input-limit新隔離15件、同保留133件。teacher pending2315は開始比2件減で、通常admission96件を別計上。窓内の追加clean formalは5回、failure0/human_waitなし/dirty0を維持。既存09:15を起動せず、残る約1時間を同じ開始点から継続し、終端receipt差分とledger/R4で最終値を確定する。
+
+- 2026-10-22 07:03 JST — 固定窓中の07:00:32.551722 JSTにCF CounterfactualTimeoutが1件発生しworker failure0→1。未宣言exposure bindingの再発ではなく、既存DistillationDeferredから通常timeout retryへ遷移した項目1件がreadyに残る。CF timeout隔離は従来3件のまま、input-limit保留135件。直近teacher sessionはlocal成功を継続し、HTTP human_waitはまだなし。判断: このfailureを窓から除外せず、07:00:32のcapture_only/formal timestampも同時stateにerrorがあるためclean成功に加算しない。既存60秒retry・最大3試行・失敗表示規則を変更せず、通常CF結果でのfailure解除を待つ。state/ledger/queueの手編集や追加model呼出は行わない。
