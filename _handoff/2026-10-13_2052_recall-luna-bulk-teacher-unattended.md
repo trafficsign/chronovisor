@@ -171,7 +171,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - [ ] quarantine4：配備後3時間以上の固定calendar窓で実labelと隔離を別集計し、labels-only ETA・純差分・保全を報告する。
 
 ### 2026-10-21 21:00決定に基づく復旧とover-cap受入
-- [ ] bounded0：旧private observerを専用stopで終了確認し証跡を保持。7118a7a0のexact SHA必須CI後、安全境界で配備し通常成功でhuman_wait解除/failure0/drift=false・clean formal2回を受入。
+- [x] bounded0：旧private observerを専用stopで終了確認し証跡を保持。7118a7a0のexact SHA必須CI後、安全境界で配備し通常成功でhuman_wait解除/failure0/drift=false・clean formal2回を受入。
 - [x] bounded1：716件のfield別超過と既存Luna参照をread-only測定し、student prefixを守るview形状を決める。
 - [x] bounded2：共有payloadへover-cap限定view/provenanceを最小実装し、in-cap不変・上限・prefix・evaluation隔離・正規復元を検証する。
 - [x] bounded3：既存Luna参照があればlow標本で採否を判定し、なければtraining限定としてevaluation/gate除外を受入。
@@ -1537,3 +1537,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-22 01:23 JST — 正規quarantine_reviewの716件一括復帰を、本番SQLiteの読み取りbackupで追加実行した。旧3549rowと9841receiptを完全保持、新ready716・旧quarantine716保持・新attempt0・全split/priority不変、transition audit verified。実行証跡とbackupはprivateに保持し、本番書込0。最終配備後は同じhelper/APIをown maintenance・既存distillation lease内で実行する。元716件以外のteacher_input_limit増分は現時点0、CF input-limit98件は保留を継続。
 
 - 2026-10-22 01:23 JST — 7ae860c3の全7用途のpackage precacheを実archive/direct_urlで確認し、mcp1.30.0/certifi2026.10.19・既存constraints bytesを保持。Security CI成功、quality/Python3.14 CI継続中。純差分はbounded変更がproduction +176行/tests +179行、開始時78a9b114からの配備累計ではproduction +192行/tests +260行（Planを除く）。追加分は既存payloadの境界計算・来歴/評価除外・既存quarantine_reviewのappend型復帰と回帰保護であり、新production module/監視層なし。最新Step0はvalid R4 68件、dirty0/failure0/human_waitなし、正式成功2回目待ち。
+
+- 2026-10-22 01:35 JST — bounded0完了。1672ab7f（7118a7a0を含む最小後継）のclean formal成功は00:35:48.038987・01:31:28.617510 JST。同cycleのvalid local R4、sealed formal progress、同時clean stateを一致確認し、valid R4 82件/dirty0/failure0/human_waitなし/drift=falseを受入。running常駐5archiveと通常dailyは同SHA、source以外config・4schedule/plist・09:15 PAUSED・authority bytes/inode/mtime・supervisor/model serverのPID/起動時刻を再確認。65978 immutableと5 ledger prefixの変更0、新規MCP init成功（human_waitなし、既存data_waitのみ）。
+
+- 2026-10-22 01:35 JST — Step0専用observerは01:34:04.234452 JSTに設計済stopで正常終了（observer_finished/stopped_by_owner=true）。停止理由は先行配備の正式受入2回成立と最終配備への移行であり、全証跡を保持。最終候補7ae860c3用には同じprivate observer/calendar helperを再使用し、入力view revisionとbounded件数のmetadataだけ追加した。固定3時間は最終配備のclean formal2回確認直後に開始する。CI残2本が通るまでperiodic hold/追加配備は開始しない。
