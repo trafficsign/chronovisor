@@ -151,14 +151,14 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] cost1：既存cycle receiptで起動/import・setup・model・training preparation・persist・waitを測定し、productive 4cycle以上の変更前内訳を記録する。
 - [x] cost2：実測の大きい固定費から共有経路を最小修正し、全caller・検証同等性・300秒とquota保持を確認する。
 - [x] cost3：candidate branchの必須CI成功後、安全境界で周期jobをidle保留し、一度配備・drift=false・human_waitなしを受け入れる。
-- [ ] cost4：復旧cold rebuild後の固定3時間を同じcalendar方式で測定し、平均764件/日への20%以上の余裕と流入差引backlog ETAを確認する。決定9によりlowを維持しoffは測らない。
+- [x] cost4：復旧cold rebuild後の固定3時間を同じcalendar方式で測定し、平均764件/日への20%以上の余裕と流入差引backlog ETAを確認する。決定9によりlowを維持しoffは測らない。
 
 ### 2026-10-21 流入追随の完遂
 - [x] throughput1：CF blind comparison rejectを個別データ結果へ分類し、gate/retry履歴とfailure breakdownを保持する。
 - [x] throughput2：通常launchd dailyのsetup/otherを既存profilerで帰属し、原因とbatch反復の重複計算を既存コード内で修正する。
 - [x] throughput3：共有lease・stale・watchdog・配備境界・claim TTLを確認し、実測でlocal daily budgetを選ぶ。
 - [x] throughput4：復帰候補の必須CI後、安全境界で今回一度配備し同じplistの通常dailyをlowで再開する。新source local valid R4を伴うclean formal success2回、通常成功によるhuman_wait解除、worker failure0、materialization dirty0、実serviceのdrift=falseを受け入れる。
-- [ ] throughput5：復旧cold rebuildだけを除く固定3時間を同じcalendar方式で測り、平均764件/日への20%以上の余裕・流入差引ETAを確認する。決定9によりlow維持、off測定と1316件/日目標は撤回。
+- [x] throughput5：復旧cold rebuildだけを除く固定3時間を同じcalendar方式で測り、平均764件/日への20%以上の余裕・流入差引ETAを確認する。決定9によりlow維持、off測定と1316件/日目標は撤回。
 
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
@@ -1437,3 +1437,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-21 10:36 JST — throughput4受入完了。通常dailyのclean formal successは09:11:54.092346・10:35:11.604198 JSTの2回で、各sealed formal progress・clean state・cycle内の新source local valid R4へ一致。最初の成功後83 on-target health標本でhuman_wait再発0、現在dirty0・worker failure0・drift=false。成功前のhuman_wait53標本と旧last_failure履歴は保持した。追加配備・設定変更・state手編集なし。固定3時間窓の終了と最終保全確認へ進み、7日継続は未完のままにする。
 
 - 2026-10-21 10:48 JST — 中間2.503740時間は100/100 valid R4・958.566件/日、通常daily区間外0・全low。平均流入763.714との差+194.852/日、pending2287件の条件付ETA11.737日。764件/日への余裕約25.47%は中間値として保持し、3時間終了を待つ。窓内完了25cycle（capture_only2/deferred23）のR4 join93件、平均秒はsetup25.673・model104.216・training20.116・persist0.009・wait146.511・other21.829・total318.354、import別0.864。dirty147標本すべて0、正式成功後95 health標本でhuman_wait0、worker failure0。capacityの判定対象は残り30分も含む固定窓全体とする。
+
+- 2026-10-21 11:18 JST — cost4/throughput5完了。08:17:36.138435–11:17:36.138435 JSTの固定3.000000時間は127/127 local valid R4・1016件/日、通常daily区間外0・R4欠落0・全low。764件/日への余裕32.984%、必要916.8件/日を満たしたためlowを維持する。流入差引+252件/日、終端pending2292件の条件付ETA9.095日（同じ過去実平均763.714なら+252.286件/日・9.085日）。これは現pendingに平均流入と今回の速度が続く条件の推計であり、未展開履歴や将来loadを保証しない。workset admission128件は既存履歴の展開を含むため日次流入率へ転用しない。平日差は参考値−36.4件/日で、撤回済み1316目標を再導入しない。
+
+- 2026-10-21 11:18 JST — 固定窓内完了30cycle（capture_only4/deferred26）のR4 join127件、平均4.233333件/cycle。平均秒はsetup26.892・model122.957・training20.258・persist0.008・wait151.916・other23.916・total345.947、import別0.881。capture_only限定4cycle/48labelsの平均792.704秒は診断用で、全calendar容量と混同しない。cold完了後dirty177標本はすべて0。10:49:55.660961・11:16:31.150174 JSTの追加2回もsealed formal progress/clean state/R4へ一致し、正式成功後124 health標本でhuman_wait再発0・worker failure0。窓を動かさず、待ち・deferを含めて合格を確認した。最終保全とfresh MCP照合を進め、7日継続と品質gateの待機は残す。
