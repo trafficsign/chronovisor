@@ -9361,6 +9361,48 @@ def test_transient_teacher_defer_writes_no_label_and_retries(tmp_path: Path) -> 
     assert second["labels_written"] > 0
 
 
+@pytest.mark.parametrize("progress", [False, True])
+@pytest.mark.parametrize("cold", [False, True])
+def test_productive_local_defer_rotates_lane_without_claiming_formal_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, progress: bool, cold: bool,
+) -> None:
+    raw_dir = _raw(tmp_path)
+    config = _config(tmp_path, teacher_profile=distill.LOCAL_SINGLE_PROFILE,
+                     teacher_claim_limit=1)
+    state_path = store.distillation_dir(tmp_path) / store.STATE_FILE
+    prior_success = "2026-10-13T21:52:30+00:00"
+    store.write_sealed_state(state_path, {
+        "kind": "worker-state", "status": "capture_only", "cold_start_lane_turn": 3,
+        "last_success_at": prior_success, "worker_failure_count": 7,
+        "worker_error_stage": "counterfactual", "worker_error_kind": "counterfactual_system_error",
+        "worker_error_type": "CounterfactualBindingError", "error_code": "distillation_run_failed",
+    })
+
+    class Teacher:
+        local = True
+        calls = 0
+
+        def evaluate(self, payload: dict) -> dict:
+            self.calls += 1
+            if not progress or self.calls > 1:
+                raise distill.DistillationDeferred("capacity", failure_class="resource_busy")
+            return {"labels": [{"candidate_id": item["candidate_id"], "verdict": "relevant"}
+                               for item in payload["candidates"]]}
+
+    monkeypatch.setattr(distill, "_run_counterfactual_block", lambda **_kwargs:
+                        distill._CounterfactualBlockResult(pending=True, deferred=True))
+    result = distill.run_distillation_chunk(
+        root=tmp_path, raw_dir=raw_dir, config_path=config,
+        teachers={distill.TEACHER_ROLES[0]: Teacher()}, cold_start=cold,
+    )
+    state = store.read_sealed(state_path)
+    assert result["labels_written"] == int(progress)
+    assert result["status"] == state["worker_status"] == "deferred"
+    assert state["last_success_at"] == prior_success
+    assert state["worker_failure_count"] == 7
+    assert state["cold_start_lane_turn"] == 3 + int(cold and progress)
+
+
 def test_timeout_teacher_is_deferred_without_advancing_label_cursor(
     tmp_path: Path,
 ) -> None:

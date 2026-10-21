@@ -17040,7 +17040,12 @@ def _persist_distillation_chunk(
             "counterfactual_model_calls": counterfactual_model_calls,
             "cold_start_pending": cold_start_pending,
             "cold_start_lane_turn": int(scheduler_state.get("cold_start_lane_turn", 0))
-            + int(setup["cold_start"] and not model_deferred),
+            + int(setup["cold_start"] and (
+                not model_deferred or (
+                    config.teacher_profile == LOCAL_SINGLE_PROFILE
+                    and teacher_result.labels_written > 0
+                )
+            )),
             "split_plan_id": split_plan_id,
             "manifest_backlog": manifest_backlog,
             "candidate_backlog": candidate_backlog,
