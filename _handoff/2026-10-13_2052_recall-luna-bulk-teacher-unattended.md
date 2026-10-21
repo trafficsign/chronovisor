@@ -1565,3 +1565,5 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-22 04:45 JST — bounded4/quarantine3を後継7ae860c3で受入。clean formal成功は03:20:17.614552・04:44:35.458940 JSTの2回で、sealed progress・同時clean state・同cycle新source valid local R4が一致。直後のlive HTTPは同SHA/drift=false/human_waitなし、state failure0/dirty0。受理ラベル98件のうち復帰bounded53件、bounded追加隔離0。中断した78a9b114の20:12窓を成功へ読み替えず、後継で正式受入を閉じる。
 
 - 2026-10-22 04:45 JST — 指定順序を満たした直後の04:44:55.484624 JSTを固定3時間の開始とし、最低終了07:44:55.484624 JSTをprivate descriptorへ保存。両queueのRO transactionによるstate/reason/receipt generationとlabel ledgerの完全行prefixを開始endpointとして保存した。restored716は開始前backlogへ既に含まれるためETAへ重複加算しない。判断: 最初の3時間経過後のendpoint読取までの遅延も分母へ含め、shared-resource待ち/defer/隔離を除外せず、窓を移動しない。09:15 PAUSED・low・通常4周期jobのまま観測する。
+
+- 2026-10-22 05:45 JST — 固定窓の約1時間中間記録。valid local R4受理増分52件、うちbounded12件（復帰分の累計完了65）、teacher新隔離0。CFはlabel増分0・input-limit新隔離8件で、開始118→126件保留。teacher pendingは開始2317→2329（ready2327/leased2）、通常workset admission64件を含むため、queue純減やadmissionをラベル数/Raw平均流入へ読み替えない。窓内に追加clean formal3回を確認し、failure0/human_waitなし/dirty0を維持。判断: 中間値で容量合否/ETAを確定せず、開始窓を変えず07:44:55以降の終端まで継続する。
