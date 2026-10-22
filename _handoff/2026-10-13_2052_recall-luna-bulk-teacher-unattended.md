@@ -178,6 +178,11 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] bounded4：最終exact SHA必須CI後、安全配備し元隔離履歴を保持したquarantine_reviewで新keyへ復元。CF over-cap保留、drift=false・human_waitなし・failure0・clean formal2回を確認。
 - [x] bounded5：その後の固定3時間でlabel/隔離/bounded labelとlabel-only ETAを集計し、純差分・保全・未完理由を報告。
 
+### 2026-10-22 再起動後catalog障害の復旧
+- [x] reboot1：8561ff94をレビューし、再採番回帰と既存改変検出を検証する。
+- [ ] reboot2：配備packageだけをpushしexact SHA必須CI通過後、周期job自然idle・既存lease内でsourceをpinして配備する。
+- [ ] reboot3：running servicesのdrift=false、通常成功によるhuman_wait解除/failure0、clean formal成功2回と復旧後label増分を確認する。
+
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
 - [x] 5-2 ingest：`apple-watch-band-material-tradeoffs/bandwork-leather-band-experience.md` が `missing_create_frontmatter` で失敗している（2026-10-13 19:45、1/3 回目）。再試行で直っていなければ原因を見る。
@@ -1585,3 +1590,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-22 08:01 JST — 所有するobserverを専用stopで終了し、08:01:16.267259 JSTのobserver_finished/stopped_by_owner=true・exit0・該当process不存在を確認。停止理由は固定3時間・通常回復・最終保全/MCP照合の完了であり、通常worker/supervisorへのsignal0。観測events10601560bytes、初期/復元/rehearsal/失敗/終端の全private証跡、復帰候補worktreeと稼働attested checkout、無関係untrackedを保持。今回の追加production module/supervisor/monitor/daemon/cache/repair層0。配備累計の純差分は78a9b114比+452行（本体+192、tests+260、Plan除外）。境界計算・view来歴と評価除外・既存復帰遷移のappend型拡張・先行CF/lane原因修正と回帰保護のための追加である。pushは配備package7ae860c3まで、実行ログcommitはlocalのみ。
 
 - 2026-10-22 08:01 JST — bounded0〜5/quarantine3〜4の今回作業を終了。残る復帰teacher640件は窓終端の通常ready backlogであり、再隔離/削除していない。対応Luna参照0のためbounded一致率は未測定、評価/gate除外を維持。学習用ラベルは保持するが、実学習反映は既存local cohort受入待ちで、旧native cohortへの混入やgate緩和をしない。CF over-cap136件は上限不適格、timeout5件は既存最大試行到達として保留。既存before-approval7/invalid49の保留、品質昇格/7日無人継続も未完のまま明示し、Plan全体をcompleteにはしない。
+
+- 2026-10-22 22:47 JST — 再起動障害の復旧を開始。所有者報告ではMacが21:49・22:12 JSTに再起動し、22:03以後のlocal-dailyがCatalogError「catalog checkpoint requires repair」で連続失敗。配備7ae860c3、fresh initでworker_failure_count125・human_wait=distillation_run_repeated_failureを確認。catalogはsize/inode/mtime/ctime不変でst_dev16777229→16777230。persisted検証は通るがCatalogTextCacheの実行内baselineが旧deviceを保持する原因を8561ff94で修正済み。判断: 既存未push Plan履歴を保持し、origin/main上へ修正2fileだけをcherry-pickした配備候補を使う。台帳・checkpoint・authority・split・lockは手編集しない。LedgerIndexは実cycleで失敗した場合だけ対処する。自動Luna/cloudなし、09:15 PAUSED・low・12000-byte cap・全gateを保持し、追加許可を求めず指定受入まで進める。
+
+- 2026-10-22 22:49 JST — 8561ff94をレビューして採用。検証済みcheckpointから現在mountのst_devだけを実行内baselineへ再束縛し、size/inode/mtime/ctime・checkpoint/bridge一致検査を保持する。旧7ae860c3実archiveで新回帰を実行し、本番と同じcandidate-state不変分岐のCatalogErrorを再現。新packageはcatalog関連72tests全成功、Ruff/whitespace成功。配備候補ed973e522ef3c0c1f4fbc37573211814c4f86f70はorigin/main直上の2fileのみ（+37/−2、純増35行、本体11/test24）で、CI用branchだけpush。追加cause修正不要と判断し、LedgerIndexには未変更。グラフcoverageは対象5fileでmetadata_match、実sourceも照合した。配備後の証拠収集は既存private helperの単発読取を再使用し、常駐monitorを増設しない。
