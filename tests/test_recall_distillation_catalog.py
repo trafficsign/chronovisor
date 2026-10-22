@@ -2010,6 +2010,30 @@ def test_catalog_and_candidate_index_survive_mount_renumbering_without_rebuild(
     assert catalog.catalog_path(tmp_path).read_bytes() == database_bytes
 
 
+def test_text_cache_survives_mount_renumbering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.recall import recall_file_identity as file_identity
+
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(tmp_path, "save-codex-one.md", "a" * 24, [
+        _message("assistant", "first answer", "2026-08-01T00:00:01Z"),
+    ])
+    catalog.advance(raw_dir, tmp_path, 4096)
+    with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
+        answer_hash = connection.execute(
+            "SELECT semantic_sha256 FROM events WHERE role='assistant'"
+        ).fetchone()[0]
+    checkpoint_path = catalog._catalog_checkpoint_path(tmp_path)
+    saved = store.read_sealed(checkpoint_path)
+    saved["file_state"]["st_dev"] += 2
+    _rewrite_checkpoint(checkpoint_path, saved)
+    monkeypatch.setattr(file_identity.sys, "platform", "darwin")
+    monkeypatch.setattr(file_identity, "birthtime_ns", lambda _value: 0)
+
+    assert catalog.CatalogTextCache(raw_dir, tmp_path).get(answer_hash) == "first answer"
+
+
 def test_catalog_watermark_distinguishes_concurrent_append_from_invalid_schema(
     tmp_path: Path,
 ) -> None:

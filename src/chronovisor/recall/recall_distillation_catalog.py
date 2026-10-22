@@ -2620,6 +2620,17 @@ def texts(
     return _resolve_rows(raw_dir, cast(Iterable[Mapping[str, Any]], rows.values()))
 
 
+def _mounted_catalog_file_state(
+    root: Path, checkpoint: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Rebind a verified checkpoint to the mount-assigned st_dev for exact checks."""
+
+    current = _index_file_state(catalog_path(root))
+    if current is None:
+        raise CatalogError("catalog checkpoint requires repair")
+    return {**checkpoint["file_state"], "st_dev": current["st_dev"]}
+
+
 class CatalogTextCache(Mapping[str, str]):
     """Resolve only requested catalog text and retain it for the current run."""
 
@@ -2629,7 +2640,7 @@ class CatalogTextCache(Mapping[str, str]):
             raise CatalogError("catalog checkpoint requires repair")
         self._raw_dir = raw_dir
         self._root = root
-        self._catalog_file_state = checkpoint["file_state"]
+        self._catalog_file_state = _mounted_catalog_file_state(root, checkpoint)
         self._checkpoint_file_state = _index_file_state(_catalog_checkpoint_path(root))
         self._candidate_state_file_state = _index_file_state(
             _candidate_catalog_state_path(root)
@@ -2660,7 +2671,7 @@ class CatalogTextCache(Mapping[str, str]):
             or checkpoint["event_rowid"] != self._event_rowid
         ):
             raise CatalogError("catalog checkpoint requires repair")
-        self._catalog_file_state = checkpoint["file_state"]
+        self._catalog_file_state = _mounted_catalog_file_state(self._root, checkpoint)
         self._checkpoint_file_state = checkpoint_state
         self._candidate_state_file_state = candidate_state
 
