@@ -180,7 +180,7 @@ created_at: 2026-10-13T20:52:29+09:00
 
 ### 2026-10-22 再起動後catalog障害の復旧
 - [x] reboot1：8561ff94をレビューし、再採番回帰と既存改変検出を検証する。
-- [ ] reboot2：配備packageだけをpushしexact SHA必須CI通過後、周期job自然idle・既存lease内でsourceをpinして配備する。
+- [x] reboot2：配備packageだけをpushしexact SHA必須CI通過後、周期job自然idle・既存lease内でsourceをpinして配備する。
 - [ ] reboot3：running servicesのdrift=false、通常成功によるhuman_wait解除/failure0、clean formal成功2回と復旧後label増分を確認する。
 
 ### Phase 5：別件の修理
@@ -1602,3 +1602,5 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-22 23:29 JST — CI状態不整合を解決。attempt別jobs APIと各check-run個別APIではQuality全3jobがcompleted/success、frozen-quality-gates完了23:11:14 JSTを確認。3workflowに必要な7jobすべてを個別check-runのhead_sha=ed973e52・GitHub Actions app・run binding・completed/successで照合し、原本をprivate保存した。Quality/PythonのJUnit各7521cases/errors0/failures0/skipped4も一致。判断: 全必須jobの正式successを受入し、古い集計表示に依存するprivate配備helperだけを7jobの直接再照合へ変更する。検査省略・gate緩和・本体変更は0。不要になった同SHA再確認run3本はcancelを要求し応答を保存、元成功run/履歴は保持する。周期4jobの自然idle保留と既存ingest/distillation leaseによる安全配備を開始する。
 
 - 2026-10-22 23:52 JST — 安全境界の途中記録。local-daily/search-label-drain/convergeの3jobを自然idle・既存distillation lease内で保留済み。待機中に通常周期で起動したLibrarianだけが稼働を継続し、子processの更新を確認した。共有モデルでは通常ingestも進行し、worker_failure_count0を維持。判断: 実行中処理を中断せずLibrarianの自然終了を待ち、4job保留後に既存ingest/distillation両leaseで切替する。sourceはまだ7ae860c3、supervisor/model serverへのsignal0、09:15 PAUSEDのまま。
+
+- 2026-10-22 23:58 JST — ed973e522ef3c0c1f4fbc37573211814c4f86f70を安全配備。4周期jobを自然idleで保留し、既存ingest/distillation両lease内で2026-10-22T23:55:37.628727+09:00にsourceを切替。origin/mainへ配備2fileのcommitだけをpushし、local Plan履歴を保持。attested checkout・常駐5archive/direct_url・通常launchd dailyの実archiveを同SHAへ照合。2026-10-22T23:56:55.005668+09:00に同じ4scheduleを復帰し自分のmaintenanceだけ解除。HTTP actual/expected同SHA・drift=false・human_waitなしを確認。supervisor/model serverへのsignal0。正式成功2回と新sourceのvalid label増分は未受入のまま通常cycleを観測する。
