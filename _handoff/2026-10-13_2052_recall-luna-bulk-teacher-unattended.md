@@ -181,7 +181,7 @@ created_at: 2026-10-13T20:52:29+09:00
 ### 2026-10-22 再起動後catalog障害の復旧
 - [x] reboot1：8561ff94をレビューし、再採番回帰と既存改変検出を検証する。
 - [x] reboot2：配備packageだけをpushしexact SHA必須CI通過後、周期job自然idle・既存lease内でsourceをpinして配備する。
-- [ ] reboot3：running servicesのdrift=false、通常成功によるhuman_wait解除/failure0、clean formal成功2回と復旧後label増分を確認する。
+- [x] reboot3：running servicesのdrift=false、通常成功によるhuman_wait解除/failure0、clean formal成功2回と復旧後label増分を確認する。
 
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
@@ -210,7 +210,8 @@ created_at: 2026-10-13T20:52:29+09:00
 - 配備後、runtime の drift が false であること。
 
 ## ブロッカー（発生時のみ）
-- 現在（2026-10-22 08:01 JST）：7ae860c3の安全配備・716件の正規復帰・正式成功2回・固定3時間測定・保全を完了。141 labels（bounded23）・teacher新隔離0/CF新隔離17、1127.990件/日、残2304件の条件付ETA6.329843日（764件/日流入、復帰716を含む）。窓中のCF timeoutによるfailure1は07:58台に通常CF個別結果で0へ戻り、最終HTTP/fresh MCPはhuman_waitなし・drift=false。元隔離/historyは保持、専用observerは正常終了。復帰分は窓終端76完了/640ready、CF over-cap136とtimeout5は保留。boundedの評価実測・既存local cohortへの実学習反映、既存品質gate/7日継続は未完でPlan状態runningを維持する。
+- 現在（2026-10-23 01:01 JST受入）：再起動後catalog障害の復旧reboot1〜3を完了。ed973e522ef3c0c1f4fbc37573211814c4f86f70を配備し、clean formal成功は10/23 00:29:07.994032・00:54:29.439720 JST。配備後valid local R4 label47件、failure0・human_waitなし・dirty0・drift=false、常駐5archiveと通常dailyは同SHA。今回の復旧範囲に未完なし。品質昇格・7日継続など既存の別条件は未完のためPlan全体はrunningを維持する。
+- 前回の固定窓（2026-10-22 08:01 JST）：7ae860c3の安全配備・716件の正規復帰・正式成功2回・固定3時間測定・保全を完了。141 labels（bounded23）・teacher新隔離0/CF新隔離17、1127.990件/日、残2304件の条件付ETA6.329843日（764件/日流入、復帰716を含む）。窓中のCF timeoutによるfailure1は07:58台に通常CF個別結果で0へ戻り、最終HTTP/fresh MCPはhuman_waitなし・drift=false。元隔離/historyは保持、専用observerは正常終了。復帰分は窓終端76完了/640ready、CF over-cap136とtimeout5は保留。boundedの評価実測・既存local cohortへの実学習反映、既存品質gate/7日継続は未完でPlan状態runningを維持する。
 - 前回測定（2026-10-20 16:15 JST、今回の固定費修正前）：Qwen low、通常1.009750時間でvalid local R4受入12件=285.219件/日、平均流入763.714差−478.495/日、平日1052.4差−767.181/日でbacklog増、teacher ETAなし。検索は新規/再open0・純減1235.949件/日、残27557件、同率条件22.296日。検索終了後も現検証費用が続く条件では本線の楽観上限620.771件/日（平均差−142.943）で解消ETAなし。旧0ab4d779の3時間352件/日と旧1324.9件/日projectionは比較資料として保持し、現容量へ転用しない。実model生成slotの理論容量と本線calendar容量を分け、同sealed300のoffは231/300一致77.00%・終端失敗0・model中央値13.448秒/p9018.629秒だが、model時間ゼロの本線上限808.444件/日でも平日量と約20%余裕を満たせないため不採用。全gate・独立性条件を保持し、lowのまま増加を受け入れる。
 - 現local profileはchronological_split_incomplete/data_wait、verified_truth0・paired_denominator0・rollout0%。独立性、教師/各class/control/probe/CFのfloor、split/holdoutを保持し、旧native認証の合格項目を新local profileへ引き継がず、既存Luna集合へlocal labelを混ぜない。旧sourceでR4未発行の既知1件は、当時のsealed pending証明がなく跨sourceで帰属させられないためlabel/completionを保持して未完とする。旧0ab4d779の定常44 labelsは全44件R4受入済みで、新180013eeの通常1時間窓は12/12件を受入済み。
 - 旧native認証の履歴（現localの受入とは別）：2026-10-18 22:55 JSTの364811daによるsealed baselineと対応snapshotでは、固定split・時系列・assignment・row integrityとblind repeatが通過し、残るgate理由はcounterfactual_pairs_below_floorだけ。CFは5/100、post-cutoff・distinct judge・両順序一致・既存validator・selected-only条件は維持する。適格workの実完了時刻によるrolling24hは4組/日（今回の通常formal観測を含む）へ減り、同率が続く場合の100組到達参考日は2026-11-11 JSTへ更新した。一方、18:51の復帰以後4.059時間の適格増分は0で、2回の正式成功も適格CF増とは一致しない。短時間の0件を持続的な0件/日とは断定せず、11/11も確定日・自動運転の保証率にはしない。この旧native条件の予測を現local運転の所要時間へ転用しない。固定blind repeatは200組・stable161・unstable39・Wilson下限0.74455956で既存floor100/0.60を維持。
@@ -1608,3 +1609,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-23 00:14 JST — 新ed973e52のvalid local R4 label18件を確認し、label生成再開を受入。常駐5serviceのcatalog実byteもgit objectと完全一致。HTTP drift=false/human_waitなし、worker_failure_count0、runtime/Semantic/ingest health正常。source切替に伴う既存materializationの通常更新はdirty132558→86230→70013へ進行。判断: cold更新/deferredを正式成功へ数えず、sealed formal progress・同時clean state・同cycle新source R4が一致する2回を引き続き待つ。LedgerIndexの実失敗はなく追加変更しない。設定はsource以外不変でlow・09:15 PAUSEDを維持。
 
 - 2026-10-23 00:31 JST — ed973e52のclean formal成功1回目を2026-10-23 00:29:07.994032 JSTに受入。sealed formal progress・同じ成功時刻のcapture_only/error空/failure0 sealed state・同cycleの新source valid local R4が一致。valid R4累計26件、dirty0、HTTP drift=false/human_waitなし。旧sourceの成功やcold/deferred timestampは含めていない。2回目の成立を待ち、LedgerIndexは実失敗がないため未変更のままとする。
+
+- 2026-10-23 01:04 JST — reboot3を受入。新sourceのclean formal成功2回は00:29:07.994032・00:54:29.439720 JSTで、sealed formal progress・同時clean state・同cycleのvalid local R4を一致確認。01:01:32.093532 JST終端のvalid R4は47件、全47件を配備後label ledgerへ結合し、reasoning.level=lowを確認。worker_failure_count0・error空・dirty0、配備後64回のHTTP標本は同SHA/drift=false/human_waitなし。新規stdioのMCP init/statusも成功し同SHA/drift=false・human_waitなし、LAN HTTPSは証明書検証付き401で認証境界を確認。判断: 2回の正式受入が成立したため今回の復旧を完了し、通常周期運転へ委ねる。LedgerIndexの実失敗は発生せず、指定どおり変更しない。
+
+- 2026-10-23 01:04 JST — 最終保全を受入。既存immutable67471件のbyte変更0、台帳5本の既存prefix不変。source以外のconfig、authority bytes/identity、supervisor/model serverのPID/起動、4周期schedule/plistを保持し、09:15 PAUSED・low・自動Luna/cloud禁止を維持。常駐5archive/direct_urlとcatalog実byteは配備SHAへ一致。純差分は7ae860c3比2file・+37/−2=純増35行（本体11、回帰test24）、新production module/監視層0。cleanかつopen file/process参照0の今回専用candidate worktreeだけを除去し、commit/branch・全private証跡・稼働attested checkout・無関係な作業を保持した。判断: package以外の実行ログはlocal commitだけとし、今回の復旧に未完なし。既存品質gate/7日継続は今回の2成功で代替できないため、Plan全体をcompleteにはしない。
