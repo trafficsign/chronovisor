@@ -9748,14 +9748,21 @@ def _teacher_payload(
         "candidate": candidate_text,
     }
     base_payload_bytes = max_input_bytes + 1 if oversized else len(canonical_json.canonical_json_bytes_strict(payload))
-    context_limit = max_input_bytes
+    # The local batch route caps the wrapped worker input, not this payload, so
+    # every local item (bounded or not) must leave room for the batch wrapper.
+    # ponytail: an unbounded item whose context-free payload is within the
+    # overhead of the cap still cannot fit (0 live items on 2026-11-06).
+    context_limit = (
+        min(max_input_bytes, 12_000) - LOCAL_TEACHER_BATCH_OVERHEAD_BYTES
+        if bounded_view
+        else max_input_bytes
+    )
     if base_payload_bytes > max_input_bytes:
         bounded = _bounded_teacher_input(payload, max_input_bytes) if bounded_view else None
         if bounded is None:
             return None
         payload = bounded
         base_payload_bytes = len(canonical_json.canonical_json_bytes_strict(payload))
-        context_limit = min(max_input_bytes, 12_000) - LOCAL_TEACHER_BATCH_OVERHEAD_BYTES
     if not include_context:
         return payload
     accepted_context: list[str] = []

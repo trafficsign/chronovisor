@@ -43,6 +43,23 @@ def test_bounded_teacher_view_preserves_student_windows_and_fills_worker_cap(
     assert 11_994 <= len(canonical_json.canonical_json_bytes_strict(worker_input)) <= 12_000
 
 
+def test_local_in_cap_context_fill_leaves_room_for_the_batch_wrapper() -> None:
+    # Regression: in-cap context filled the payload to 12,000 bytes, so the
+    # wrapped worker input was ~12,015 bytes and the head item never fit.
+    rally = {"rally_id": "rally", "query_sha256": "query", "context_refs": [
+        {"semantic_sha256": "ctx"} for _ in range(4_000)
+    ]}
+    candidate = {"candidate_id": "candidate", "text_sha256": "candidate"}
+    texts = {"query": "question", "candidate": "answer", "ctx": "x"}
+    payload = distill._teacher_payload(rally, candidate, texts, max_input_bytes=12_000, bounded_view=True)
+    assert payload is not None
+    worker_input = {"schema": "chronovisor.recall-distill-teacher-batch.v1", "candidates": [{
+        "candidate_id": "candidate", "rally_id": "rally", "query": payload["query"],
+        "context": payload["context"], "evidence": payload["candidate"],
+    }]}
+    assert 11_990 <= len(canonical_json.canonical_json_bytes_strict(worker_input)) <= 12_000
+
+
 def test_bounded_teacher_view_preserves_in_cap_payload_and_context_drop_order() -> None:
     rally = {"rally_id": "rally", "query_sha256": "query", "context_refs": [
         {"semantic_sha256": name} for name in ("old", "middle", "new")
