@@ -91,6 +91,8 @@ _MAX_METADATA_ITEMS = 32
 # useful repair batch.  The input cap also prevents an unbounded read-only
 # lookup from becoming a memory/CPU denial of service.
 _MAX_COMPLETION_LOOKUP_IDS = 16_384
+# claim() binds eligibility as one JSON array, so only memory bounds it.
+_MAX_CLAIM_ELIGIBLE_IDS = 1_048_576
 _SQLITE_BIND_CHUNK = 500
 _IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}\Z")
 _REFERENCE_RE = re.compile(
@@ -1811,7 +1813,7 @@ class DistillationWorkset:
                     "eligible_work_ids must be iterable"
                 ) from exc
             for raw_work_id in iterator:
-                if len(normalized) >= _MAX_COMPLETION_LOOKUP_IDS:
+                if len(normalized) >= _MAX_CLAIM_ELIGIBLE_IDS:
                     raise DistillationWorksetError(
                         "eligible_work_ids exceeds bounded lookup limit"
                     )
@@ -1837,8 +1839,10 @@ class DistillationWorkset:
         eligible_clause = ""
         eligible_params: tuple[str, ...] = ()
         if eligible_ids is not None:
-            eligible_clause = " AND work_id IN (" + ", ".join("?" for _ in eligible_ids) + ")"
-            eligible_params = eligible_ids
+            # One JSON parameter, not one bind per id: the whole corpus can exceed
+            # SQLite's variable limit while FIFO must stay global across it.
+            eligible_clause = " AND work_id IN (SELECT value FROM json_each(?))"
+            eligible_params = (json.dumps(eligible_ids),)
         claims: list[WorkClaim] = []
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
