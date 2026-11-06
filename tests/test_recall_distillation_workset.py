@@ -657,6 +657,33 @@ def test_claim_with_eligible_work_ids_filters_ready_rows_atomically(
     assert workset.status("label")["leased"] == 1
 
 
+def test_claim_with_corpus_sized_eligible_set_keeps_priority_fifo_and_reclaim(
+    tmp_path: Path,
+) -> None:
+    # Regression: tasks.keys() outgrew the old 16,384 per-id bind cap.
+    now = [100.0]
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3", clock=lambda: now[0])
+    workset.advance(
+        [
+            _item("first"),
+            _item("urgent", priority=1),
+            _item("second"),
+            _item("excluded", priority=9),
+        ],
+        1,
+    )
+    eligible = [f"absent-{index}" for index in range(20_000)]
+    eligible += ["second", "first", "urgent"]
+
+    claims = workset.claim("label", 3, "worker", 1, eligible_work_ids=eligible)
+
+    assert [claim.work_id for claim in claims] == ["urgent", "first", "second"]
+    now[0] = 102.0
+    reclaimed = workset.claim("label", 1, "worker-2", 60, eligible_work_ids=eligible)
+    assert [(claim.work_id, claim.attempt) for claim in reclaimed] == [("urgent", 2)]
+    assert workset.status("label")["ready"] == 3
+
+
 def test_claim_with_no_eligible_work_does_not_claim_or_reclaim_other_rows(
     tmp_path: Path,
 ) -> None:
