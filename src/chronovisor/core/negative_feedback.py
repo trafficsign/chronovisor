@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -45,7 +46,9 @@ PERSISTENT_CACHE_FILE = (
 )
 PERSISTENT_CACHE_SCHEMA = 2
 GOLDEN_CACHE_FILE = CHRONOVISOR_ROOT / "runtime" / "search" / "golden-feedback-cache.json"
-GOLDEN_CACHE_SCHEMA = 1
+# Schema 2 stores the source stat signature and tail-append state beside the
+# content hash, so a hook process can skip re-hashing an unchanged golden file.
+GOLDEN_CACHE_SCHEMA = 2
 
 
 @dataclass(frozen=True)
@@ -507,6 +510,139 @@ def _decode_golden_entries(
     return negatives, protections
 
 
+def _golden_source_key(
+    source_sha256: str,
+    signature: tuple[int, ...],
+    *,
+    ends_with_newline: bool,
+) -> dict[str, object]:
+    return {
+        "source_sha256": source_sha256,
+        # The full stat signature (dev, ino, size, mtime_ns, ctime_ns) is stored
+        # so an in-place rewrite that keeps the first four still moves ctime_ns.
+        "signature": list(signature),
+        "size": signature[2],
+        "ends_with_newline": ends_with_newline,
+        "schema_version": GOLDEN_CACHE_SCHEMA,
+        "tokenizer_version": TOKENIZER_VERSION,
+    }
+
+
+def _read_golden_cache(cache_file: Path) -> dict[str, Any] | None:
+    """Load a self-consistent sidecar envelope; currency is the caller's call."""
+
+    try:
+        cached = json.loads(cache_file.read_bytes())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cached, dict):
+        return None
+    source = cached.get("source")
+    payload = cached.get("entries_json")
+    if not isinstance(source, dict) or not isinstance(payload, str):
+        return None
+    if cached.get("entries_sha256") != hashlib.sha256(payload.encode()).hexdigest():
+        return None
+    try:
+        values = json.loads(payload)
+    except ValueError:
+        return None
+    if not isinstance(values, list):
+        return None
+    return {"source": source, "values": values}
+
+
+def _cached_golden_source(source: Mapping[str, Any]) -> dict[str, Any] | None:
+    if (
+        source.get("schema_version") != GOLDEN_CACHE_SCHEMA
+        or source.get("tokenizer_version") != TOKENIZER_VERSION
+    ):
+        return None
+    digest = source.get("source_sha256")
+    size = source.get("size")
+    signature = source.get("signature")
+    ends = source.get("ends_with_newline")
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(char not in "0123456789abcdef" for char in digest)
+        or not isinstance(size, int)
+        or isinstance(size, bool)
+        or size < 0
+        or not isinstance(signature, list)
+        or len(signature) != 5
+        or not all(
+            isinstance(value, int) and not isinstance(value, bool)
+            for value in signature
+        )
+        or not isinstance(ends, bool)
+        or size != signature[2]
+    ):
+        return None
+    return {
+        "source_sha256": digest,
+        "size": size,
+        "signature": signature,
+        "ends_with_newline": ends,
+    }
+
+
+def _extend_golden_entries(
+    path: Path,
+    values: list[Any],
+    stored: Mapping[str, Any],
+) -> tuple[
+    tuple[list[_FeedbackEntry], list[_FeedbackEntry]] | None,
+    tuple[list[Any], str, bool] | None,
+]:
+    """Parse only the appended tail after verifying the cached prefix hash.
+
+    The cached source must end with b"\n", so the split is always a line
+    boundary: every cached line is complete and no "\r\n" can straddle it.
+    """
+
+    try:
+        with path.open("rb") as stream:
+            digest = hashlib.sha256()
+            remaining = int(stored["size"])
+            while remaining:
+                chunk = stream.read(min(1 << 20, remaining))
+                if not chunk:
+                    return None, None
+                digest.update(chunk)
+                remaining -= len(chunk)
+            if digest.hexdigest() != stored["source_sha256"]:
+                return None, None
+            tail = stream.read()
+        if not tail:
+            return None, None
+        tail_text = tail.decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None, None
+    digest.update(tail)
+    combined = [*values, *_parse_golden_entries(tail_text)]
+    try:
+        entries = _decode_golden_entries(combined)
+    except ValueError:
+        return None, None
+    return entries, (combined, digest.hexdigest(), tail.endswith(b"\n"))
+
+
+def _write_golden_cache(
+    cache_file: Path,
+    key: dict[str, object],
+    values: list[Any],
+) -> None:
+    payload = json.dumps(values, ensure_ascii=False, separators=(",", ":"))
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(cache_file, json.dumps({
+        "source": key,
+        "entries_json": payload,
+        "entries_sha256": hashlib.sha256(payload.encode()).hexdigest(),
+    }, ensure_ascii=False, separators=(",", ":")))
+    os.chmod(cache_file, 0o600)
+
+
 def _load_golden_entries() -> tuple[list[_FeedbackEntry], list[_FeedbackEntry]]:
     path = _golden_file()
     cache_file = (
@@ -520,52 +656,54 @@ def _load_golden_entries() -> tuple[list[_FeedbackEntry], list[_FeedbackEntry]]:
         with _CACHE_LOCK:
             if _GOLD_NEGATIVE_CACHE.key == _PROTECT_CACHE.key == memory_key:
                 return _GOLD_NEGATIVE_CACHE.entries, _PROTECT_CACHE.entries
-        source = path.read_bytes()
         stable = signature == _golden_signature(path)
     except OSError:
         return [], []
-    key = {
-        "source_sha256": hashlib.sha256(source).hexdigest(),
-        "schema_version": GOLDEN_CACHE_SCHEMA,
-        "tokenizer_version": TOKENIZER_VERSION,
-    }
     entries: tuple[list[_FeedbackEntry], list[_FeedbackEntry]] | None = None
+    pending: tuple[list[Any], str, bool] | None = None
     if stable:
-        try:
-            cached = json.loads(cache_file.read_bytes())
-            if isinstance(cached, dict) and cached.get("source") == key:
-                payload = cached["entries_json"]
-                if (
-                    isinstance(payload, str)
-                    and hashlib.sha256(payload.encode()).hexdigest() == cached["entries_sha256"]
-                ):
-                    entries = _decode_golden_entries(json.loads(payload))
-        except (OSError, ValueError, TypeError, KeyError):
-            pass
-    try:
-        stable = stable and signature == _golden_signature(path)
-        if not stable:
-            # Never publish or reuse a result from a concurrent source update.
-            source = path.read_bytes()
-            entries = None
-    except OSError:
-        return [], []
+        cached = _read_golden_cache(cache_file)
+        stored = None if cached is None else _cached_golden_source(cached["source"])
+        if cached is not None and stored is not None:
+            if stored["signature"] == list(signature):
+                # ponytail: unchanged-stat fast path, no source read or hash.
+                # Ceiling: an in-place rewrite that preserves size, inode,
+                # mtime_ns and ctime_ns would be missed (upgrade path: hash the
+                # source on a timer). The signature above already includes
+                # ctime_ns on top of the size/inode/mtime_ns identity.
+                try:
+                    entries = _decode_golden_entries(cached["values"])
+                except ValueError:
+                    entries = None
+            elif stored["ends_with_newline"] and signature[2] > stored["size"]:
+                entries, pending = _extend_golden_entries(
+                    path, cached["values"], stored
+                )
     if entries is None:
+        try:
+            source = path.read_bytes()
+            stable = signature == _golden_signature(path)
+            if not stable:
+                # Never publish or reuse a result from a concurrent source update.
+                source = path.read_bytes()
+        except OSError:
+            return [], []
         values = _parse_golden_entries(source.decode("utf-8"))
         entries = _decode_golden_entries(values)
-        if stable and os.environ.get("CHRONOVISOR_READ_ONLY") != "1":
-            try:
-                if signature == _golden_signature(path):
-                    payload = json.dumps(values, ensure_ascii=False, separators=(",", ":"))
-                    cache_file.parent.mkdir(parents=True, exist_ok=True)
-                    atomic_write(cache_file, json.dumps({
-                        "source": key,
-                        "entries_json": payload,
-                        "entries_sha256": hashlib.sha256(payload.encode()).hexdigest(),
-                    }, ensure_ascii=False, separators=(",", ":")))
-                    os.chmod(cache_file, 0o600)
-            except OSError:
-                pass
+        pending = (values, hashlib.sha256(source).hexdigest(), source.endswith(b"\n"))
+    if pending is not None and os.environ.get("CHRONOVISOR_READ_ONLY") != "1":
+        values, source_sha256, ends_with_newline = pending
+        try:
+            if stable and signature == _golden_signature(path):
+                _write_golden_cache(
+                    cache_file,
+                    _golden_source_key(
+                        source_sha256, signature, ends_with_newline=ends_with_newline
+                    ),
+                    values,
+                )
+        except OSError:
+            pass
     try:
         if stable and signature != _golden_signature(path):
             return _decode_golden_entries(
