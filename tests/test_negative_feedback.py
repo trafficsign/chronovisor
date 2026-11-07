@@ -747,3 +747,105 @@ def test_golden_update_during_parse_is_not_published(feedback_file, tmp_path, mo
     assert negative_feedback._load_reviewed_train_negatives()[0].tokens == {"gamma"}
     assert not golden.with_suffix(".tokens.json").exists()
     assert negative_feedback._GOLD_NEGATIVE_CACHE.key is None
+
+
+@pytest.fixture
+def incremental_feedback(tmp_path, monkeypatch):
+    feedback = tmp_path / "feedback.jsonl"
+    cache = tmp_path / "feedback-cache.json"
+    monkeypatch.delenv("CHRONOVISOR_READ_ONLY", raising=False)
+    monkeypatch.setattr(negative_feedback, "FEEDBACK_FILE_OVERRIDE", None)
+    monkeypatch.setattr(negative_feedback, "PERSISTENT_CACHE_FILE", cache)
+    monkeypatch.setattr(negative_feedback, "_feedback_file", lambda: feedback)
+    monkeypatch.setattr(negative_feedback, "_CACHE", negative_feedback._Cache())
+    row = {"kind": "false-positive", "frontier_reviewed": True,
+           "prompt": "recall cache", "expected_pages": ["page"]}
+    write_feedback(feedback, [row])
+    scans = []
+
+    def validate(path, **_kwargs):
+        scans.append(True)
+        return active_feedback_rows(path)
+
+    monkeypatch.setattr(negative_feedback, "trusted_negative_feedback_rows", validate)
+    expected = negative_feedback._load_entries(CONFIG)
+    assert len(expected) == 1
+    return feedback, cache, scans, expected
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_feedback_non_target_append_reuses_prefix(incremental_feedback, monkeypatch, read_only):
+    feedback, cache, scans, expected = incremental_feedback
+    before = cache.read_bytes(), cache.stat().st_mtime_ns
+    if read_only:
+        monkeypatch.setenv("CHRONOVISOR_READ_ONLY", "1")
+    for _ in range(2):
+        with feedback.open("a") as stream:
+            stream.write('{"kind":"missed_candidate","prompt":"irrelevant"}\n')
+        monkeypatch.setattr(negative_feedback, "_CACHE", negative_feedback._Cache())
+        assert negative_feedback._load_entries(CONFIG) == expected
+        assert len(scans) == 1
+    if read_only:
+        assert (cache.read_bytes(), cache.stat().st_mtime_ns) == before
+    else:
+        payload = json.loads(cache.read_text())
+        assert payload["source"]["size"] == feedback.stat().st_size
+        assert payload["source_sha256"] == hashlib.sha256(feedback.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("kind", ["page_ignored", "contradiction", "strong-contradiction",
+                                  "false-positive", "page_ignored_retracted"])
+def test_feedback_target_append_fully_validates(incremental_feedback, monkeypatch, kind):
+    feedback, _cache, scans, _expected = incremental_feedback
+    with feedback.open("a") as stream:
+        stream.write(json.dumps({"kind": kind}) + "\n")
+    monkeypatch.setattr(negative_feedback, "_CACHE", negative_feedback._Cache())
+    negative_feedback._load_entries(CONFIG)
+    assert len(scans) == 2
+
+
+def test_feedback_same_stat_prefix_tamper_fully_validates(incremental_feedback, monkeypatch):
+    import os
+
+    feedback, _cache, scans, _expected = incremental_feedback
+    stat = feedback.stat()
+    feedback.write_bytes(feedback.read_bytes().replace(b'recall cache', b'recall other'))
+    os.utime(feedback, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    # Even the in-process key must notice preserved size/mtime tampering.
+    result = negative_feedback._load_entries(CONFIG)
+    assert len(scans) == 2
+    assert result[0].tokens == negative_feedback._tokenize("recall other")
+    monkeypatch.setattr(negative_feedback, "_CACHE", negative_feedback._Cache())
+    assert negative_feedback._load_entries(CONFIG) == result
+    assert len(scans) == 2
+
+
+@pytest.mark.parametrize("tail", ['{"kind":"missed_candidate"}', '{broken}\n', '[]\n'])
+def test_feedback_ambiguous_tail_fully_validates(incremental_feedback, monkeypatch, tail):
+    feedback, _cache, scans, _expected = incremental_feedback
+    with feedback.open("a") as stream:
+        stream.write(tail)
+    monkeypatch.setattr(negative_feedback, "_CACHE", negative_feedback._Cache())
+    negative_feedback._load_entries(CONFIG)
+    assert len(scans) == 2
+
+
+def test_feedback_concurrent_rebuild_does_not_publish(incremental_feedback, monkeypatch):
+    feedback, cache, scans, _expected = incremental_feedback
+    before = cache.read_bytes()
+    with feedback.open("a") as stream:
+        stream.write('{"kind":"page_ignored"}\n')
+    original = negative_feedback.trusted_negative_feedback_rows
+
+    def racing_validation(path, **kwargs):
+        rows = original(path, **kwargs)
+        with path.open("a") as stream:
+            stream.write('{"kind":"page_ignored_retracted"}\n')
+        return rows
+
+    monkeypatch.setattr(negative_feedback, "trusted_negative_feedback_rows", racing_validation)
+    monkeypatch.setattr(negative_feedback, "_CACHE", negative_feedback._Cache())
+    negative_feedback._load_entries(CONFIG)
+    assert len(scans) == 2
+    assert cache.read_bytes() == before
+    assert negative_feedback._CACHE.key is None

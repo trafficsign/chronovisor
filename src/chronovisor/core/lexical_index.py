@@ -115,6 +115,7 @@ class LexicalIndex:
         self._refresh_interval = max(0.0, refresh_interval_seconds)
         self._connection: sqlite3.Connection | None = None
         self._persistent = False
+        self._dirty = False
         self._last_scan = 0.0
         self._lock = threading.RLock()
         self._snapshot_generation: int | None = None
@@ -148,11 +149,12 @@ class LexicalIndex:
                 timeout=5.0,
                 check_same_thread=False,
             )
-            os.chmod(self.path, 0o600)
+            if self.path.stat().st_mode & 0o777 != 0o600:
+                os.chmod(self.path, 0o600)
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA synchronous=NORMAL")
             connection.execute("PRAGMA busy_timeout=5000")
-        self._initialize(connection)
+        self._dirty = self._initialize(connection) or self._dirty
         self._connection = connection
         self._persistent = persistent
         self._last_scan = 0.0
@@ -160,18 +162,34 @@ class LexicalIndex:
 
     def close(self) -> None:
         """Checkpoint and close the disposable projection deterministically."""
+        from chronovisor.core.page_mutation import _reentrant_exclusive_lock
 
-        with self._lock:
+        publication_lock = (
+            nullcontext()
+            if os.environ.get("CHRONOVISOR_READ_ONLY") == "1"
+            else _reentrant_exclusive_lock(self.path.parent / "writer.lock")
+        )
+        with publication_lock, self._lock:
             if self._connection is None:
                 return
-            if self._persistent:
+            if self._persistent and self._dirty:
                 self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                self._refresh_quick_check(self._connection)
+                self._dirty = False
             self._connection.close()
             self._connection = None
 
     @staticmethod
-    def _initialize(connection: sqlite3.Connection) -> None:
+    def _initialize(connection: sqlite3.Connection) -> bool:
         current = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        objects = {str(row[0]) for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'index')"
+        )}
+        if current == SCHEMA_VERSION and {
+            "pages", "anchors", "terms", "postings", "projection_meta",
+            "anchors_page_idx", "postings_page_idx",
+        }.issubset(objects) and not objects.intersection({"documents", "term_stats"}):
+            return False
         legacy_projection = bool(
             connection.execute(
                 """
@@ -226,7 +244,7 @@ class LexicalIndex:
                 """
             )
         connection.executescript(
-            f"""
+            """
             CREATE TABLE IF NOT EXISTS pages (
                 page_id TEXT PRIMARY KEY,
                 mtime_ns INTEGER NOT NULL,
@@ -269,12 +287,14 @@ class LexicalIndex:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
-            PRAGMA user_version={SCHEMA_VERSION};
             """
         )
+        if current != SCHEMA_VERSION:
+            connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         connection.commit()
         if legacy_projection:
             connection.execute("VACUUM")
+        return True
 
     def _writer_snapshot(
         self,
@@ -433,6 +453,17 @@ class LexicalIndex:
             os.chmod(path, 0o600)
         except OSError:
             pass
+
+    def _refresh_quick_check(self, connection: sqlite3.Connection) -> None:
+        """Publish integrity evidence at the writer boundary, never for racing bytes."""
+        if os.environ.get("CHRONOVISOR_READ_ONLY") == "1":
+            return
+        checked = self._quick_check_key()
+        if checked is None:
+            return
+        self._run_quick_check(connection)
+        if checked[1] == self._quick_check_signature():
+            self._save_quick_check(checked[0])
 
     @staticmethod
     def _run_quick_check(connection: sqlite3.Connection) -> None:
@@ -675,6 +706,8 @@ class LexicalIndex:
                         "INSERT OR REPLACE INTO projection_meta(key, value) VALUES (?, ?)",
                         ("generation", str(writer_generation or "")),
                     )
+                self._dirty = True
+                self._refresh_quick_check(connection)
                 self._snapshot_generation = writer_generation
                 self._snapshot_available = True
                 self._snapshot_error = None
@@ -888,6 +921,8 @@ class LexicalIndex:
                     "INSERT OR REPLACE INTO projection_meta(key, value) VALUES (?, ?)",
                     ("generation", str(writer_generation or "")),
                 )
+            self._dirty = True
+            self._refresh_quick_check(connection)
             self._snapshot_generation = writer_generation
             self._snapshot_available = True
             self._snapshot_error = None

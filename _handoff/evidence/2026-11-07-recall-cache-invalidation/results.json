@@ -1,0 +1,91 @@
+{
+  "baseline_before_caches": "2f5cb8be",
+  "baseline_before_incremental": "7e9d4fee",
+  "sequence": {
+    "prime": [
+      {
+        "entries": 1,
+        "primed": true
+      }
+    ],
+    "append": [
+      {
+        "appended": 1
+      }
+    ],
+    "open": [
+      {
+        "wal_unchanged": true
+      }
+    ],
+    "search": [
+      {
+        "cache_hits": {
+          "feedback": true,
+          "golden": true,
+          "lexical": true
+        },
+        "stages_ms": {
+          "bm25_load": 0,
+          "bm25_snapshot": 338,
+          "bm25_anchor": 131,
+          "bm25_query": 25,
+          "context_seed": 1,
+          "graph": 50,
+          "usage": 0,
+          "negative_feedback": 197,
+          "filter": 0
+        },
+        "total_ms": 770.895,
+        "results": 20,
+        "strategy": "bm25+graph"
+      },
+      {
+        "cache_hits": {
+          "feedback": true,
+          "golden": true,
+          "lexical": true
+        },
+        "stages_ms": {
+          "bm25_load": 0,
+          "bm25_snapshot": 345,
+          "bm25_anchor": 1,
+          "bm25_query": 26,
+          "context_seed": 0,
+          "graph": 47,
+          "usage": 0,
+          "negative_feedback": 195,
+          "filter": 0
+        },
+        "total_ms": 644.7,
+        "results": 20,
+        "strategy": "bm25+graph"
+      }
+    ],
+    "feedback-equivalence": [
+      {
+        "queries": 501,
+        "entries": 1,
+        "mismatches": 0
+      }
+    ]
+  },
+  "equivalence": {
+    "real_recall_queries": 500,
+    "reviewed_negative_queries": 31,
+    "nonempty_negative_traces": 31,
+    "mismatches": {
+      "trace": 0,
+      "penalties": 0,
+      "bm25_order_scores": 0,
+      "anchor_order_scores": 0,
+      "penalized_order_scores": 0
+    }
+  },
+  "tests": {
+    "passed": 200,
+    "architecture_baseline": "passed",
+    "ruff": "passed",
+    "mypy": "passed"
+  }
+}
