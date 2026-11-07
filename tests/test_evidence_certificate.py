@@ -134,3 +134,21 @@ def test_default_certificate_ledger_uses_its_exact_sidecar(
 
     assert lock.exists()
     assert not (tmp_path / "evidence-certificate-ledger.lock").exists()
+
+
+def test_supporting_span_excludes_frontmatter_in_snippet_and_bad_page(
+    tmp_path, monkeypatch
+):
+    page = tmp_path / "page.md"
+    page.write_text("---\ntitle: GPU inference\n---\nBody without overlap.\n")
+    monkeypatch.setattr(evidence_certificate, "find_page", lambda _id: page)
+    snippet = (
+        "---\ntitle: GPU inference\nnotes: "
+        + "metadata " * 100
+        + "\n---\nThe GPU inference uses MPS."
+    )
+    span, *_ = evidence_certificate.supporting_span("page", "GPU inference", snippet)
+    assert span == "The GPU inference uses MPS."
+    page.write_text("---\ntitle: [broken YAML\nGPU inference: metadata\n")
+    span, *_ = evidence_certificate.supporting_span("page", "GPU inference")
+    assert span == ""

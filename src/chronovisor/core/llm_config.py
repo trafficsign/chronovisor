@@ -703,9 +703,9 @@ def build_llm_runtime(
     rerank: dict[str, RerankRoute] = {}
     local_controls: dict[str, LocalRuntimeControl] = {}
     for role_name, role in config.roles.items():
+        provider = config.providers[role.provider_id]
         backend = backends[role.provider_id]
         if role.capability is RoleCapability.GENERATION:
-            provider = config.providers[role.provider_id]
             if provider.profile is not None:
                 protocol = provider.profile.protocol.value
                 endpoint_sha256 = hashlib.sha256(

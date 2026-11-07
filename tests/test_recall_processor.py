@@ -1200,3 +1200,43 @@ def test_remote_raw_high_egress_denial_runs_no_backend_or_ollama_control(
     }
     assert metadata["escalation_status"] == "blocked_by_primary"
     assert backend_calls == []
+
+
+def test_primary_judge_sends_body_before_bounding(monkeypatch):
+    from dataclasses import replace
+
+    seen = []
+
+    def judge(_kind, payload, **_kwargs):
+        seen.append(payload["evidence"][0]["span"])
+        return {
+            "verdicts": [
+                {
+                    "page_id": "page-a",
+                    "decision": "pass",
+                    "confidence": 0.99,
+                    "reason": "answer-bearing",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(recall_processor.reranker_client, "decision_judge", judge)
+    monkeypatch.setattr(
+        recall_processor, "load_active_rubric", lambda: {"rubric_text": "rubric"}
+    )
+    cert = replace(
+        certificate("page-a"),
+        supporting_span="---\ntitle: "
+        + "metadata " * 100
+        + "\n---\nInference uses MPS.",
+    )
+    _, status, _ = recall_processor._run_certificate_judge(
+        "Which GPU?",
+        [cert],
+        runtime_role=recall_processor.PRIMARY_JUDGE_RUNTIME_ROLE,
+        timeout_ms=900,
+        keep_alive="24h",
+        resolved_decision_route=primary_decision_route(),
+    )
+    assert status == "ok"
+    assert seen == ["Inference uses MPS."]

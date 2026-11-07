@@ -36,9 +36,12 @@ from chronovisor.core import (
     runtime_config,
 )
 from chronovisor.core.decision_mlx import (
+    UTILITY_BAND,
+    DecisionMLXBackend,
     decision_fingerprint,
     decision_route,
     uses_decision_judge,
+    utility_verdict,
 )
 from chronovisor.core.durable_state import (
     DurableStateError,
@@ -468,7 +471,9 @@ class _WorkerCounterfactual:
             try:
                 return self._compare(payload, turn)
             except DistillationDeferred as exc:
-                if exc.failure_class in {
+                # Only the decision-judge path releases capacity waits unattempted;
+                # the generation path keeps the pre-decision attempt accounting.
+                if self.judge_call is not None and exc.failure_class in {
                     "capacity_unavailable",
                     "resource_busy",
                     "foreground_preempted",
@@ -501,9 +506,11 @@ class _WorkerCounterfactual:
         )
         a0 = str(arm0.get("answer") or "")
         try:
-            # A second answer cannot shrink either blind order's utility input.
+            # A second answer cannot shrink either scoring input.
             _check_worker_input_size(
-                {**base, "answer_a": a0, "answer_b": "", "blind_order": "a_first"},
+                {**base, "evidence": payload.get("a0_evidence", []), "answer": a0}
+                if self.judge_call is not None
+                else {**base, "answer_a": a0, "answer_b": "", "blind_order": "a_first"},
                 max_input_bytes=self.max_input_bytes,
             )
         except DistillationError:
@@ -522,6 +529,8 @@ class _WorkerCounterfactual:
             model_turn=model_turn,
         )
         a1 = str(arm1.get("answer") or "")
+        if self.judge_call is not None:
+            return self._pointwise_result(base, payload, a0, a1, arm0)
         first_a = (
             int.from_bytes(
                 hashlib.sha256(
@@ -540,11 +549,6 @@ class _WorkerCounterfactual:
                 "answer_b": a1 if a_first else a0,
                 "blind_order": "a_first" if a_first else "b_first",
             }
-            if self.judge_call is not None:
-                result = dict(self.judge_call(payload))
-                result["_route_identity"] = dict(self.judge_route)
-                result["_model_digest"] = self.judge_digest
-                return result
             return _worker_call(
                 "utility",
                 "recall.distill.utility_judge",
@@ -571,11 +575,6 @@ class _WorkerCounterfactual:
         first_verdict = decoded_choice(first, first_a)
         second_verdict = decoded_choice(second, not first_a)
         # The strict preference question answers no in both orders for a tie.
-        if (
-            self.judge_call is not None
-            and first.get("blind_choice") == second.get("blind_choice") == "b"
-        ):
-            first_verdict = second_verdict = "neutral"
         distinct_models = arm0.get("_model_digest") != first.get("_model_digest")
         verdict = (
             first_verdict
@@ -592,9 +591,69 @@ class _WorkerCounterfactual:
                 "a1_first" if first_a else "a0_first",
             ],
             "blind_choices": [first.get("blind_choice"), second.get("blind_choice")],
-            "order_agreement": distinct_models
-            and first_verdict == second_verdict
-            and (self.judge_call is None or first_verdict != "uncertain"),
+            # dc3f70d4: on the generation path two agreeing orders count even
+            # when both answered "uncertain". The pointwise path returns above.
+            "order_agreement": distinct_models and first_verdict == second_verdict,
+            "generator_route_identity": arm0.get("_route_identity", {}),
+            "generator_model_digest": arm0.get("_model_digest", ""),
+            "judge_route_identity": first.get("_route_identity", {}),
+            "judge_model_digest": first.get("_model_digest", ""),
+        }
+
+    def _pointwise_result(
+        self,
+        base: Mapping[str, Any],
+        payload: Mapping[str, Any],
+        a0: str,
+        a1: str,
+        arm0: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Score each arm once against its own evidence and band the delta.
+
+        A single-answer readout has no A/B order to blind, so the ledger keeps the
+        two order slots as the actual scoring order (a0, then a1) and stores the
+        per-arm logits in ``blind_choices`` in that same order. Order agreement is
+        true by construction; the label is trusted only when the generator and the
+        judge are distinct models.
+        """
+
+        judge_call = self.judge_call
+        assert judge_call is not None
+
+        def score(evidence: Any, answer: str) -> tuple[float, Mapping[str, Any]]:
+            request = {**base, "evidence": evidence, "answer": answer}
+            _check_worker_input_size(request, max_input_bytes=self.max_input_bytes)
+            result = dict(judge_call(request))
+            result["_route_identity"] = dict(self.judge_route)
+            result["_model_digest"] = self.judge_digest
+            logit = result.get("logit")
+            if (
+                isinstance(logit, bool)
+                or not isinstance(logit, int | float)
+                or not math.isfinite(float(logit))
+            ):
+                raise DistillationDeferred(
+                    "utility judge returned an invalid logit",
+                    failure_class="capacity_unavailable",
+                )
+            return float(logit), result
+
+        a0_logit, first = score(payload.get("a0_evidence", []), a0)
+        a1_logit, _ = score(payload.get("a1_evidence", []), a1)
+        delta = a1_logit - a0_logit
+        distinct_models = arm0.get("_model_digest") != first.get("_model_digest")
+        return {
+            "verdict": utility_verdict(delta) if distinct_models else "uncertain",
+            "reason": f"startlux pointwise d={delta:.6f} band={UTILITY_BAND}",
+            "a0_sha256": hashlib.sha256(a0.encode()).hexdigest(),
+            "a1_sha256": hashlib.sha256(a1.encode()).hexdigest(),
+            "blind_orders": ["a0_first", "a1_first"],
+            "blind_choices": [a0_logit, a1_logit],
+            "order_agreement": distinct_models,
+            "utility_d": delta,
+            "utility_band": UTILITY_BAND,
+            "a0_logit": a0_logit,
+            "a1_logit": a1_logit,
             "generator_route_identity": arm0.get("_route_identity", {}),
             "generator_model_digest": arm0.get("_model_digest", ""),
             "judge_route_identity": first.get("_route_identity", {}),
@@ -793,6 +852,8 @@ def _local_counterfactual_routes() -> tuple[
 def _decision_utility_judge(
     payload: Mapping[str, Any], *, timeout_ms: int
 ) -> Mapping[str, Any]:
+    """One pointwise utility call: one answer scored against its own evidence."""
+
     from chronovisor.core import reranker_client
     from chronovisor.core.runtime_config import load_reranker_config
 
@@ -802,14 +863,20 @@ def _decision_utility_judge(
         if isinstance(context, list)
         else str(context or "")
     )
+    evidence = payload.get("evidence")
+    evidence_rows = (
+        [value for value in evidence if isinstance(value, str)]
+        if isinstance(evidence, list)
+        else []
+    )
     try:
         return reranker_client.decision_judge(
             "utility",
             {
                 "query": str(payload.get("query") or ""),
                 "context": context_text,
-                "answer_a": str(payload.get("answer_a") or ""),
-                "answer_b": str(payload.get("answer_b") or ""),
+                "evidence": evidence_rows,
+                "answer": str(payload.get("answer") or ""),
             },
             role="recall.distill.utility_judge",
             config=load_reranker_config(),
@@ -7162,6 +7229,25 @@ def _configured_local_reasoning_binding(
     )
 
 
+def _counterfactual_identity_matches_judge(row: Mapping[str, Any]) -> bool:
+    """Accept the legacy generation-judge revision and the StartLux decision one.
+
+    Each revision is only valid together with a judge route of the matching
+    kind: generation rows keep the pre-StartLux identity, decision-judge rows
+    carry the StartLux identity and a local-decision judge route.
+    """
+
+    revision = str(row.get("identity_revision") or "")
+    judge = row.get("judge_route_identity")
+    if not isinstance(judge, Mapping) or row.get("request_revision") != revision:
+        return False
+    if revision == LEGACY_COUNTERFACTUAL_IDENTITY_REVISION:
+        return judge.get("provider") not in (None, "", DecisionMLXBackend.provider)
+    if revision == COUNTERFACTUAL_IDENTITY_REVISION:
+        return judge.get("provider") == DecisionMLXBackend.provider
+    return False
+
+
 def _materialized_row_integrity(
     row: Mapping[str, Any],
     *,
@@ -7269,8 +7355,7 @@ def _materialized_row_integrity(
             == _training_assignment_authority(
                 {"revision": ASSIGNMENT_REVISION, "kind": "counterfactual"}
             )
-            and row.get("identity_revision") == "local-blind-counterfactual-v1"
-            and row.get("request_revision") == "local-blind-counterfactual-v1"
+            and _counterfactual_identity_matches_judge(row)
             and (
                 (
                     row.get("profile") in LOCAL_TEACHER_PROFILES
@@ -16352,6 +16437,20 @@ def _compare_and_commit_counterfactual(
             "a1_sha256": response.get("a1_sha256", ""),
             "blind_orders": response.get("blind_orders", []),
             "order_agreement": response.get("order_agreement", False),
+            # Pointwise decision-judge rows keep their raw evidence: the two
+            # order slots are the actual scoring order and the per-arm logits,
+            # delta, and band make the verdict reproducible.
+            **(
+                {
+                    "blind_choices": response.get("blind_choices", []),
+                    "a0_logit": response.get("a0_logit"),
+                    "a1_logit": response.get("a1_logit"),
+                    "utility_d": response.get("utility_d"),
+                    "utility_band": response.get("utility_band"),
+                }
+                if "utility_d" in response
+                else {}
+            ),
             "generator_route_identity": response.get("generator_route_identity", {}),
             "generator_model_digest": response.get("generator_model_digest", ""),
             "judge_route_identity": response.get("judge_route_identity", {}),

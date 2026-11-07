@@ -265,6 +265,14 @@ def _finite_unit(value: object) -> bool:
     )
 
 
+def _finite_score(value: object) -> bool:
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
+
+
 def _validate_judge_response(kind: str, response: Mapping[str, Any]) -> None:
     if kind == JUDGE_ANSWER_AXES:
         scores = response.get("scores")
@@ -296,12 +304,8 @@ def _validate_judge_response(kind: str, response: Mapping[str, Any]) -> None:
             page_ids.add(verdict["page_id"])
         return
     if kind == JUDGE_UTILITY:
-        if response.get("blind_choice") not in {
-            "a",
-            "b",
-            "tie",
-            "uncertain",
-        } or not _finite_unit(response.get("confidence")):
+        # Pointwise: one answer, one logit P(answer is grounded and answers).
+        if not _finite_score(response.get("logit")):
             raise RerankerServiceUnavailable("invalid_response")
         return
     raise RerankerServiceUnavailable("invalid_response")

@@ -20,6 +20,7 @@ from chronovisor.core import reranker_client
 from chronovisor.core.durable_state import atomic_write_bytes
 from chronovisor.core.runtime_config import load_reranker_config
 from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.recall.evidence_certificate import certificate_judge_span
 from chronovisor.recall.recall_processor import PRIMARY_JUDGE_RUNTIME_ROLE
 from chronovisor.recall.rubric_calibration import load_active_rubric
 
@@ -143,6 +144,13 @@ def main(argv: list[str] | None = None) -> int:
         ) != row.get("page_id_sha256"):
             skipped.append({"case_id": case_id, "reason": "input_hash_mismatch"})
             continue
+        try:
+            evidence = certificate_judge_span(source["evidence_span"])
+        except ValueError:
+            evidence = ""
+        if not evidence:
+            skipped.append({"case_id": case_id, "reason": "evidence_body_unavailable"})
+            continue
         response = reranker_client.decision_judge(
             "certificate",
             {
@@ -152,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
                 "evidence": [
                     {
                         "page_id": source["page_id"],
-                        "span": source["evidence_span"][:180],
+                        "span": evidence,
                     }
                 ],
             },
