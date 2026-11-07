@@ -470,7 +470,9 @@ class _WorkerCounterfactual:
             try:
                 return self._compare(payload, turn)
             except DistillationDeferred as exc:
-                if exc.failure_class in {
+                # Only the decision-judge path releases capacity waits unattempted;
+                # the generation path keeps the pre-decision attempt accounting.
+                if self.judge_call is not None and exc.failure_class in {
                     "capacity_unavailable",
                     "resource_busy",
                     "foreground_preempted",
