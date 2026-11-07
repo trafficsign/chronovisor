@@ -652,6 +652,24 @@ def test_decisive_primary_does_not_touch_escalation_backend(
         recall_processor.reranker_client, "decision_judge", decision_judge
     )
     monkeypatch.setattr(
+        recall_processor,
+        "load_reranker_config",
+        lambda: SimpleNamespace(service=SimpleNamespace(timeout_ms=1000)),
+    )
+    monkeypatch.setattr(
+        ollama,
+        "runtime_generation_routes",
+        lambda _roles: (
+            ollama.RuntimeGenerationRoute(
+                recall_processor.ESCALATION_JUDGE_RUNTIME_ROLE,
+                "remote-test",
+                "judge-escalation-remote",
+                "remote",
+                True,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
         ollama,
         "runtime_structured_chat",
         lambda *_args, **_kwargs: pytest.fail("escalation backend touched"),
