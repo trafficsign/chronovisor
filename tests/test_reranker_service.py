@@ -432,16 +432,107 @@ def test_service_rejects_duplicate_page_ids(tmp_path, monkeypatch) -> None:
         state.handle({"method": "rerank", "query": "query", "page_ids": ["a", "a"]})
 
 
-def test_any_local_provider_takes_the_accelerator_lease(tmp_path, monkeypatch) -> None:
+def test_decision_route_leases_the_accelerator_per_candidate(
+    tmp_path, monkeypatch
+) -> None:
     cfg = config(tmp_path / "reranker.sock")
-    state, _status, _backend, _runtime, controls = prepare_state(
+    state, _status, backend, _runtime, controls = prepare_state(
         tmp_path, monkeypatch, cfg, provider="local-decision"
     )
 
-    payload = state.handle({"method": "rerank", "query": "q", "page_ids": ["a", "b"]})
+    payload = state.handle({"method": "rerank", "query": "q", "page_ids": ["b", "a"]})
 
-    assert payload["status"] == "ok"
-    assert controls == {"lease": 1, "activity": 1}
+    assert [row["raw_score"] for row in payload["scores"]] == [0.9, 0.1]
+    assert [request.candidates for request in backend.requests] == [("b",), ("a",)]
+    assert controls == {"lease": 2, "activity": 2}
+
+
+def test_recall_filter_scores_exact_texts_with_the_recall_question(tmp_path, monkeypatch) -> None:
+    cfg = config(tmp_path / "reranker.sock")
+    state, _status, backend, _runtime, controls = prepare_state(
+        tmp_path, monkeypatch, cfg, provider="local-decision"
+    )
+
+    payload = state.handle(
+        {"method": "recall_filter", "query": "now", "context": "before", "texts": ["a1", "b2"]}
+    )
+
+    assert payload["status"] == "ok" and payload["scores"] == [0.1, 0.9]
+    assert [request.candidates for request in backend.requests] == [("a1",), ("b2",)]
+    assert {
+        (request.query, request.context, request.purpose)
+        for request in backend.requests
+    } == {("now", "before", "recall_filter")}
+    assert controls == {"lease": 2, "activity": 2}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"method": "recall_filter", "query": "q", "texts": []},
+        {"method": "recall_filter", "query": " ", "texts": ["a"]},
+        {"method": "recall_filter", "query": "q", "texts": [""]},
+        {"method": "recall_filter", "query": "q", "context": 1, "texts": ["a"]},
+        {"method": "recall_filter", "query": "q", "texts": ["a"] * 17},
+    ],
+)
+def test_recall_filter_rejects_malformed_requests_before_backend(
+    tmp_path, monkeypatch, payload
+) -> None:
+    cfg = config(tmp_path / "reranker.sock")
+    state, _status, backend, _runtime, _controls = prepare_state(
+        tmp_path, monkeypatch, cfg, provider="local-decision"
+    )
+
+    with pytest.raises(ValueError):
+        state.handle(payload)
+    assert backend.requests == []
+
+
+def test_recall_filter_refuses_a_relevance_reranker_route(tmp_path, monkeypatch) -> None:
+    cfg = config(tmp_path / "reranker.sock")
+    state, _status, backend, _runtime, _controls = prepare_state(
+        tmp_path, monkeypatch, cfg
+    )
+
+    with pytest.raises(ValueError):
+        state.handle({"method": "recall_filter", "query": "q", "texts": ["a"]})
+    assert backend.requests == []
+
+
+def test_recall_filter_client_round_trip_and_contract(tmp_path, monkeypatch) -> None:
+    socket_path = Path("/tmp") / f"chronovisor-filter-test-{os.getpid()}.sock"
+    socket_path.unlink(missing_ok=True)
+    cfg = config(socket_path)
+    state, _status, _backend, _runtime, _controls = prepare_state(
+        tmp_path, monkeypatch, cfg, provider="local-decision"
+    )
+    server = reranker_service._Server(str(socket_path), reranker_service._Handler)
+    server.state = state
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(reranker_client, "_BREAKER_FAILURES", 0)
+    monkeypatch.setattr(reranker_client, "_BREAKER_OPEN_UNTIL", 0.0)
+    try:
+        scores = reranker_client.recall_filter("q", "", ["b", "a"], config=cfg)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(1)
+        socket_path.unlink(missing_ok=True)
+
+    assert scores == [0.9, 0.1]
+
+    route = state._route_payload()
+    for response in (
+        {"status": "ok", "route": {**route, "model": "drifted"}, "scores": [1.0]},
+        {"status": "ok", "route": route, "scores": [1.0, 2.0]},
+        {"status": "ok", "route": route, "scores": [float("nan")]},
+        {"status": "ok", "route": route, "scores": [True]},
+    ):
+        monkeypatch.setattr(reranker_client, "request", lambda *_a, r=response, **_k: r)
+        with pytest.raises(reranker_client.RerankerServiceUnavailable):
+            reranker_client.recall_filter("q", "", ["a"], config=cfg)
 
 
 def test_remote_default_denial_has_no_backend_or_local_controls(

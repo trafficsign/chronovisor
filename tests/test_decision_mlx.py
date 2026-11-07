@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+import types
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -9,7 +11,6 @@ from chronovisor.core.decision_mlx import (
     DecisionMLXBackend,
     DecisionModelConfig,
     decision_state,
-    micro_batches,
 )
 from chronovisor.core.llm_config import (
     LLMConfigError,
@@ -49,7 +50,7 @@ def test_config_builds_a_decision_backend_with_defaults() -> None:
     assert backend.config.path.endswith("/m") and not backend.config.path.startswith(
         "~"
     )
-    assert (backend.config.max_chars, backend.config.batch_tokens) == (700, 8192)
+    assert backend.config.max_chars == 400
 
 
 @pytest.mark.parametrize(
@@ -58,6 +59,7 @@ def test_config_builds_a_decision_backend_with_defaults() -> None:
         {"kind": "local-decision-mlx"},
         {"kind": "local-decision-mlx", "path": ""},
         {"kind": "local-decision-mlx", "path": "/m", "device": "mps"},
+        {"kind": "local-decision-mlx", "path": "/m", "batch_tokens": 8192},
     ],
 )
 def test_config_rejects_incomplete_or_unknown_decision_keys(provider) -> None:
@@ -65,35 +67,65 @@ def test_config_rejects_incomplete_or_unknown_decision_keys(provider) -> None:
         parse_llm_config(_config(provider))
 
 
-def test_states_follow_the_purpose_and_cut_the_candidate() -> None:
+def test_states_follow_the_purpose_and_cut_every_section() -> None:
     search = RerankRequest("dict sort", ("abcdef",), SOURCE)
-    gate = RerankRequest(
+    recall = RerankRequest(
         "and by value?",
         ("abcdef",),
         SOURCE,
-        purpose="recall_gate",
+        purpose="recall_filter",
         context="sort a dict",
     )
 
     assert decision_state(search, "abcdef", 3) == (
-        "Search query:\ndict sort\n\nCandidate memory:\nabc"
+        "Search query:\ndic\n\nCandidate memory:\nabc"
     )
-    assert decision_state(gate, "abcdef", 3) == (
+    assert decision_state(recall, "abcdef", 20) == (
         "Preceding user turn:\nsort a dict\n\nCurrent user turn:\nand by value?"
-        "\n\nCandidate memory:\nabc"
+        "\n\nCandidate memory:\nabcdef"
     )
-    no_context = RerankRequest("q", ("x",), SOURCE, purpose="recall_gate")
+    assert decision_state(recall, "abcdef", 3) == (
+        "Preceding user turn:\nsor\n\nCurrent user turn:\nand\n\nCandidate memory:\nabc"
+    )
+    no_context = RerankRequest("q", ("x",), SOURCE, purpose="recall_filter")
     assert decision_state(no_context, "x", 9).startswith("Current user turn:\nq")
 
 
-def test_micro_batches_respect_the_padded_token_budget() -> None:
-    groups = micro_batches([5, 100, 6, 50], budget=100)
+def test_readout_is_the_package_read_out_per_state(monkeypatch) -> None:
+    backend = DecisionMLXBackend(DecisionModelConfig(path="/m"))
+    prompts: list[str] = []
 
-    assert sorted(i for g in groups for i in g) == [0, 1, 2, 3]
-    lengths = [5, 100, 6, 50]
-    assert all(
-        len(g) * max(lengths[i] for i in g) <= 100 or len(g) == 1 for g in groups
-    )
+    class Engine:
+        tokenizer = None
+
+        def _readout(self, prompt, letters):
+            prompts.append(prompt)
+            # option A = yes = "true", B = no = "false" (the package's noul layout)
+            return [3.0, 1.0] if "good" in prompt else [0.0, 2.0]
+
+    class Folder:
+        def temperature(self, kind):
+            assert kind == "noul"
+            return 2.0
+
+    backend._engine, backend._folder, backend._letters = Engine(), Folder(), [7, 8, 9]
+    # The package is a service-only dependency; its prompt helpers are faked here
+    # and the real read-out is checked against the package on the model itself.
+    prompt_module = types.ModuleType("startlux_decide.prompt")
+    prompt_module.from_systemone = lambda state, spec: {
+        "state": state,
+        "q": spec["instructions"],
+        "options": [{"id": "true"}, {"id": "false"}],
+    }
+    prompt_module.messages = lambda row: f"{row['state']}|{row['q']}"
+    prompt_module.plain_prompt = lambda _tokenizer, text: text
+    monkeypatch.setitem(sys.modules, "startlux_decide", types.ModuleType("startlux_decide"))
+    monkeypatch.setitem(sys.modules, "startlux_decide.prompt", prompt_module)
+
+    scores = backend._readout(["good one", "bad one"], "Q?")
+
+    assert scores == [1.0, -1.0]
+    assert len(prompts) == 2 and "good one" in prompts[0] and "Q?" in prompts[0]
 
 
 def test_rerank_orders_by_score_on_the_owner_thread(monkeypatch) -> None:

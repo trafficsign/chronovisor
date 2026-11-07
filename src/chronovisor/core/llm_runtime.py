@@ -314,7 +314,7 @@ class RerankRequest:
     timeout_ms: int | None = None
     candidate_sources: tuple[SourceDataClassification, ...] | None = None
     # Decision-model backends phrase the question by purpose ("search" or
-    # "recall_gate"); context is the preceding user turn for the recall gate.
+    # "recall_filter"); context is the preceding user turn for the recall filter.
     # Cross-encoder backends ignore both.
     purpose: str = "search"
     context: str = field(default="", repr=False)

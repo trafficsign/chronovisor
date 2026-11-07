@@ -6,10 +6,10 @@ logit P(yes) = (z_yes - z_no) / T, so ``apply_reranker_scores`` orders by it unc
 feed it to heuristics calibrated on BGE.
 
 Prompts, letters, temperatures and the model loader (with its bidirectional self-check) are the ``startlux_decide``
-package's own. The package's MLX engine reads one prompt per forward; ``_readout`` reads a micro-batch per forward
-instead (right padding, key-padding mask in the full-attention layers, each row read at its own last token). Batch
-size 1 is identical to the package; larger batches differ by bf16 noise only. Every MLX call runs on the package's
-single owner thread (MLX streams belong to the thread that made them).
+package's own, and so is the forward: one prompt per forward, exactly as the package reads it. Batching was measured
+and dropped: on Apple GPUs this model is compute-bound, so a padded batch is no faster than the same prompts one by one
+(4B: 10 search candidates ~2 s either way). Every MLX call runs on the package's single owner thread (MLX streams
+belong to the thread that made them).
 """
 
 from __future__ import annotations
@@ -27,11 +27,11 @@ from chronovisor.core.llm_runtime import (
 )
 
 SEARCH_PURPOSE = "search"
-RECALL_GATE_PURPOSE = "recall_gate"
+RECALL_FILTER_PURPOSE = "recall_filter"
 QUESTIONS = {
     SEARCH_PURPOSE: "Is this memory relevant to the search query?",
-    # Wording frozen with the recall-gate threshold (laya run3 dev fit, strict_en).
-    RECALL_GATE_PURPOSE: (
+    # Wording frozen with the recall-filter threshold (laya run3 dev fit, strict_en).
+    RECALL_FILTER_PURPOSE: (
         "Does the candidate memory contain information that would help the assistant respond to the "
         "current user turn, considering the preceding user turn? Topic or keyword overlap alone does "
         "not count."
@@ -42,34 +42,27 @@ QUESTIONS = {
 @dataclass(frozen=True)
 class DecisionModelConfig:
     path: str
-    max_chars: int = 700
-    batch_tokens: int = 8192
+    # Search accuracy was measured at 400 (4B: MRR at parity with BGE); every section is cut to it, which also bounds
+    # the forward (cost is linear in tokens).
+    max_chars: int = 400
 
 
 def decision_state(request: RerankRequest, candidate: str, max_chars: int) -> str:
-    text = candidate[:max_chars]
-    if request.purpose == RECALL_GATE_PURPOSE:
+    # ponytail: head cuts; a long prompt whose question sits at its end loses it. The frozen eval only had turns
+    # <= 300 chars, so nothing measured favours another cut yet.
+    text, query, context = (
+        candidate[:max_chars],
+        request.query[:max_chars],
+        request.context[:max_chars],
+    )
+    if request.purpose == RECALL_FILTER_PURPOSE:
         sections = []
-        if request.context:
-            sections.append("Preceding user turn:\n" + request.context)
-        sections.append("Current user turn:\n" + request.query)
+        if context:
+            sections.append("Preceding user turn:\n" + context)
+        sections.append("Current user turn:\n" + query)
         sections.append("Candidate memory:\n" + text)
         return "\n\n".join(sections)
-    return f"Search query:\n{request.query}\n\nCandidate memory:\n{text}"
-
-
-def micro_batches(lengths: list[int], budget: int) -> list[list[int]]:
-    """Indices grouped so that each group's padded size (rows x longest row) stays within budget."""
-
-    order = sorted(range(len(lengths)), key=lambda i: lengths[i])
-    groups: list[list[int]] = []
-    for index in order:
-        group = groups[-1] if groups else None
-        if group and (len(group) + 1) * lengths[index] <= budget:
-            group.append(index)
-        else:
-            groups.append([index])
-    return groups
+    return f"Search query:\n{query}\n\nCandidate memory:\n{text}"
 
 
 class DecisionMLXBackend:
@@ -117,63 +110,23 @@ class DecisionMLXBackend:
         return RerankResult(items=tuple(items), provider=self.provider, model=model)
 
     def _readout(self, states: list[str], question: str) -> list[float]:
-        """logit P(yes) per state. Runs on the engine's owner thread."""
+        """logit P(yes) per state through the package's own one-prompt read-out. Runs on the engine's owner thread."""
 
-        import mlx.core as mx
-        import numpy as np
         from startlux_decide.prompt import from_systemone, messages, plain_prompt
 
         engine = self._engine
-        tokenizer = engine.tokenizer
-        rows = [from_systemone(state, {"type": "noul", "instructions": question}) for state in states]
-        option_ids = [option["id"] for option in rows[0]["options"]]
-        yes, no = option_ids.index("true"), option_ids.index("false")
-        letters = engine._letter_rows(self._letters[: len(option_ids)])
         temperature = float(self._folder.temperature("noul"))
-        pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-        ids = [
-            np.asarray(
-                tokenizer.encode(plain_prompt(tokenizer, messages(row)), add_special_tokens=False),
-                dtype=np.int32,
+        scores = []
+        for state in states:
+            row = from_systemone(state, {"type": "noul", "instructions": question})
+            option_ids = [option["id"] for option in row["options"]]
+            z = engine._readout(
+                plain_prompt(engine.tokenizer, messages(row)),
+                self._letters[: len(option_ids)],
             )
-            for row in rows
-        ]
-        scores = [0.0] * len(ids)
-        for group in micro_batches([len(x) for x in ids], self.config.batch_tokens):
-            width = max(len(ids[i]) for i in group)
-            tokens = np.full((len(group), width), pad, dtype=np.int32)
-            valid = np.zeros((len(group), width), dtype=bool)
-            for row, index in enumerate(group):
-                tokens[row, : len(ids[index])] = ids[index]
-                valid[row, : len(ids[index])] = True
-            h = engine.body.embed_tokens(mx.array(tokens))
-            positions = mx.array(
-                np.broadcast_to(np.arange(width, dtype=np.int32), (3, len(group), width)).copy()
+            scores.append(
+                (z[option_ids.index("true")] - z[option_ids.index("false")]) / temperature
             )
-            keep = mx.array(valid)
-            key_mask = keep[:, None, None, :]
-            first = next(layer for layer in engine.layers if not layer.is_linear)
-            shared = (
-                None
-                if first.self_attn.rotary_emb.fused_apply
-                else first.self_attn.rotary_emb(h, positions)
-            )
-            for layer in engine.layers:
-                if layer.is_linear:  # causal recurrence; pads come after every real token
-                    h = layer(h, mask=keep, cache=None)
-                else:
-                    h = layer(
-                        h,
-                        mask=key_mask,
-                        cache=None,
-                        position_ids=positions,
-                        position_embeddings=shared,
-                    )
-            h = engine.body.norm(h)
-            last = h[mx.arange(len(group)), mx.array([len(ids[i]) - 1 for i in group])]
-            z = (last.astype(mx.float32) @ letters.T).tolist()
-            for row, index in enumerate(group):
-                scores[index] = (z[row][yes] - z[row][no]) / temperature
         if any(not math.isfinite(score) for score in scores):
             raise RuntimeError("decision model returned a non-finite score")
         return scores

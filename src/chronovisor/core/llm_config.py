@@ -375,7 +375,7 @@ def _provider(provider_id: str, value: object) -> ProviderDefinition:
             reranker_config=config,
         )
     if kind == "local-decision-mlx":
-        _exact_keys(table, {"kind", "path", "max_chars", "batch_tokens"})
+        _exact_keys(table, {"kind", "path", "max_chars"})
         path = _string(table.get("path"))
         if not path or any(ord(character) < 32 for character in path):
             raise _fail()
@@ -387,9 +387,6 @@ def _provider(provider_id: str, value: object) -> ProviderDefinition:
                 path=str(Path(path).expanduser()),
                 max_chars=_positive_int(
                     table.get("max_chars"), DecisionModelConfig.max_chars
-                ),
-                batch_tokens=_positive_int(
-                    table.get("batch_tokens"), DecisionModelConfig.batch_tokens
                 ),
             ),
         )
