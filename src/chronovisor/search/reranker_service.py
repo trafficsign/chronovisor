@@ -13,6 +13,7 @@ import statistics
 import threading
 import time
 from collections import OrderedDict, deque
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,9 @@ SERVICE_STATUS_FILE = CHRONOVISOR_ROOT / "runtime" / "reranker-service-status.js
 PASSAGE_CACHE_SIZE = 512
 # A recall turn publishes at most a few items; this only bounds one filter request's work.
 RECALL_FILTER_MAX_TEXTS = 16
+# Lower number wins the next candidate turn.
+PRIORITY_RECALL = 0
+PRIORITY_SEARCH = 1
 
 
 def _candidate_evidence_from_payload(
@@ -127,6 +131,35 @@ def _percentile(values: list[float], quantile: float) -> float:
     return float(ordered[index])
 
 
+class _PriorityTurn:
+    """Give a waiting recall request the next candidate turn ahead of search."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._busy = False
+        self._waiting = {PRIORITY_RECALL: 0, PRIORITY_SEARCH: 0}
+
+    @contextlib.contextmanager
+    def slot(self, priority: int) -> Iterator[None]:
+        with self._condition:
+            self._waiting[priority] += 1
+            self._condition.notify_all()
+            try:
+                while self._busy or any(
+                    count for level, count in self._waiting.items() if level < priority
+                ):
+                    self._condition.wait()
+            finally:
+                self._waiting[priority] -= 1
+            self._busy = True
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._busy = False
+                self._condition.notify_all()
+
+
 class RerankerServiceState:
     def __init__(
         self,
@@ -139,6 +172,7 @@ class RerankerServiceState:
         self._route = self._llm_runtime.resolve_rerank(RERANK_RUNTIME_ROLE)
         self._store = index_store.get_store()
         self._work_lock = threading.Lock()
+        self._turn = _PriorityTurn()
         self._slots = threading.BoundedSemaphore(config.service.queue_size)
         self._passages: OrderedDict[
             str,
@@ -172,9 +206,10 @@ class RerankerServiceState:
 
     def _record_request(self, started: float) -> float:
         elapsed_ms = (time.perf_counter() - started) * 1_000
-        self._latencies.append(elapsed_ms)
-        self._requests += 1
-        self._last_error = ""
+        with self._work_lock:
+            self._latencies.append(elapsed_ms)
+            self._requests += 1
+            self._last_error = ""
         self._publish_status()
         return elapsed_ms
 
@@ -194,12 +229,14 @@ class RerankerServiceState:
             )
         return stack
 
-    def _score(self, request: RerankRequest) -> list[float]:
-        """Raw score per candidate, in request order.
+    def _score(self, request: RerankRequest, priority: int) -> list[float]:
+        """Raw score per candidate, in request order, in priority turn order.
 
         A decision model is compute-bound (4B: ~0.2 s a candidate, batching does
         not help), so it takes the accelerator lease one candidate at a time:
-        the semantic service then waits at most one forward, not ~2 s.
+        the semantic service then waits at most one forward, not ~2 s.  The
+        priority turn is taken before the lease so a waiting recall request can
+        take the next candidate turn ahead of a multi-candidate search rerank.
         """
 
         count = len(request.candidates)
@@ -217,7 +254,7 @@ class RerankerServiceState:
                 if request.candidate_sources is None
                 else tuple(request.candidate_sources[index] for index in group),
             )
-            with self._local_resources():
+            with self._turn.slot(priority), self._local_resources():
                 result = self._llm_runtime.rerank(RERANK_RUNTIME_ROLE, part)
             for item in result.items:
                 scores[group[item.index]] = float(item.score)
@@ -269,9 +306,7 @@ class RerankerServiceState:
                 "samples": len(latencies),
                 "total": self._requests,
                 "errors": self._errors,
-                "p50_ms": round(statistics.median(latencies), 3)
-                if latencies
-                else 0.0,
+                "p50_ms": round(statistics.median(latencies), 3) if latencies else 0.0,
                 "p95_ms": round(_percentile(latencies, 0.95), 3),
                 "max_ms": round(max(latencies), 3) if latencies else 0.0,
             },
@@ -284,21 +319,23 @@ class RerankerServiceState:
         }
 
     def _publish_status(self) -> None:
-        self._status_file.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write(
-            self._status_file,
-            json.dumps(
-                self._status_payload(),
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
+        with self._work_lock:
+            self._status_file.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write(
+                self._status_file,
+                json.dumps(
+                    self._status_payload(),
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
             )
-            + "\n",
-        )
 
     def note_error(self, exc: Exception) -> None:
-        self._errors += 1
-        self._last_error = _safe_service_error(exc)
+        with self._work_lock:
+            self._errors += 1
+            self._last_error = _safe_service_error(exc)
         self._publish_status()
 
     def _rerank(
@@ -336,19 +373,18 @@ class RerankerServiceState:
                     )
                     for page_id in page_ids
                 ]
-                raw_scores = self._score(
-                    RerankRequest(
-                        query,
-                        tuple(
-                            passage for passage, _source, _digest in passages_and_hashes
-                        ),
-                        QUERY_SOURCE,
-                        timeout_ms=self.config.service.timeout_ms,
-                        candidate_sources=tuple(
-                            source for _passage, source, _digest in passages_and_hashes
-                        ),
-                    )
-                )
+            raw_scores = self._score(
+                RerankRequest(
+                    query,
+                    tuple(passage for passage, _source, _digest in passages_and_hashes),
+                    QUERY_SOURCE,
+                    timeout_ms=self.config.service.timeout_ms,
+                    candidate_sources=tuple(
+                        source for _passage, source, _digest in passages_and_hashes
+                    ),
+                ),
+                PRIORITY_SEARCH,
+            )
         finally:
             self._slots.release()
         elapsed_ms = self._record_request(started)
@@ -372,7 +408,9 @@ class RerankerServiceState:
             "route": self._route_payload(),
         }
 
-    def _recall_filter(self, query: str, context: str, texts: list[str]) -> dict[str, Any]:
+    def _recall_filter(
+        self, query: str, context: str, texts: list[str]
+    ) -> dict[str, Any]:
         """Score exact publishable recall texts against the user turn (logit P(yes) each, in order)."""
 
         # The filter question and its threshold belong to a decision model; a
@@ -387,17 +425,17 @@ class RerankerServiceState:
             raise ServiceBusy("reranker queue is full")
         started = time.perf_counter()
         try:
-            with self._work_lock:
-                scores = self._score(
-                    RerankRequest(
-                        query,
-                        tuple(texts),
-                        QUERY_SOURCE,
-                        timeout_ms=self.config.service.timeout_ms,
-                        purpose=RECALL_FILTER_PURPOSE,
-                        context=context,
-                    )
-                )
+            scores = self._score(
+                RerankRequest(
+                    query,
+                    tuple(texts),
+                    QUERY_SOURCE,
+                    timeout_ms=self.config.service.timeout_ms,
+                    purpose=RECALL_FILTER_PURPOSE,
+                    context=context,
+                ),
+                PRIORITY_RECALL,
+            )
         finally:
             self._slots.release()
         elapsed_ms = self._record_request(started)
@@ -451,7 +489,9 @@ class RerankerServiceState:
                 or not isinstance(texts, list)
                 or not all(isinstance(text, str) and text for text in texts)
             ):
-                raise ValueError("recall_filter requires query, context and non-empty texts")
+                raise ValueError(
+                    "recall_filter requires query, context and non-empty texts"
+                )
             return self._recall_filter(query, context, texts)
         raise ValueError(f"unknown reranker method: {method}")
 
@@ -524,7 +564,7 @@ def _serve_locked(config: RerankerConfig | None) -> None:
 def _read_status() -> dict[str, Any]:
     try:
         payload = json.loads(SERVICE_STATUS_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         return {"status": "unavailable", "error": "service_unavailable"}
     return payload if isinstance(payload, dict) else {"status": "unavailable"}
 
@@ -532,7 +572,10 @@ def _read_status() -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Chronovisor reranker service")
     parser.add_argument(
-        "command", nargs="?", choices=("serve", "status", "health", "warm"), default="serve"
+        "command",
+        nargs="?",
+        choices=("serve", "status", "health", "warm"),
+        default="serve",
     )
     parser.add_argument("--json", action="store_true")
     return parser
@@ -545,6 +588,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in {"status", "health"}:
         return _main_locked(args)
     from chronovisor.core.okf_cutover import OKFStartupBlocked
+
     try:
         with okf_runtime_operation(CHRONOVISOR_ROOT):
             return _main_locked(args)
@@ -554,12 +598,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _main_locked(args: argparse.Namespace) -> int:
-    if args.command not in {"status", "health"} and not okf_startup_status(
-        CHRONOVISOR_ROOT
-    ).allowed:
-        print(
-            json.dumps({"status": "blocked", "category": "okf_startup_blocked"})
-        )
+    if (
+        args.command not in {"status", "health"}
+        and not okf_startup_status(CHRONOVISOR_ROOT).allowed
+    ):
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
         return 75
     if args.command == "serve":
         serve()

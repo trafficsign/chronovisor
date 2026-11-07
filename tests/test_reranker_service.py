@@ -4,7 +4,7 @@ import contextlib
 import json
 import os
 import threading
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
@@ -445,6 +445,92 @@ def test_decision_route_leases_the_accelerator_per_candidate(
     assert [row["raw_score"] for row in payload["scores"]] == [0.9, 0.1]
     assert [request.candidates for request in backend.requests] == [("b",), ("a",)]
     assert controls == {"lease": 2, "activity": 2}
+
+
+def test_recall_filter_takes_the_next_candidate_turn_ahead_of_search(
+    tmp_path, monkeypatch
+) -> None:
+    cfg = config(tmp_path / "reranker.sock")
+    cfg = replace(cfg, service=replace(cfg.service, queue_size=4))
+    state, _status, backend, _runtime, _controls = prepare_state(
+        tmp_path, monkeypatch, cfg, provider="local-decision"
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[tuple[str, tuple[str, ...]]] = []
+    calls_lock = threading.Lock()
+
+    def rerank(request: RerankRequest, *, model: str) -> RerankResult:
+        with calls_lock:
+            calls.append((request.purpose, tuple(request.candidates)))
+            first = len(calls) == 1
+        if first:
+            entered.set()
+            assert release.wait(timeout=2)
+        return RerankResult(
+            tuple(
+                RerankItem(index, 0.1 if candidate.startswith("a") else 0.9)
+                for index, candidate in enumerate(request.candidates)
+            ),
+            backend.provider,
+            model,
+        )
+
+    backend.rerank = rerank  # type: ignore[method-assign]
+    failures: list[BaseException] = []
+
+    def run(payload: dict[str, object]) -> None:
+        try:
+            state.handle(payload)
+        except BaseException as exc:
+            failures.append(exc)
+
+    def await_waiting(priority: int) -> None:
+        condition = state._turn._condition
+        with condition:
+            assert condition.wait_for(
+                lambda: state._turn._waiting[priority] == 1, timeout=2
+            )
+
+    first_search = threading.Thread(
+        target=run,
+        args=({"method": "rerank", "query": "first", "page_ids": ["a1", "a2"]},),
+        daemon=True,
+    )
+    second_search = threading.Thread(
+        target=run,
+        args=({"method": "rerank", "query": "second", "page_ids": ["b1", "b2"]},),
+        daemon=True,
+    )
+    recall = threading.Thread(
+        target=run,
+        args=(
+            {
+                "method": "recall_filter",
+                "query": "now",
+                "context": "before",
+                "texts": ["recall"],
+            },
+        ),
+        daemon=True,
+    )
+    first_search.start()
+    try:
+        assert entered.wait(timeout=2)
+        second_search.start()
+        await_waiting(reranker_service.PRIORITY_SEARCH)
+        recall.start()
+        await_waiting(reranker_service.PRIORITY_RECALL)
+    finally:
+        release.set()
+    threads = (first_search, second_search, recall)
+    for thread in threads:
+        thread.join(timeout=2)
+    assert not any(thread.is_alive() for thread in threads)
+    assert failures == []
+    assert calls[0] == ("search", ("a1",))
+    assert calls[1] == ("recall_filter", ("recall",))
+    assert sorted(call[1] for call in calls[2:]) == [("a2",), ("b1",), ("b2",)]
 
 
 def test_recall_filter_scores_exact_texts_with_the_recall_question(tmp_path, monkeypatch) -> None:
