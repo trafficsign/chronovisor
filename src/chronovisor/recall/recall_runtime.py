@@ -2143,8 +2143,21 @@ def state_context_for_request(request: RecallRequest, policy: RecallPolicy) -> s
 
 # Reserved after the recall filter for rendering, the receipt and the log.
 RECALL_FILTER_MARGIN_MS = 150
+# Taken from the search stages when the recall filter runs. The post-authority
+# observers fill whatever budget they are given, so without this reserve a
+# larger total budget would go to them, not to the filter (4B filter p95
+# ~1.4 s under production GPU load; the publication point used to have ~0.7 s).
+RECALL_FILTER_RESERVE_MS = 800
 # Stored previous-turn length; the decision model reads its head only.
 LAST_PROMPT_CHARS = 1_000
+
+
+def _recall_filter_reserve_ms() -> int:
+    try:
+        mode = runtime_config.load_reranker_config().recall_filter
+    except Exception:
+        return 0
+    return RECALL_FILTER_RESERVE_MS if mode != "off" else 0
 
 
 def _apply_recall_filter(
@@ -4751,7 +4764,8 @@ def _run_recall_impl(
         if _allow_timeout_fallback and perform_search
         else 0
     )
-    deadline_at = final_deadline_at - (reserve_ms / 1000.0)
+    filter_reserve_ms = _recall_filter_reserve_ms() if perform_search else 0
+    deadline_at = final_deadline_at - ((reserve_ms + filter_reserve_ms) / 1000.0)
 
     active_distillation_result = _run_active_distillation_recall(
         request,

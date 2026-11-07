@@ -212,3 +212,22 @@ def test_config_parses_the_recall_filter(tmp_path, table, mode, probability) -> 
         mode,
         probability,
     )
+
+
+def test_stage_deadline_reserves_time_for_the_filter(filter_env, monkeypatch) -> None:
+    seen: dict = {}
+
+    def stop(*_args, deadline_at, final_deadline_at, **_kwargs):
+        seen.update(gap=final_deadline_at - deadline_at)
+        return RecallResult("ok", "none", 0.0, [], [], {})
+
+    monkeypatch.setattr(recall_runtime, "_run_active_distillation_recall", stop)
+    policy = RecallPolicy(total_timeout_ms=4800, deterministic_fallback_reserve_ms=600)
+    request = RecallRequest(
+        host="claude", event="UserPromptSubmit", prompt="q", session_id="s1"
+    )
+
+    for mode, gap in (("on", 1.4), ("shadow", 1.4), ("off", 0.6)):
+        filter_env.mode = mode
+        recall_runtime._run_recall_impl(request, policy)
+        assert seen["gap"] == pytest.approx(gap)
