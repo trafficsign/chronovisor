@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -747,6 +748,187 @@ def test_golden_update_during_parse_is_not_published(feedback_file, tmp_path, mo
     assert negative_feedback._load_reviewed_train_negatives()[0].tokens == {"gamma"}
     assert not golden.with_suffix(".tokens.json").exists()
     assert negative_feedback._GOLD_NEGATIVE_CACHE.key is None
+
+
+def _golden_calls(monkeypatch):
+    calls = []
+    original = negative_feedback._parse_golden_entries
+
+    def parse(text):
+        calls.append(text)
+        return original(text)
+
+    monkeypatch.setattr(negative_feedback, "_parse_golden_entries", parse)
+    return calls, original
+
+
+def _full_golden(golden: Path, original) -> tuple[list, list]:
+    return negative_feedback._decode_golden_entries(
+        original(golden.read_text(encoding="utf-8"))
+    )
+
+
+def test_golden_sidecar_stores_stat_signature_and_append_state(
+    feedback_file, tmp_path, monkeypatch
+) -> None:
+    golden = tmp_path / "golden.jsonl"
+    write_feedback(golden, [{"query": "alpha", "reviewed": True, "negative_pages": ["no"]}])
+    _reset_golden_memory(monkeypatch)
+    negative_feedback._load_golden_entries()
+    stored = json.loads(golden.with_suffix(".tokens.json").read_text())["source"]
+    stat = golden.stat()
+    assert stored["size"] == stat.st_size
+    assert stored["signature"] == [
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+    ]
+    assert stored["ends_with_newline"] is True
+    assert stored["schema_version"] == negative_feedback.GOLDEN_CACHE_SCHEMA
+
+
+def test_golden_append_parses_only_the_tail_and_matches_a_full_parse(
+    feedback_file, tmp_path, monkeypatch
+) -> None:
+    golden = tmp_path / "golden.jsonl"
+    write_feedback(
+        golden,
+        [
+            {"query": "alpha 日本語", "reviewed": True, "expected_pages": ["yes"], "negative_pages": ["no"]},
+            {"query": "beta\u2028separator", "reviewed": True, "negative_pages": ["sep-row"]},
+        ],
+    )
+    _reset_golden_memory(monkeypatch)
+    negative_feedback._load_golden_entries()
+    appended = [
+        {"query": "delta δ", "reviewed": True, "negative_pages": ["d"]},
+        {"query": "epsilon\u2029para", "reviewed": True, "expected_pages": ["e"], "negative_pages": ["en"]},
+        {"query": "zeta", "reviewed": True, "split": "holdout", "negative_pages": ["hidden"]},
+    ]
+    blob = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in appended)
+    with golden.open("ab") as stream:
+        stream.write(blob.encode("utf-8"))
+    _reset_golden_memory(monkeypatch)
+    calls, original = _golden_calls(monkeypatch)
+    incremental = negative_feedback._load_golden_entries()
+    assert calls == [blob]
+    assert incremental == _full_golden(golden, original)
+    assert [entry.pages for entry in incremental[0]] == [("no",), ("d",)]
+    assert [entry.pages for entry in incremental[1]] == [("yes",), ("e",)]
+    stored = json.loads(golden.with_suffix(".tokens.json").read_text())["source"]
+    assert stored["size"] == golden.stat().st_size
+    assert stored["source_sha256"] == hashlib.sha256(golden.read_bytes()).hexdigest()
+
+
+def test_golden_append_falls_back_when_the_cached_source_lacks_a_newline(
+    feedback_file, tmp_path, monkeypatch
+) -> None:
+    golden = tmp_path / "golden.jsonl"
+    golden.write_bytes(
+        b'{"query":"alpha","reviewed":true,"negative_pages":["no"]}'
+    )
+    _reset_golden_memory(monkeypatch)
+    negative_feedback._load_golden_entries()
+    stored = json.loads(golden.with_suffix(".tokens.json").read_text())["source"]
+    assert stored["ends_with_newline"] is False
+    with golden.open("ab") as stream:
+        stream.write(b'\n{"query":"beta","reviewed":true,"negative_pages":["b"]}\n')
+    _reset_golden_memory(monkeypatch)
+    calls, original = _golden_calls(monkeypatch)
+    entries = negative_feedback._load_golden_entries()
+    assert calls == [golden.read_text(encoding="utf-8")]
+    assert entries == _full_golden(golden, original)
+
+
+@pytest.mark.parametrize("mutation", ["truncate", "prefix-hash", "rewrite"])
+def test_golden_append_falls_back_on_truncation_and_rewrites(
+    feedback_file, tmp_path, monkeypatch, mutation
+) -> None:
+    golden = tmp_path / "golden.jsonl"
+    write_feedback(
+        golden,
+        [
+            {"query": "alpha", "reviewed": True, "negative_pages": ["no"]},
+            {"query": "beta", "reviewed": True, "negative_pages": ["b"]},
+        ],
+    )
+    _reset_golden_memory(monkeypatch)
+    negative_feedback._load_golden_entries()
+    if mutation == "truncate":
+        golden.write_bytes(b'{"query":"alpha","reviewed":true,"negative_pages":["no"]}\n')
+    elif mutation == "prefix-hash":
+        grown = golden.read_bytes().replace(b'"alpha"', b'"alphx"', 1)
+        golden.write_bytes(grown + b'{"query":"gamma","reviewed":true,"negative_pages":["g"]}\n')
+    else:
+        write_feedback(golden, [{"query": "omega", "reviewed": True, "negative_pages": ["o"]}])
+    _reset_golden_memory(monkeypatch)
+    calls, original = _golden_calls(monkeypatch)
+    entries = negative_feedback._load_golden_entries()
+    assert calls == [golden.read_text(encoding="utf-8")]
+    assert entries == _full_golden(golden, original)
+
+
+def test_golden_append_after_a_crlf_terminated_cache_matches_a_full_parse(
+    feedback_file, tmp_path, monkeypatch
+) -> None:
+    golden = tmp_path / "golden.jsonl"
+    prefix = (
+        '{"query":"alpha","reviewed":true,"negative_pages":["no"]}\r\n'
+        '{"query":"beta","reviewed":true,"expected_pages":["y"]}\r\n'
+    )
+    golden.write_bytes(prefix.encode("utf-8"))
+    _reset_golden_memory(monkeypatch)
+    negative_feedback._load_golden_entries()
+    stored = json.loads(golden.with_suffix(".tokens.json").read_text())["source"]
+    assert stored["ends_with_newline"] is True
+    blob = '\n{"query":"gamma","reviewed":true,"negative_pages":["g"]}\n'
+    with golden.open("ab") as stream:
+        stream.write(blob.encode("utf-8"))
+    _reset_golden_memory(monkeypatch)
+    calls, original = _golden_calls(monkeypatch)
+    incremental = negative_feedback._load_golden_entries()
+    assert calls == [blob]
+    assert incremental == _full_golden(golden, original)
+
+
+def test_golden_fast_path_never_reads_or_hashes_the_source(
+    feedback_file, tmp_path, monkeypatch
+) -> None:
+    golden = tmp_path / "golden.jsonl"
+    write_feedback(golden, [{"query": "alpha", "reviewed": True, "negative_pages": ["no"]}])
+    _reset_golden_memory(monkeypatch)
+    expected = negative_feedback._load_golden_entries()
+    _reset_golden_memory(monkeypatch)
+    original = Path.read_bytes
+    reads = []
+
+    def read(path):
+        if path == golden:
+            reads.append(path)
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read)
+    monkeypatch.setattr(
+        negative_feedback, "_parse_golden_entries", lambda _text: pytest.fail("reparsed")
+    )
+    assert negative_feedback._load_golden_entries() == expected
+    assert reads == []
+
+
+def test_golden_in_memory_cache_survives_without_touching_disk(
+    feedback_file, tmp_path, monkeypatch
+) -> None:
+    golden = tmp_path / "golden.jsonl"
+    write_feedback(golden, [{"query": "alpha", "reviewed": True, "negative_pages": ["no"]}])
+    _reset_golden_memory(monkeypatch)
+    expected = negative_feedback._load_golden_entries()
+    monkeypatch.setattr(
+        negative_feedback, "_read_golden_cache", lambda _path: pytest.fail("read cache")
+    )
+    monkeypatch.setattr(Path, "read_bytes", lambda _path: pytest.fail("read source"))
+    assert negative_feedback._load_golden_entries() == expected
 
 
 @pytest.fixture
