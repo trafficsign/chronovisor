@@ -160,10 +160,8 @@ class RerankerServiceState:
 
     def _local_resources(self) -> contextlib.ExitStack:
         stack = contextlib.ExitStack()
-        if (
-            self._route.provider == "local-reranker"
-            and self._route.location is RouteLocation.LOCAL
-        ):
+        # Any on-device model shares the accelerator, whatever its provider name.
+        if self._route.location is RouteLocation.LOCAL:
             stack.enter_context(
                 accelerator_lease(timeout_ms=self.config.service.timeout_ms)
             )
@@ -280,7 +278,9 @@ class RerankerServiceState:
         try:
             with self._work_lock:
                 try:
-                    self._store.refresh()
+                    # Snapshot reload, not a corpus walk: a full refresh() costs
+                    # ~0.7 s per request and alone consumes most of the budget.
+                    self._store.refresh_if_stale()
                     candidate_store: index_store.IndexStore | None = self._store
                 except Exception:
                     candidate_store = None

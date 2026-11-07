@@ -61,16 +61,20 @@ def prepare_state(
     *,
     location: RouteLocation = RouteLocation.LOCAL,
     egress: set[tuple[str, SourceDataClass]] | None = None,
+    provider: str | None = None,
 ):
     controls = {"lease": 0, "activity": 0}
 
     class Store:
         def refresh(self) -> None:
+            raise AssertionError("per-request full refresh walks the corpus")
+
+        def refresh_if_stale(self) -> None:
             pass
 
     class Backend:
         def __init__(self) -> None:
-            self.provider = (
+            self.provider = provider or (
                 "local-reranker"
                 if location is RouteLocation.LOCAL
                 else "remote-reranker"
@@ -426,6 +430,18 @@ def test_service_rejects_duplicate_page_ids(tmp_path, monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="unique"):
         state.handle({"method": "rerank", "query": "query", "page_ids": ["a", "a"]})
+
+
+def test_any_local_provider_takes_the_accelerator_lease(tmp_path, monkeypatch) -> None:
+    cfg = config(tmp_path / "reranker.sock")
+    state, _status, _backend, _runtime, controls = prepare_state(
+        tmp_path, monkeypatch, cfg, provider="local-decision"
+    )
+
+    payload = state.handle({"method": "rerank", "query": "q", "page_ids": ["a", "b"]})
+
+    assert payload["status"] == "ok"
+    assert controls == {"lease": 1, "activity": 1}
 
 
 def test_remote_default_denial_has_no_backend_or_local_controls(
