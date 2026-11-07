@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -108,6 +108,7 @@ def trusted_negative_feedback_row_error(
     row: dict[str, Any],
     *,
     recall_log_file: Path | None = None,
+    _recall_rows: Callable[[], list[dict[str, Any]]] | None = None,
 ) -> str:
     """Return why a direct negative row lacks exact frontier authority."""
 
@@ -152,7 +153,7 @@ def trusted_negative_feedback_row_error(
     log_path = recall_log_file or RECALL_DIR / "recall-log.jsonl"
     matching = [
         value
-        for value in read_jsonl_rows(log_path)
+        for value in (_recall_rows() if _recall_rows else read_jsonl_rows(log_path))
         if value.get("decision_id") == ref
         and value.get("session_id") == snapshot.get("session_id")
         and value.get("host") == host
@@ -207,10 +208,18 @@ def trusted_negative_feedback_rows(
 ) -> list[dict[str, Any]]:
     """Return only active exact negatives; malformed retractions change nothing."""
 
+    recall_rows: list[dict[str, Any]] | None = None
+
+    def load_recall_rows() -> list[dict[str, Any]]:
+        nonlocal recall_rows
+        if recall_rows is None:
+            recall_rows = read_jsonl_rows(recall_log_file or RECALL_DIR / "recall-log.jsonl")
+        return recall_rows
+
     return [
         row
         for row in active_feedback_rows(path)
         if not trusted_negative_feedback_row_error(
-            row, recall_log_file=recall_log_file
+            row, recall_log_file=recall_log_file, _recall_rows=load_recall_rows
         )
     ]

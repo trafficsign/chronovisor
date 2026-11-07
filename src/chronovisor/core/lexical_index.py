@@ -9,6 +9,7 @@ string duplication.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import sqlite3
@@ -25,6 +26,7 @@ from chronovisor.core.canonical_document import (
     Namespace,
     validate_canonical_document,
 )
+from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.search_types import ScoredPage, tokenize
 from chronovisor.core.store import PAGES_DIR, SYSTEM_DIR, page_id_from_path
 
@@ -383,8 +385,63 @@ class LexicalIndex:
         valid, generation = cls._projection_generation_state(connection)
         return generation if valid else None
 
+    def _quick_check_signature(self) -> tuple[int, ...]:
+        values: list[int] = []
+        for path in (self.path, Path(f"{self.path}-wal")):
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                values.extend((-1,) * 5)
+            else:
+                values.extend((stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+        return tuple(values)
+
+    def _quick_check_key(self) -> tuple[dict[str, object], tuple[int, ...]] | None:
+        try:
+            signature = self._quick_check_signature()
+            digests: list[str | None] = []
+            for path in (self.path, Path(f"{self.path}-wal")):
+                try:
+                    with path.open("rb") as stream:
+                        digests.append(hashlib.file_digest(stream, "sha256").hexdigest())
+                except FileNotFoundError:
+                    digests.append(None)
+            if signature != self._quick_check_signature() or digests[0] is None:
+                return None
+        except OSError:
+            return None
+        return {
+            "schema_version": 1,
+            "sqlite_version": sqlite3.sqlite_version,
+            "db_sha256": digests[0],
+            "wal_sha256": digests[1],
+        }, signature
+
+    def _quick_check_cached(self, key: dict[str, object]) -> bool:
+        try:
+            value = json.loads(self.path.with_suffix(".quick-check.json").read_bytes())
+        except (OSError, ValueError):
+            return False
+        return bool(value == {"source": key, "quick_check": "ok"})
+
+    def _save_quick_check(self, key: dict[str, object]) -> None:
+        if os.environ.get("CHRONOVISOR_READ_ONLY") == "1":
+            return
+        try:
+            path = self.path.with_suffix(".quick-check.json")
+            atomic_write(path, json.dumps({"source": key, "quick_check": "ok"}))
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _run_quick_check(connection: sqlite3.Connection) -> None:
+        row = connection.execute("PRAGMA quick_check").fetchone()
+        if not row or row[0] != "ok":
+            raise sqlite3.DatabaseError("integrity check failed")
+
     def load_existing(self, *, expected_generation: int | None = None) -> bool:
-        """Validate an existing immutable projection without scanning or writing."""
+        """Validate an existing projection without scanning or mutating it."""
 
         with self._lock:
             signature = self._snapshot_files_signature()
@@ -424,11 +481,22 @@ class LexicalIndex:
                     check_same_thread=False,
                     timeout=0.05,
                 ) as connection:
+                    # Opening a WAL reader may create an empty WAL/SHM pair;
+                    # do that before fingerprinting, outside the read snapshot.
+                    connection.execute("PRAGMA user_version").fetchone()
+                    checked_content = self._quick_check_key()
+                    # Bind validation to one SQLite read snapshot. A writer
+                    # racing the content digest invalidates cache reuse below.
+                    connection.execute("BEGIN")
                     if int(connection.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
                         raise sqlite3.DatabaseError("schema mismatch")
-                    quick_check = connection.execute("PRAGMA quick_check").fetchone()
-                    if not quick_check or quick_check[0] != "ok":
-                        raise sqlite3.DatabaseError("integrity check failed")
+                    cached_check = bool(
+                        checked_content is not None
+                        and self._quick_check_cached(checked_content[0])
+                        and checked_content[1] == self._quick_check_signature()
+                    )
+                    if not cached_check:
+                        self._run_quick_check(connection)
                     for table in (
                         "pages",
                         "anchors",
@@ -502,12 +570,20 @@ class LexicalIndex:
                                 raise sqlite3.DatabaseError(
                                     "projection metadata mismatch"
                                 )
+                    stable_content = (
+                        checked_content is not None
+                        and checked_content[1] == self._quick_check_signature()
+                    )
+                    if cached_check and not stable_content:
+                        self._run_quick_check(connection)
             except (OSError, sqlite3.DatabaseError):
                 self._snapshot_available = False
                 self._snapshot_error = "snapshot_missing_or_invalid"
                 self._snapshot_generation = None
                 self._snapshot_signature = signature
                 return False
+            if stable_content and checked_content is not None and not cached_check:
+                self._save_quick_check(checked_content[0])
             self._snapshot_available = True
             self._snapshot_error = None
             self._snapshot_generation = projection_generation or writer_generation

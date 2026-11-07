@@ -139,6 +139,10 @@ def _is_cjk(ch: str) -> bool:
     return any(lo <= ch <= hi for lo, hi in _CJK_RANGES)
 
 
+# Bump when tokenization changes so persisted query tokens cannot outlive it.
+TOKENIZER_VERSION = 1
+
+
 def tokenize(text: str) -> list[str]:
     """Tokenize text: ASCII words + CJK character bigrams."""
     try:
