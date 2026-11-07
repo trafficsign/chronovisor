@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 
 from chronovisor.core import runtime_status
 from chronovisor.core.anthropic_adapter import compose_anthropic_adapter
+from chronovisor.core.decision_mlx import DecisionMLXBackend, DecisionModelConfig
 from chronovisor.core.llm_runtime import (
     BackendCapabilities,
     EmbeddingBackend,
@@ -42,7 +43,6 @@ from chronovisor.core.llm_security import (
     CredentialSecurityError,
     RequestSender,
 )
-from chronovisor.core.decision_mlx import DecisionMLXBackend, DecisionModelConfig
 from chronovisor.core.mtplx_adapter import MTPLX_BASE_URL, MTPLXAdapter
 from chronovisor.core.nemotron_adapter import NemotronEmbeddingBackend
 from chronovisor.core.ollama_adapter import OllamaAdapter

@@ -76,9 +76,16 @@ class DecisionMLXBackend:
         self._letters: list[int] = []
 
     def _load(self) -> None:
-        from startlux_decide.backends.mlx import MLXBackend
-        from startlux_decide.modelcfg import load_model_folder, load_tokenizer
-        from startlux_decide.pipeline import Decider
+        from startlux_decide.backends.mlx import (  # type: ignore[import-not-found, unused-ignore]
+            MLXBackend,
+        )
+        from startlux_decide.modelcfg import (  # type: ignore[import-not-found, unused-ignore]
+            load_model_folder,
+            load_tokenizer,
+        )
+        from startlux_decide.pipeline import (  # type: ignore[import-not-found, unused-ignore]
+            Decider,
+        )
 
         folder = load_model_folder(self.config.path)
         if not folder.bidirectional:
@@ -112,7 +119,11 @@ class DecisionMLXBackend:
     def _readout(self, states: list[str], question: str) -> list[float]:
         """logit P(yes) per state through the package's own one-prompt read-out. Runs on the engine's owner thread."""
 
-        from startlux_decide.prompt import from_systemone, messages, plain_prompt
+        from startlux_decide.prompt import (  # type: ignore[import-not-found, unused-ignore]
+            from_systemone,
+            messages,
+            plain_prompt,
+        )
 
         engine = self._engine
         temperature = float(self._folder.temperature("noul"))
