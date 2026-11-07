@@ -30,6 +30,82 @@ def _prepare(path: Path, content: str) -> page_write.PreparedWikiWrite:
     )
 
 
+@pytest.mark.parametrize("create", [False, True])
+@pytest.mark.parametrize("fail_second", [False, True])
+@pytest.mark.parametrize("second_namespace", ["pages", "system"])
+def test_system_batch_publishes_actual_postimages_under_writer_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    create: bool,
+    fail_second: bool,
+    second_namespace: str,
+) -> None:
+    import fcntl
+
+    from chronovisor.core.index_store import IndexStore
+    from chronovisor.core.lexical_index import LexicalIndex
+    from chronovisor.core.link_fix import atomic_write
+
+    root = tmp_path / "wiki-root"
+    system = root / "system"
+    system.mkdir()
+    (root / "pages").mkdir(exist_ok=True)
+    first = system / "current-state.md"
+    second = root / second_namespace / "user-profile.md"
+    if not create:
+        first.write_text(_doc("first old\n"), encoding="utf-8")
+    second.write_text(_doc("second old\n"), encoding="utf-8")
+    store = IndexStore(root=root)
+    store.refresh()
+
+    def lexical() -> LexicalIndex:
+        return LexicalIndex(
+            path=root / ".index" / "lexical.sqlite",
+            pages=lambda: (
+                sorted((root / "pages").glob("*.md")) + sorted(system.glob("*.md"))
+            ),
+            refresh_interval_seconds=0,
+        )
+
+    index = lexical()
+    index.build()
+    index.close()
+    plans = [
+        page_write.prepare_page_write(
+            path,
+            _doc("new memory\n"),
+            namespace="system" if path.parent == system else "pages",
+            source_path=path.name,
+        )
+        for path in (first, second)
+    ]
+
+    def guarded_write(path: Path, content: str) -> None:
+        with (root / ".index" / "writer.lock").open("rb") as handle:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if fail_second and path == second:
+            raise OSError("disk full")
+        atomic_write(path, content)
+
+    monkeypatch.setattr(page_write, "atomic_write", guarded_write)
+    # Real read-back can be nested inside an ingest mutation lease.
+    with page_mutation.chronovisor_mutation_lock():
+        result = page_write.apply_page_writes(plans)
+        assert result["status"] == ("retry" if fail_second else "applied")
+        reader = lexical()
+        try:
+            assert reader.load_existing(), reader.snapshot_error
+        finally:
+            reader.close()
+    if fail_second:
+        assert second.read_text() == _doc("second old\n")
+        if create:
+            assert not first.exists()
+        else:
+            assert first.read_text() == _doc("first old\n")
+
+
 def test_stale_preimage_never_overwrites_foreign_change(tmp_path: Path) -> None:
     path = tmp_path / "page.md"
     path.write_text(_doc("original\n"), encoding="utf-8")
@@ -41,6 +117,23 @@ def test_stale_preimage_never_overwrites_foreign_change(tmp_path: Path) -> None:
     assert result["status"] == "retry"
     assert "changed before apply" in result["reason"]
     assert path.read_text(encoding="utf-8") == "foreign\n"
+
+
+def test_system_publication_failure_keeps_retry_and_foreign_bytes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "wiki-root" / "system" / "current-state.md"
+    path.parent.mkdir()
+    path.write_text(_doc("original\n"), encoding="utf-8")
+    plan = page_write.prepare_page_write(
+        path, _doc("generated\n"), namespace="system", source_path=path.name
+    )
+    path.write_text("foreign invalid document\n", encoding="utf-8")
+
+    result = page_write.apply_page_writes([plan])
+
+    assert result["status"] == "retry"
+    assert path.read_text() == "foreign invalid document\n"
 
 
 def test_concurrent_identical_output_is_idempotent(tmp_path: Path) -> None:

@@ -25,6 +25,77 @@ def isolate_wiki_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(page_mutation, "SYSTEM_DIR", tmp_path / "system")
 
 
+@pytest.mark.parametrize("action", ["refresh", "correction", "rollback"])
+def test_state_refresh_keeps_metadata_and_lexical_readback_consistent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    from chronovisor.core.index_store import IndexStore
+    from chronovisor.core.lexical_index import LexicalIndex
+
+    pages = tmp_path / "pages"
+    system = tmp_path / "system"
+    pages.mkdir()
+    system.mkdir()
+    page = pages / "memory.md"
+    state = system / "current-state.md"
+    for path in (page, state):
+        path.write_text(
+            "---\ntitle: Memory\nstatus: stable\ntype: knowledge\n"
+            "updated: 2026-11-07\n---\nOld memory.\n",
+            encoding="utf-8",
+        )
+    store = IndexStore(root=tmp_path)
+    store.refresh()
+    monkeypatch.setattr("chronovisor.core.index_store.get_store", lambda: store)
+
+    def lexical() -> LexicalIndex:
+        return LexicalIndex(
+            path=tmp_path / ".index" / "lexical.sqlite",
+            pages=lambda: [page, state],
+            refresh_interval_seconds=0,
+        )
+
+    initial = lexical()
+    initial.build()
+    initial.close()
+    if action == "refresh":
+        result = state_register.refresh_state_register(["memory"], path=state)
+        assert result["status"] == "ok"
+    else:
+        mutation = page_mutation.prepare_page_mutation(
+            "current-state",
+            [{"old_text": "Old memory.", "new_text": "Corrected memory."}],
+            correction_id="corr-state-projection",
+        )
+        assert page_mutation.apply_prepared_mutations([mutation])["status"] == "applied"
+        if action == "rollback":
+            assert page_mutation.rollback_prepared_mutations([mutation])["status"] == (
+                "rolled_back"
+            )
+
+    reader = lexical()
+    try:
+        assert reader.load_existing(), reader.snapshot_error
+    finally:
+        reader.close()
+
+    # Ingest read-back used to publish changed lexical rows under stale metadata.
+    readback = lexical()
+    readback.build()
+    readback.close()
+    reader = lexical()
+    try:
+        assert reader.load_existing(), reader.snapshot_error
+    finally:
+        reader.close()
+    metadata = json.loads((tmp_path / ".index" / "pages.json").read_bytes())
+    entry = metadata["entries"]["current-state"]
+    assert (entry["mtime_ns"], entry["size"]) == (
+        state.stat().st_mtime_ns,
+        state.stat().st_size,
+    )
+
+
 def test_state_register_context_is_injected_for_codex(monkeypatch) -> None:
     monkeypatch.setattr(
         recall_runtime, "should_inject_state", lambda host: host == "codex"

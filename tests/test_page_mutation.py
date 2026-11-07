@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -618,7 +619,7 @@ def test_lock_failure_returns_retry_without_touching_page(
     )
 
     @contextmanager
-    def fail_lock():
+    def fail_lock(**_kwargs: object) -> Iterator[None]:
         raise OSError("lock unavailable")
         yield
 

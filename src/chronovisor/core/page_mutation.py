@@ -8,7 +8,7 @@ import json
 import os
 import threading
 from collections.abc import Iterable, Iterator, Mapping
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -26,7 +26,7 @@ from chronovisor.core.canonical_json import (
     canonical_json_sha256_strict as _canonical_json_sha256,
 )
 from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
-from chronovisor.core.index_store import canonical_document_path_for_id
+from chronovisor.core.index_store import IndexStore, canonical_document_path_for_id
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.link_fix import atomic_write, protected_spans
 from chronovisor.core.store import (
@@ -207,16 +207,38 @@ def chronovisor_mutation_lock(
     target_pages = pages_dir or CHRONOVISOR_ROOT / "pages"
     exact_changes = None if changed_paths is None else tuple(changed_paths)
     operation_root = target_pages.parent
+    system_root = (operation_root / "system").resolve()
+    publishes_system = any(
+        changed.resolve().is_relative_to(system_root) for changed in exact_changes or ()
+    )
+    publication_lock = (
+        _reentrant_exclusive_lock(operation_root / ".index" / "writer.lock")
+        if publishes_system
+        else nullcontext()
+    )
     lock_path = path or operation_root / "runtime" / "chronovisor-mutation.lock"
     with okf_runtime_operation(operation_root) as startup:
-        with _reentrant_exclusive_lock(lock_path) as outermost:
+        with _reentrant_exclusive_lock(lock_path) as outermost, publication_lock:
             completed = False
             try:
                 yield
                 completed = True
             finally:
-                if outermost and startup.layout == "okf_v0_2":
-                    try:
+                try:
+                    if publishes_system and exact_changes is not None:
+                        # Publish actual postimages, including owned-byte rollback,
+                        # before a lexical writer can expose stale metadata.
+                        # shortcut: readers still see the cross-file publish gap;
+                        # use a generation manifest if that gap remains material.
+                        store = IndexStore(root=operation_root)
+                        store.load_existing()
+                        store.apply_changes(
+                            [p for p in exact_changes if p.exists()],
+                            removed_page_ids=[
+                                p.stem for p in exact_changes if not p.exists()
+                            ],
+                        )
+                    if outermost and startup.layout == "okf_v0_2":
                         from chronovisor.core.reserved_documents import (
                             rebuild_pages_index,
                             update_pages_index,
@@ -226,9 +248,13 @@ def chronovisor_mutation_lock(
                             rebuild_pages_index(target_pages)
                         else:
                             update_pages_index(target_pages, exact_changes)
-                    except Exception:
-                        if completed:
-                            raise
+                except Exception as exc:
+                    if completed:
+                        if publishes_system:
+                            raise OSError(
+                                f"system-page projection publication failed: {exc}"
+                            ) from exc
+                        raise
 
 
 @contextmanager
@@ -1521,7 +1547,7 @@ def _rollback_owned_write(mutation: PreparedPageMutation) -> bool:
     """Restore the preimage only while the page still contains our exact bytes."""
 
     try:
-        with chronovisor_mutation_lock():
+        with chronovisor_mutation_lock(changed_paths=[mutation.path]):
             return _rollback_owned_write_locked(mutation)
     except OSError:
         return False
@@ -1535,7 +1561,7 @@ def rollback_prepared_mutations(
     items = [item for item in mutations if not item.already_applied]
     outcomes: dict[str, bool] = {}
     try:
-        with chronovisor_mutation_lock():
+        with chronovisor_mutation_lock(changed_paths=[item.path for item in items]):
             for item in reversed(items):
                 try:
                     current = item.path.read_bytes()
@@ -1581,7 +1607,7 @@ def apply_prepared_mutations(
 
     written: list[PreparedPageMutation] = []
     try:
-        with chronovisor_mutation_lock():
+        with chronovisor_mutation_lock(changed_paths=[item.path for item in items]):
             try:
                 # The registry is durable before any page can expose its
                 # applied_corrections marker. Rows for rolled-back pages are
