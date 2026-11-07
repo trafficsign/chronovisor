@@ -1021,7 +1021,15 @@ def _default_workers(
             )
             for role in TEACHER_ROLES
         },
-        _default_counterfactual_worker(config, counterfactual_deadline_ms),
+        # A generation judge keeps the pre-decision contract: one resolution of all five roles.
+        _default_counterfactual_worker(config, counterfactual_deadline_ms)
+        if "recall.distill.utility_judge" not in generation_roles
+        else _WorkerCounterfactual(
+            config.max_input_bytes,
+            identities,
+            digests,
+            counterfactual_deadline_ms,
+        ),
     )
 
 
