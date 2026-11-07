@@ -37,6 +37,7 @@ from chronovisor.core import (
 )
 from chronovisor.core.decision_mlx import (
     UTILITY_BAND,
+    DecisionMLXBackend,
     decision_fingerprint,
     decision_route,
     uses_decision_judge,
@@ -590,9 +591,9 @@ class _WorkerCounterfactual:
                 "a1_first" if first_a else "a0_first",
             ],
             "blind_choices": [first.get("blind_choice"), second.get("blind_choice")],
-            "order_agreement": distinct_models
-            and first_verdict == second_verdict
-            and first_verdict != "uncertain",
+            # dc3f70d4: on the generation path two agreeing orders count even
+            # when both answered "uncertain". The pointwise path returns above.
+            "order_agreement": distinct_models and first_verdict == second_verdict,
             "generator_route_identity": arm0.get("_route_identity", {}),
             "generator_model_digest": arm0.get("_model_digest", ""),
             "judge_route_identity": first.get("_route_identity", {}),
@@ -7228,6 +7229,25 @@ def _configured_local_reasoning_binding(
     )
 
 
+def _counterfactual_identity_matches_judge(row: Mapping[str, Any]) -> bool:
+    """Accept the legacy generation-judge revision and the StartLux decision one.
+
+    Each revision is only valid together with a judge route of the matching
+    kind: generation rows keep the pre-StartLux identity, decision-judge rows
+    carry the StartLux identity and a local-decision judge route.
+    """
+
+    revision = str(row.get("identity_revision") or "")
+    judge = row.get("judge_route_identity")
+    if not isinstance(judge, Mapping) or row.get("request_revision") != revision:
+        return False
+    if revision == LEGACY_COUNTERFACTUAL_IDENTITY_REVISION:
+        return judge.get("provider") not in (None, "", DecisionMLXBackend.provider)
+    if revision == COUNTERFACTUAL_IDENTITY_REVISION:
+        return judge.get("provider") == DecisionMLXBackend.provider
+    return False
+
+
 def _materialized_row_integrity(
     row: Mapping[str, Any],
     *,
@@ -7335,8 +7355,7 @@ def _materialized_row_integrity(
             == _training_assignment_authority(
                 {"revision": ASSIGNMENT_REVISION, "kind": "counterfactual"}
             )
-            and row.get("identity_revision") == "local-blind-counterfactual-v1"
-            and row.get("request_revision") == "local-blind-counterfactual-v1"
+            and _counterfactual_identity_matches_judge(row)
             and (
                 (
                     row.get("profile") in LOCAL_TEACHER_PROFILES

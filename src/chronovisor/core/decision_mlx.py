@@ -82,6 +82,9 @@ JUDGE_RUBRIC_CHARS = 400
 JUDGE_EVIDENCE_CHARS = 400
 JUDGE_REFERENCE_CHARS = 1_200
 JUDGE_ANSWER_CHARS = 1_200
+# Pointwise utility keeps the full current question: the judged answer is read
+# against it, and the offline measurement used query[:2000].
+UTILITY_QUERY_CHARS = 2_000
 UTILITY_CONTEXT_CHARS = 400
 UTILITY_EVIDENCE_CHARS = 1_500
 UTILITY_ANSWER_CHARS = 800
@@ -121,7 +124,7 @@ def _canonical_sha256(value: object) -> str:
 
 
 JUDGE_POLICY: dict[str, Any] = {
-    "version": 4,
+    "version": 5,
     "certificate_evidence": "body-before-truncation",
     "roles": JUDGE_ROLE_BY_KIND,
     "questions": JUDGE_QUESTIONS,
@@ -136,6 +139,7 @@ JUDGE_POLICY: dict[str, Any] = {
         "evidence_chars": JUDGE_EVIDENCE_CHARS,
         "reference_chars": JUDGE_REFERENCE_CHARS,
         "answer_chars": JUDGE_ANSWER_CHARS,
+        "utility_query_chars": UTILITY_QUERY_CHARS,
         "utility_context_chars": UTILITY_CONTEXT_CHARS,
         "utility_evidence_chars": UTILITY_EVIDENCE_CHARS,
         "utility_answer_chars": UTILITY_ANSWER_CHARS,
@@ -223,7 +227,7 @@ def judge_state(
     if kind == JUDGE_UTILITY:
         evidence_body = "\n\n".join(evidence_items).strip()
         return _UTILITY_STATE.format(
-            query=query[:JUDGE_QUERY_CHARS],
+            query=query[:UTILITY_QUERY_CHARS],
             context=context[:UTILITY_CONTEXT_CHARS],
             evidence=evidence_body[:UTILITY_EVIDENCE_CHARS] or "(none)",
             answer=answer[:UTILITY_ANSWER_CHARS],

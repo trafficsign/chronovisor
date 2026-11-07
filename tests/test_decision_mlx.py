@@ -257,17 +257,29 @@ def test_judge_states_keep_labels_page_markers_and_bounds() -> None:
     assert "Evidence shown to the answerer:\n(none)\n\n" in no_evidence
     bounded = judge_state(
         JUDGE_UTILITY,
-        query="q" * 401,
+        query="q" * 2_001,
         context="c" * 401,
         evidence_items=["e" * 2_000],
         answer="a" * 801,
     )
-    assert bounded.startswith("Current question:\n" + "q" * 400)
+    # Utility keeps the whole current question (2000), not the shared 400.
+    assert bounded.startswith("Current question:\n" + "q" * 2_000 + "\n\n")
     assert "Preceding context:\n" + "c" * 400 + "\n\n" in bounded
     assert "Evidence shown to the answerer:\n" + "e" * 1_500 + "\n\n" in bounded
     assert bounded.endswith("Candidate answer:\n" + "a" * 800)
     with pytest.raises(ValueError):
         judge_state("unknown", query="q")
+
+
+def test_utility_state_keeps_its_own_two_thousand_char_query() -> None:
+    utility = judge_state(JUDGE_UTILITY, query="q" * 2_001, answer="a")
+    assert utility.startswith("Current question:\n" + "q" * 2_000 + "\n\n")
+    axes = judge_state(
+        JUDGE_ANSWER_AXES, query="q" * 401, answer="a", reference="r"
+    )
+    assert axes.startswith(
+        "Current question:\n" + "q" * decision_mlx.JUDGE_QUERY_CHARS + "\n\n"
+    )
 
 
 def test_judge_policy_and_logit_mappings_are_frozen() -> None:
@@ -294,6 +306,11 @@ def test_judge_policy_and_logit_mappings_are_frozen() -> None:
     assert uncertain["confidence"] == 0.5
 
     assert decision_mlx.JUDGE_POLICY["utility_band"] == decision_mlx.UTILITY_BAND
+    assert (
+        decision_mlx.JUDGE_POLICY["limits"]["utility_query_chars"]
+        == decision_mlx.UTILITY_QUERY_CHARS
+        == 2_000
+    )
     assert utility_verdict(2.5) == "helpful"
     assert utility_verdict(-2.5) == "harmful"
     assert utility_verdict(0.0) == "neutral"

@@ -460,9 +460,10 @@ their output.
   `_configured_local_single_cohort`, and route/digest expectations. Use a new
   `identity_revision`, e.g. `local-blind-counterfactual-startlux-v1`, and include
   the StartLux fingerprint in the new cohort. The old 58 rows remain under
-  `local-blind-counterfactual-v1`; either keep a frozen legacy route/digest
-  allowlist for them or close that cohort to new training and use the 58 only as
-  the offline calibration set. Do not relabel them as StartLux.
+  `local-blind-counterfactual-v1`; keep the frozen legacy route/digest allowlist
+  for them (the training validator accepts both revisions, each with its matching
+  judge kind). They are not a calibration set: they are pairwise and
+  unrecoverable. Do not relabel them as StartLux.
 
 ## 6. Calibration data and acceptance
 
@@ -535,7 +536,7 @@ negative, including `stale_info`, `topic_switch`, `self_reference`,
 `hub_false_positive`). Until then, run it in shadow alongside the existing
 primary and log both route identities and decisions.
 
-### 6.3 Utility judge: 58 historical pairs
+### 6.3 Utility judge: historical pairs are not replayable
 
 Path: `~/.chronovisor/runtime/recall-distillation/label-ledger.jsonl`
 (rows with `dimension=answer_utility`).
@@ -556,8 +557,10 @@ Facts read from disk:
   `a0_sha256`/`a1_sha256` before using a pair. If a pair cannot be reconstructed,
   exclude it and report the count; do not invent labels.
 
-The historical 58 rows are pairwise and cannot be replayed as pointwise labels;
-they stay useful only as a sanity reference for the legacy producer.
+The historical 58 rows are pairwise and cannot be replayed as pointwise labels:
+they retain hashes, not answers. The pairwise calibration script
+(`scripts/calibrate_startlux_utility_58.py`) is therefore deleted; there is no
+harness left that would emit labels the current contract cannot score.
 
 Measured offline on 40 fresh pairs against a careful reference labelling
 (`/private/tmp/chronovisor-startlux-fresh-20261108/claude-labels.json`):
@@ -626,7 +629,8 @@ method, one judge-policy/state section, and thin adapters at the three call site
 
 8. `src/chronovisor/recall/recall_distillation.py`
    - inject service judge into `_WorkerCounterfactual`; mixed route/digest
-     resolution; new `identity_revision`/cohort; legacy 58 handling.
+     resolution; new `identity_revision`/cohort; both revisions accepted by the
+     materialized-row validator.
 
 9. Tests/docs/config
    - role-map tests in `tests/test_llm_config.py`, processor route/identity tests,
@@ -636,29 +640,31 @@ method, one judge-policy/state section, and thin adapters at the three call site
      judge roles and the decision provider revision.
 
 Migration order: freeze the new `judge_policy_sha256` and model revision → reseal
-adapter registry → rerun 40-control calibration → run 5-row certificate smoke and
-58-pair utility CV → change live role blocks in one config edit. Keep the old role
-blocks in git history; old rows keep their old route identities.
+adapter registry → rerun 40-control calibration → run the 5-row certificate smoke
+and the pointwise utility measurement → change live role blocks in one config
+edit. Keep the old role blocks in git history; old rows keep their old route
+identities.
 
 ## 8. Risks and open issues
 
 1. **Thin certificate evidence.** 5 rows cannot calibrate two thresholds; the
    design keeps a prior and requires expansion/shadow before production.
-2. **Utility replay.** The 58 label rows retain hashes, not answers; the
-   calibration harness must reconstruct and hash-verify pairs. Some may be
-   unrecoverable.
+2. **Utility replay.** The 58 label rows retain hashes, not answers, so they are
+   unrecoverable as pointwise evidence. Re-fit the band only on new pointwise
+   labels.
 3. **Teacher-only utility labels.** Acceptance measures transfer from Ornith, not
    correctness. Do not call the result human-calibrated.
 4. **Role capability semantics.** Reusing `capability = "rerank"` for judges is a
    deliberate smallest-change choice; if a future architecture rule objects,
    introduce a first-class `judge` capability instead of a fake generation route.
 5. **Queue pressure.** Judge requests still count against the service
-   `queue_size`; offline 40-control/58-pair runs must not run against the live
-   service during foreground traffic. Certificate requests use PRIORITY_RECALL;
-   offline requests use PRIORITY_SEARCH.
-6. **Blindness.** Utility state intentionally omits evidence because the current
-   payload omitted it. If evidence is added later, that is a new judge policy and
-   a new pairing contract, not a silent prompt tweak.
+   `queue_size`; offline calibration runs must not run against the live service
+   during foreground traffic. Certificate requests use PRIORITY_RECALL; offline
+   requests use PRIORITY_SEARCH.
+6. **Evidence exposure.** The utility state now shows each arm its own evidence,
+   so a judge prompt-injection surface grows with evidence text. Evidence stays
+   truncated (1500 chars) and is declared as data in the question; changing that
+   is a new judge policy, not a silent prompt tweak.
 7. **Answer-axis calibration.** Raw `sigmoid` may be well ordered but badly scaled;
    the 40-control MAE/bias gate will expose that. A learned map must be fitted on
    train and frozen into the identity, never fitted on the acceptance split.

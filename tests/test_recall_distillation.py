@@ -14118,6 +14118,128 @@ def test_decision_utility_requires_distinct_generator_and_judge(
     assert result["order_agreement"] is (expected != "uncertain")
 
 
+def test_generation_path_keeps_order_agreement_for_two_uncertain_orders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """dc3f70d4: two agreeing orders count, even when both answer uncertain."""
+
+    def fake_worker_call(
+        operation: str, _role: str, _payload: object, **_kwargs: object
+    ) -> dict[str, object]:
+        if operation == "answer":
+            return {"answer": "same", "_model_digest": "a" * 64}
+        return {
+            "blind_choice": "uncertain",
+            "rationale": "startlux p=0.500000",
+            "_model_digest": "b" * 64,
+            "_route_identity": {},
+        }
+
+    monkeypatch.setattr(distill, "_worker_call", fake_worker_call)
+    worker = distill._WorkerCounterfactual(
+        12_000,
+        {
+            "recall.distill.answer_generator": {},
+            "recall.distill.utility_judge": {},
+        },
+        {
+            "recall.distill.answer_generator": "a" * 64,
+            "recall.distill.utility_judge": "b" * 64,
+        },
+    )
+    result = worker.compare(
+        {"rally_id": "r", "candidate_id": "c", "query": "q", "context": []}
+    )
+    assert result["verdict"] == "uncertain"
+    assert result["order_agreement"] is True
+
+
+def test_materialized_rows_accept_both_counterfactual_identity_revisions() -> None:
+    def row(**overrides: object) -> dict[str, object]:
+        base: dict[str, object] = {
+            "source": "counterfactual-label",
+            "profile": distill.LOCAL_TRIAD_PROFILE,
+            "cohort": distill._profile_cohort(distill.LOCAL_TRIAD_PROFILE),
+            "profile_contract_id": "",
+            "expires_at": "",
+            "assignment_revision": distill.ASSIGNMENT_REVISION,
+            "assignment_authority": distill._training_assignment_authority(
+                {"revision": distill.ASSIGNMENT_REVISION, "kind": "counterfactual"}
+            ),
+            "identity_revision": distill.COUNTERFACTUAL_IDENTITY_REVISION,
+            "request_revision": distill.COUNTERFACTUAL_IDENTITY_REVISION,
+            "order_agreement": True,
+            "counterfactual_ref": "a" * 64,
+            "a0_sha256": "b" * 64,
+            "a1_sha256": "c" * 64,
+            "generator_model_digest": "4" * 64,
+            "judge_model_digest": "5" * 64,
+            "generator_route_identity": {
+                "role": "recall.distill.answer_generator",
+                "provider": "ollama",
+                "model": "generator",
+                "location": "local",
+            },
+            "judge_route_identity": {
+                "role": "recall.distill.utility_judge",
+                "provider": "local-decision",
+                "model": "judge",
+                "location": "local",
+            },
+            "counterfactual_producer": "chronovisor-local-blind-v1",
+            "counterfactual_revision": "two-order-locked-v2",
+            "blind_orders": ["a0_first", "a1_first"],
+            "split": "train",
+            "label_record_sha256": "d" * 64,
+            "future_leakage": False,
+            "feature_parity": True,
+            "negative_veto_conflict": False,
+            "route": "counterfactual",
+            "model_digest": "4" * 64,
+        }
+        return {**base, **overrides}
+
+    startlux = row()
+    assert distill._materialized_row_integrity(startlux) is True
+    legacy = row(
+        identity_revision=distill.LEGACY_COUNTERFACTUAL_IDENTITY_REVISION,
+        request_revision=distill.LEGACY_COUNTERFACTUAL_IDENTITY_REVISION,
+        judge_route_identity={
+            "role": "recall.distill.utility_judge",
+            "provider": "ollama",
+            "model": "judge",
+            "location": "local",
+        },
+    )
+    assert distill._materialized_row_integrity(legacy) is True
+    # Each revision only fits its own judge kind.
+    assert (
+        distill._materialized_row_integrity(
+            row(
+                judge_route_identity={
+                    "role": "recall.distill.utility_judge",
+                    "provider": "ollama",
+                    "model": "judge",
+                    "location": "local",
+                }
+            )
+        )
+        is False
+    )
+    assert (
+        distill._materialized_row_integrity(
+            {**legacy, "identity_revision": distill.COUNTERFACTUAL_IDENTITY_REVISION}
+        )
+        is False
+    )
+    assert (
+        distill._materialized_row_integrity(
+            {**startlux, "request_revision": "local-blind-counterfactual-v1"}
+        )
+        is False
+    )
+
+
 def test_service_defer_after_answers_releases_attempt(monkeypatch, tmp_path):
     def answer(*_args, **kwargs):
         kwargs["model_turn"].attempted = True
