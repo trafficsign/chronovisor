@@ -1127,3 +1127,61 @@ def _explicit_legacy_cloud_opt_in(monkeypatch):
     from chronovisor.core import model_execution
 
     monkeypatch.setattr(model_execution, "automatic_cloud_allowed", lambda *_args: True)
+
+
+@pytest.mark.parametrize("generation_first", [True, False])
+def test_mixed_post_switch_roles_keep_decision_provider_revision(generation_first):
+    decision_roles = (
+        "search.rerank",
+        "recall.answer.scorer",
+        "recall.certificate_judge.primary",
+        "recall.distill.utility_judge",
+    )
+    generation = {
+        role: {
+            "capability": "generation",
+            "provider": "mlx_serve",
+            "model": "qwen3.8-flash-next-chat",
+            "revision": "98165936edfe1ee4532816bb1f6e02837680b220",
+        }
+        for role in (
+            "recall.answer.runner",
+            "recall.certificate_judge.escalation",
+            "recall.distill.answer_generator",
+        )
+    }
+    decision = {
+        role: {
+            "capability": "rerank",
+            "provider": "local_decision",
+            "model": "startlux-4b",
+        }
+        for role in decision_roles
+    }
+    roles = (
+        {**generation, **decision} if generation_first else {**decision, **generation}
+    )
+    runtime = build_llm_runtime(
+        parse_llm_config(
+            {
+                "llm": {
+                    "providers": {
+                        "mlx_serve": {"kind": "omlx"},
+                        "local_decision": {
+                            "kind": "local-decision-mlx",
+                            "path": "/offline/startlux",
+                            "revision": "f" * 64,
+                        },
+                    },
+                    "roles": roles,
+                }
+            }
+        )
+    )
+    assert all(
+        runtime.resolve_rerank(role).revision == "f" * 64 for role in decision_roles
+    )
+    assert (
+        runtime.resolve_generation("recall.answer.runner").revision
+        == "98165936edfe1ee4532816bb1f6e02837680b220"
+    )
