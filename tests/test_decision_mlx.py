@@ -25,7 +25,7 @@ from chronovisor.core.decision_mlx import (
     decision_state,
     judge_state,
     logit_probability,
-    utility_choice,
+    utility_verdict,
 )
 from chronovisor.core.llm_config import (
     LLMConfigError,
@@ -241,17 +241,31 @@ def test_judge_states_keep_labels_page_markers_and_bounds() -> None:
         JUDGE_UTILITY,
         query="question",
         context="context",
-        answer_a="answer a",
-        answer_b="answer b",
+        evidence_items=["first fact", "second fact"],
+        answer="candidate",
     )
-    assert "Preceding context:\ncontext" in utility_state
-    no_context = judge_state(
+    assert utility_state == (
+        "Current question:\nquestion\n\n"
+        "Preceding context:\ncontext\n\n"
+        "Evidence shown to the answerer:\nfirst fact\n\nsecond fact\n\n"
+        "Candidate answer:\ncandidate"
+    )
+    no_evidence = judge_state(
+        JUDGE_UTILITY, query="question", context="", answer="candidate"
+    )
+    assert "Preceding context:\n\n\n" in no_evidence
+    assert "Evidence shown to the answerer:\n(none)\n\n" in no_evidence
+    bounded = judge_state(
         JUDGE_UTILITY,
-        query="question",
-        answer_a="answer a",
-        answer_b="answer b",
+        query="q" * 401,
+        context="c" * 401,
+        evidence_items=["e" * 2_000],
+        answer="a" * 801,
     )
-    assert "Preceding context:" not in no_context
+    assert bounded.startswith("Current question:\n" + "q" * 400)
+    assert "Preceding context:\n" + "c" * 400 + "\n\n" in bounded
+    assert "Evidence shown to the answerer:\n" + "e" * 1_500 + "\n\n" in bounded
+    assert bounded.endswith("Candidate answer:\n" + "a" * 800)
     with pytest.raises(ValueError):
         judge_state("unknown", query="q")
 
@@ -279,11 +293,16 @@ def test_judge_policy_and_logit_mappings_are_frozen() -> None:
     assert uncertain["decision"] == "uncertain"
     assert uncertain["confidence"] == 0.5
 
-    assert utility_choice(2.5)["blind_choice"] == "a"
-    assert utility_choice(-2.5)["blind_choice"] == "b"
-    assert utility_choice(0.0)["blind_choice"] == "uncertain"
-    assert utility_choice(1.0)["blind_choice"] == "uncertain"
-    assert "rationale" in utility_choice(2.5)
+    assert decision_mlx.JUDGE_POLICY["utility_band"] == decision_mlx.UTILITY_BAND
+    assert utility_verdict(2.5) == "helpful"
+    assert utility_verdict(-2.5) == "harmful"
+    assert utility_verdict(0.0) == "neutral"
+    assert utility_verdict(0.5) == "neutral"
+    assert utility_verdict(-0.5) == "neutral"
+    assert utility_verdict(0.500001) == "helpful"
+    assert utility_verdict(-0.500001) == "harmful"
+    with pytest.raises(ValueError):
+        utility_verdict(float("nan"))
 
 
 def test_public_readout_runs_one_question_on_the_owner_thread(monkeypatch) -> None:

@@ -36,7 +36,6 @@ from chronovisor.core.decision_mlx import (
     certificate_verdict,
     decision_fingerprint,
     judge_state,
-    utility_choice,
 )
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.llm_runtime import (
@@ -74,6 +73,9 @@ SERVICE_STATUS_FILE = CHRONOVISOR_ROOT / "runtime" / "reranker-service-status.js
 PASSAGE_CACHE_SIZE = 512
 # A recall turn publishes at most a few items; this only bounds one filter request's work.
 RECALL_FILTER_MAX_TEXTS = 16
+# One utility judgement carries the evidence the answerer saw; bound it like
+# every other judge field before any forward.
+UTILITY_EVIDENCE_MAX_ITEMS = 16
 # Lower number wins the next candidate turn.
 PRIORITY_RECALL = 0
 PRIORITY_SEARCH = 1
@@ -322,8 +324,8 @@ class RerankerServiceState:
                 "role",
                 "query",
                 "context",
-                "answer_a",
-                "answer_b",
+                "evidence",
+                "answer",
             },
         }[kind]
         allowed = expected | ({"rubric_id"} if kind == JUDGE_CERTIFICATE else set())
@@ -339,6 +341,17 @@ class RerankerServiceState:
                 512 if field == "rubric_id" else 16_384
             ):
                 raise ValueError(f"judge {field} is too long")
+        if kind == JUDGE_UTILITY:
+            evidence_rows = payload.get("evidence")
+            if (
+                not isinstance(evidence_rows, list)
+                or len(evidence_rows) > UTILITY_EVIDENCE_MAX_ITEMS
+                or not all(isinstance(row, str) for row in evidence_rows)
+                or sum(len(row) for row in evidence_rows) > 16_384
+            ):
+                raise ValueError(
+                    "utility evidence must be a bounded list of strings"
+                )
         if kind == JUDGE_CERTIFICATE:
             evidence_rows = payload.get("evidence")
             if not isinstance(evidence_rows, list) or not 1 <= len(evidence_rows) <= 2:
@@ -451,27 +464,27 @@ class RerankerServiceState:
                 }
             else:
                 context = payload.get("context")
-                answer_a = payload.get("answer_a")
-                answer_b = payload.get("answer_b")
+                evidence = payload.get("evidence")
+                answer = payload.get("answer")
                 if (
                     not isinstance(context, str)
-                    or not isinstance(answer_a, str)
-                    or not answer_a
-                    or not isinstance(answer_b, str)
-                    or not answer_b
+                    or not isinstance(evidence, list)
+                    or not all(isinstance(row, str) for row in evidence)
+                    or not isinstance(answer, str)
+                    or not answer
                 ):
-                    raise ValueError("utility requires context, answer_a and answer_b")
+                    raise ValueError("utility requires context, evidence and answer")
                 state = judge_state(
                     kind,
                     query=query,
                     context=context,
-                    answer_a=answer_a,
-                    answer_b=answer_b,
+                    evidence_items=evidence,
+                    answer=answer,
                 )
                 logit = self._judge_forward(
                     role, JUDGE_QUESTIONS[JUDGE_UTILITY], state, priority
                 )
-                body = {**utility_choice(logit), "logit": logit}
+                body = {"logit": logit}
         finally:
             self._slots.release()
         elapsed_ms = self._record_request(started)

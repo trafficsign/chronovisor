@@ -1163,8 +1163,8 @@ def test_idle_server_publishes_bounded_heartbeat(monkeypatch):
         ("certificate", "page_id"),
         ("certificate", "span"),
         ("utility", "context"),
-        ("utility", "answer_a"),
-        ("utility", "answer_b"),
+        ("utility", "answer"),
+        ("utility", "evidence"),
     ],
 )
 def test_judge_bounds_all_strings_before_any_forward(
@@ -1194,16 +1194,97 @@ def test_judge_bounds_all_strings_before_any_forward(
                     {"page_id": "second", "span": "valid"},
                 ],
             },
-            "utility": {"context": "", "answer_a": "a", "answer_b": "b"},
+            "utility": {"context": "", "evidence": ["e"], "answer": "a"},
         }[kind]
     )
     if field in {"page_id", "span"}:
         payload["evidence"][1][field] = "x" * 16_385
+    elif field == "evidence":
+        payload["evidence"] = ["x" * 16_385]
     else:
         payload[field] = "x" * 16_385
     with pytest.raises(ValueError):
         state.handle(payload)
     assert controls == {"lease": 0, "activity": 0}
+
+
+def test_utility_judge_is_pointwise_with_the_arm_evidence(tmp_path, monkeypatch):
+    state, _status, backend, _runtime, _controls = prepare_state(
+        tmp_path,
+        monkeypatch,
+        config(tmp_path / "reranker.sock"),
+        provider="local-decision",
+    )
+    seen = []
+    backend.readout = lambda _q, states: seen.extend(states) or (-1.25,)
+    response = state.handle(
+        {
+            "method": "judge",
+            "kind": "utility",
+            "role": JUDGE_ROLE_BY_KIND["utility"],
+            "query": "Which GPU?",
+            "context": "earlier turn",
+            "evidence": ["[PAGE gpu]\nInference uses MPS."],
+            "answer": "It uses the MPS backend.",
+        }
+    )
+    assert response["status"] == "ok"
+    assert response["logit"] == -1.25
+    assert "blind_choice" not in response
+    assert len(seen) == 1
+    assert "Evidence shown to the answerer:\n[PAGE gpu]\nInference uses MPS." in seen[0]
+    assert seen[0].endswith("Candidate answer:\nIt uses the MPS backend.")
+    assert "Answer A:" not in seen[0] and "answer_a" not in seen[0]
+
+
+def test_utility_judge_rejects_a_non_list_evidence_field(tmp_path, monkeypatch):
+    state, _status, backend, _runtime, _controls = prepare_state(
+        tmp_path,
+        monkeypatch,
+        config(tmp_path / "reranker.sock"),
+        provider="local-decision",
+    )
+    backend.readout = lambda *_args: pytest.fail("invalid request reached model")
+    with pytest.raises(ValueError):
+        state.handle(
+            {
+                "method": "judge",
+                "kind": "utility",
+                "role": JUDGE_ROLE_BY_KIND["utility"],
+                "query": "q",
+                "context": "",
+                "evidence": "single string",
+                "answer": "a",
+            }
+        )
+    with pytest.raises(ValueError):
+        state.handle(
+            {
+                "method": "judge",
+                "kind": "utility",
+                "role": JUDGE_ROLE_BY_KIND["utility"],
+                "query": "q",
+                "context": "",
+                "evidence": [1],
+                "answer": "a",
+            }
+        )
+
+
+def test_utility_judge_client_rejects_a_missing_pointwise_logit():
+    expected = {
+        "status": "ok",
+        "method": "judge",
+        "kind": "utility",
+        "role": "recall.distill.utility_judge",
+    }
+    with pytest.raises(reranker_client.RerankerServiceUnavailable):
+        reranker_client._validate_judge_response("utility", expected)
+    reranker_client._validate_judge_response("utility", {**expected, "logit": 0.25})
+    with pytest.raises(reranker_client.RerankerServiceUnavailable):
+        reranker_client._validate_judge_response(
+            "utility", {**expected, "logit": float("nan")}
+        )
 
 
 def test_certificate_judge_strips_frontmatter_before_model_limit(tmp_path, monkeypatch):

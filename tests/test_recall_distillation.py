@@ -10996,11 +10996,12 @@ def test_counterfactual_judge_input_is_answer_independent(
         assert payload["context"] == ["point-in-time context"]
 
 
-def test_counterfactual_utility_judge_uses_injected_service_both_orders(
+def test_counterfactual_utility_judge_scores_each_arm_pointwise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     answers = iter(("without", "with"))
     judge_payloads: list[dict[str, object]] = []
+    logits = iter((-1.2, 0.4))
 
     def fake_worker_call(
         operation: str, _role: str, _payload: object, **_kwargs: object
@@ -11014,11 +11015,7 @@ def test_counterfactual_utility_judge_uses_injected_service_both_orders(
 
     def judge_call(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         judge_payloads.append(dict(payload))
-        return {
-            "blind_choice": "a",
-            "confidence": 0.9,
-            "rationale": "startlux p=0.900000",
-        }
+        return {"status": "ok", "logit": next(logits)}
 
     route = {
         "role": "recall.distill.utility_judge",
@@ -11047,19 +11044,180 @@ def test_counterfactual_utility_judge_uses_injected_service_both_orders(
             "candidate_id": "candidate",
             "query": "query",
             "context": ["context"],
-            "a0_evidence": [],
+            "a0_evidence": ["first evidence", "second evidence"],
             "a1_evidence": ["candidate"],
         }
     )
 
-    assert [payload["blind_order"] for payload in judge_payloads] == [
-        "a_first",
-        "b_first",
+    assert [payload["answer"] for payload in judge_payloads] == ["without", "with"]
+    assert [payload["evidence"] for payload in judge_payloads] == [
+        ["first evidence", "second evidence"],
+        ["candidate"],
     ]
+    assert all("answer_a" not in payload for payload in judge_payloads)
+    assert all("blind_order" not in payload for payload in judge_payloads)
     assert result["judge_route_identity"] == route
     assert result["judge_model_digest"] == "b" * 64
     assert result["generator_model_digest"] == "a" * 64
-    assert result["verdict"] == "uncertain"
+    assert result["a0_logit"] == -1.2 and result["a1_logit"] == 0.4
+    assert result["blind_choices"] == [-1.2, 0.4]
+    assert result["utility_d"] == pytest.approx(1.6)
+    assert result["utility_band"] == distill.UTILITY_BAND
+    assert result["verdict"] == "helpful"
+    assert result["order_agreement"] is True
+    assert result["blind_orders"] == ["a0_first", "a1_first"]
+    assert result["reason"].startswith("startlux pointwise d=")
+
+
+def test_counterfactual_pointwise_verdict_respects_the_band_edges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_worker_call(
+        operation: str, _role: str, _payload: object, **_kwargs: object
+    ) -> dict[str, object]:
+        return {"answer": "arm answer", "_model_digest": "a" * 64, "_route_identity": {}}
+
+    def compare(logits: tuple[float, float]) -> dict[str, Any]:
+        sequence = iter(logits)
+        worker = distill._WorkerCounterfactual(
+            12_000,
+            {
+                "recall.distill.answer_generator": {},
+                "recall.distill.utility_judge": {},
+            },
+            {
+                "recall.distill.answer_generator": "a" * 64,
+                "recall.distill.utility_judge": "b" * 64,
+            },
+            judge_call=lambda _payload: {"logit": next(sequence)},
+            judge_route={},
+            judge_digest="b" * 64,
+        )
+        return dict(
+            worker.compare(
+                {
+                    "rally_id": "rally",
+                    "candidate_id": "candidate",
+                    "query": "query",
+                    "context": [],
+                    "a0_evidence": [],
+                    "a1_evidence": ["candidate"],
+                }
+            )
+        )
+
+    monkeypatch.setattr(distill, "_worker_call", fake_worker_call)
+    # d = a1 - a0; the band is decisive only strictly outside +-0.5.
+    assert compare((0.0, 0.5))["verdict"] == "neutral"
+    assert compare((0.5, 0.0))["verdict"] == "neutral"
+    assert compare((0.0, 0.0))["verdict"] == "neutral"
+    assert compare((0.0, 0.500001))["verdict"] == "helpful"
+    assert compare((0.0, -0.500001))["verdict"] == "harmful"
+    assert compare((1.0, 0.0))["verdict"] == "harmful"
+
+
+def test_pointwise_counterfactual_row_satisfies_the_label_validators(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "pointwise"
+    queue = workset.DistillationWorkset(
+        store.distillation_dir(root) / "local-workset.sqlite3"
+    )
+    label_path = store.distillation_dir(root) / store.LABEL_LEDGER_FILE
+    watermark = distill._local_workset_watermark(
+        root=root,
+        raw_dir=root / "raw",
+        label_path=label_path,
+        snapshots={},
+        progress_kind="local-counterfactual-v1",
+    )
+    queue.advance(
+        [
+            {
+                "work_id": "local-counterfactual-pointwise",
+                "kind": "local-counterfactual",
+                "payload_ref": "candidate-snapshot:rally:candidate",
+                "payload_digest": "c" * 64,
+                "temporal_split": {"split": "test"},
+                "provenance": {"profile": "local-triad-v1"},
+                "priority": 0,
+            }
+        ],
+        watermark,
+        progress=distill._local_workset_progress(watermark),
+    )
+    claim = queue.claim("local-counterfactual", 1, "test-owner", 300)[0]
+    routes = {
+        "recall.distill.answer_generator": {
+            "role": "recall.distill.answer_generator",
+            "provider": "ollama",
+            "model": "answer-model",
+            "location": "local",
+        },
+        "recall.distill.utility_judge": {
+            "role": "recall.distill.utility_judge",
+            "provider": "local-decision",
+            "model": "judge-model",
+            "location": "local",
+        },
+    }
+    answers = iter(("without", "with"))
+    logits = iter((-1.2, 0.4))
+
+    def fake_worker_call(
+        operation: str, _role: str, _payload: object, **_kwargs: object
+    ) -> dict[str, object]:
+        assert operation == "answer"
+        return {"answer": next(answers), "_model_digest": "a" * 64, "_route_identity": routes["recall.distill.answer_generator"]}
+
+    monkeypatch.setattr(distill, "_worker_call", fake_worker_call)
+    worker = distill._WorkerCounterfactual(
+        12_000,
+        routes,
+        {
+            "recall.distill.answer_generator": "a" * 64,
+            "recall.distill.utility_judge": "b" * 64,
+        },
+        judge_call=lambda _payload: {"logit": next(logits)},
+        judge_route=routes["recall.distill.utility_judge"],
+        judge_digest="b" * 64,
+    )
+    result = distill._compare_and_commit_counterfactual(
+        workset=queue,
+        claim=claim,
+        counterfactual=worker,
+        payload={
+            "rally_id": "rally",
+            "candidate_id": "candidate",
+            "query": "query",
+            "context": [],
+            "a0_evidence": [],
+            "a1_evidence": ["candidate"],
+            "mode": "add",
+        },
+        label_path=label_path,
+        root=root,
+        raw_dir=root / "raw",
+        snapshots={},
+        exposure={},
+        exact_features={},
+        rally_id="rally",
+        candidate={"candidate_id": "candidate"},
+        mode="add",
+        config=distill.DistillationConfig(enabled=True),
+    )
+    assert result.written == 1 and result.failure_class == ""
+    rows = store.read_chain(label_path)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["verdict"] == "helpful"
+    assert row["blind_orders"] == ["a0_first", "a1_first"]
+    assert row["blind_choices"] == [-1.2, 0.4]
+    assert row["a0_logit"] == -1.2 and row["a1_logit"] == 0.4
+    assert row["utility_band"] == distill.UTILITY_BAND
+    assert row["utility_d"] == pytest.approx(1.6)
+    assert row["order_agreement"] is True
+    assert row["judge_route_identity"] == routes["recall.distill.utility_judge"]
 
 
 def test_counterfactual_utility_service_failure_defers_pair(
@@ -13934,32 +14092,30 @@ def test_raw_snapshot_race_defers_but_corruption_remains_a_worker_failure(
 
 
 @pytest.mark.parametrize(
-    "choices,expected",
-    [
-        (("b", "b"), "neutral"),
-        (("a", "a"), "uncertain"),
-        (("uncertain", "uncertain"), "uncertain"),
-    ],
+    "judge_digest,expected",
+    [("b" * 64, "helpful"), ("a" * 64, "uncertain")],
 )
-def test_decision_utility_tie_and_order_flip(monkeypatch, choices, expected):
+def test_decision_utility_requires_distinct_generator_and_judge(
+    monkeypatch, judge_digest, expected
+):
     monkeypatch.setattr(
         distill,
         "_worker_call",
         lambda *_a, **_k: {"answer": "same", "_model_digest": "a" * 64},
     )
-    sequence = iter(choices)
+    sequence = iter((0.0, 2.0))
     worker = distill._WorkerCounterfactual(
         12000,
         {"recall.distill.answer_generator": {}},
         {"recall.distill.answer_generator": "a" * 64},
-        judge_call=lambda _payload: {"blind_choice": next(sequence)},
-        judge_digest="b" * 64,
+        judge_call=lambda _payload: {"logit": next(sequence)},
+        judge_digest=judge_digest,
     )
     result = worker.compare(
         {"rally_id": "r", "candidate_id": "c", "query": "q", "context": []}
     )
     assert result["verdict"] == expected
-    assert result["order_agreement"] is (expected == "neutral")
+    assert result["order_agreement"] is (expected != "uncertain")
 
 
 def test_service_defer_after_answers_releases_attempt(monkeypatch, tmp_path):
