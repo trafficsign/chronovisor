@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -407,6 +407,7 @@ class ResolvedRerankRoute:
     provider: str
     model: str
     location: RouteLocation
+    revision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -419,6 +420,7 @@ class EmbeddingRoute:
 class RerankRoute:
     backend: RerankBackend
     model: str
+    revision: str | None = None
 
 
 Result = TypeVar("Result")
@@ -629,7 +631,35 @@ class LLMRuntime:
             provider=route.backend.provider,
             model=route.model,
             location=route.backend.location,
+            revision=route.revision,
         )
+
+    def decision_readout(
+        self, role: str, question: str, states: Sequence[str]
+    ) -> tuple[float, ...]:
+        """Run one binary decision question over untrusted states.
+
+        Only a local backend that exposes ``readout`` is eligible. This is the
+        raw judge primitive; contract mapping belongs to the service.
+        """
+
+        route = _resolve(self._rerank, role, "rerank")
+        if route.backend.location is not RouteLocation.LOCAL:
+            raise RouteConfigurationError(role, "rerank")
+        readout = getattr(route.backend, "readout", None)
+        if not callable(readout):
+            raise CapabilityUnavailableError(role, "rerank")
+        if not states or not question.strip():
+            raise RequestValidationError(role, "rerank", "question")
+        raw_scores = readout(question, tuple(states))
+        if len(raw_scores) != len(states) or any(
+            isinstance(score, bool)
+            or not isinstance(score, int | float)
+            or not math.isfinite(float(score))
+            for score in raw_scores
+        ):
+            raise BackendContractError(role, "rerank", "invalid decision readout")
+        return tuple(float(score) for score in raw_scores)
 
     def resource_lease(
         self, role: str, *, exclusive: bool, timeout_ms: int | None = None
@@ -689,9 +719,7 @@ class LLMRuntime:
             budgets = (("request", None, 0, False),)
         for field_name, value, maximum, optional in budgets:
             if not _valid_budget(value, maximum, optional=optional):
-                self._reject_request(
-                    role, capability, provider, location, field_name
-                )
+                self._reject_request(role, capability, provider, location, field_name)
         if isinstance(request, RerankRequest):
             if not isinstance(request.query, str) or not request.query.strip():
                 self._reject_request(role, capability, provider, location, "query")
@@ -703,9 +731,7 @@ class LLMRuntime:
                     for candidate in request.candidates
                 )
             ):
-                self._reject_request(
-                    role, capability, provider, location, "candidates"
-                )
+                self._reject_request(role, capability, provider, location, "candidates")
             sources = request.candidate_sources
             if sources is None:
                 if location is not RouteLocation.LOCAL:
@@ -788,10 +814,16 @@ class LLMRuntime:
             raise RouteConfigurationError(role, capability)
         if location is RouteLocation.LOCAL:
             return location
-        if self._cloud_execution_allowed is not None and not self._cloud_execution_allowed():
+        if (
+            self._cloud_execution_allowed is not None
+            and not self._cloud_execution_allowed()
+        ):
             self._emit_failure(
-                EgressDeniedError.category, role=role, capability=capability,
-                provider=provider, location=location,
+                EgressDeniedError.category,
+                role=role,
+                capability=capability,
+                provider=provider,
+                location=location,
             )
             raise EgressDeniedError(role, capability)
         default_allowed = (

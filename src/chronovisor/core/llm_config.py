@@ -132,6 +132,7 @@ class ProviderDefinition:
     decision_config: DecisionModelConfig | None = None
     embedding_device: str | None = None
     endpoint: str | None = None
+    revision: str | None = None
 
     def capabilities_for(self, model: str) -> BackendCapabilities:
         return (
@@ -375,9 +376,12 @@ def _provider(provider_id: str, value: object) -> ProviderDefinition:
             reranker_config=config,
         )
     if kind == "local-decision-mlx":
-        _exact_keys(table, {"kind", "path", "max_chars"})
+        _exact_keys(table, {"kind", "path", "max_chars", "revision"})
         path = _string(table.get("path"))
         if not path or any(ord(character) < 32 for character in path):
+            raise _fail()
+        revision = _string(table["revision"]) if "revision" in table else None
+        if revision is not None and re.fullmatch(r"[0-9a-f]{64}", revision) is None:
             raise _fail()
         return ProviderDefinition(
             provider_id,
@@ -388,7 +392,9 @@ def _provider(provider_id: str, value: object) -> ProviderDefinition:
                 max_chars=_positive_int(
                     table.get("max_chars"), DecisionModelConfig.max_chars
                 ),
+                revision=revision,
             ),
+            revision=revision,
         )
     if kind == "semantic-service":
         _exact_keys(table, {"kind"})
@@ -732,7 +738,9 @@ def build_llm_runtime(
                 cast(EmbeddingBackend, backend), role.model
             )
         else:
-            rerank[role_name] = RerankRoute(cast(RerankBackend, backend), role.model)
+            rerank[role_name] = RerankRoute(
+                cast(RerankBackend, backend), role.model, provider.revision
+            )
         if isinstance(backend, (OllamaAdapter, OMLXAdapter)):
             local_controls[role_name] = backend
     from chronovisor.core.model_execution import automatic_cloud_allowed
