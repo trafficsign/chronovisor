@@ -150,7 +150,7 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 
 <section class="blockers" data-section="ブロッカー">
 <h2>ブロッカー（発生時のみ）</h2>
-<ul><li>Ornith完全退役は3roleの独立性validatorにより未完了（answer.scorer / certificate_judge.primary / distill.utility_judgeを維持）。judge_mode=off適用後の20:35:12ターンはused_judge=false・judge段なし。ただしsearch budget exhaustedでfilter未実行。</li><li>Recall高速化は9d3ee4d6（07f0e3d3と同一tree）を反映・cache事前準備済み。次のユーザーメッセージでfresh hookのstatus、negative_feedback / bm25_snapshot / evidence_search / total、recall_filter実行有無・statusを確認する。候補を持つ実Recallターンのfilter observed受入も未完了。現在recall_filter=on。</li></ul>
+<ul><li>Ornith完全退役は3roleの独立性validatorにより未完了（answer.scorer / certificate_judge.primary / distill.utility_judgeを維持）。judge_mode=off適用後の20:35:12ターンはused_judge=false・judge段なし。ただしsearch budget exhaustedでfilter未実行。</li><li>Recall高速化と追記/WAL失効修正はa03eb80c（83225964と同一tree）を反映・cache事前準備済み。次のユーザーメッセージでfresh hookのstatus、negative_feedback / bm25_snapshot / evidence_search / total、recall_filter実行有無・statusを確認する。候補を持つ実Recallターンのfilter observed受入も未完了。現在recall_filter=on。</li></ul>
 </section>
 
 <section data-section="受け渡しメモ">
@@ -208,6 +208,9 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 <li><time>2026-11-07 21:10</time><span>Cache準備: 書込可能経路でfeedback/golden/lexical receiptを準備。既存feedback/goldenは有効cacheを再利用し、lexical receiptを新規作成。別のread-onlyプロセスでmiss時処理をassertionに置換して全cache命中・hash/mtime不変を確認。feedback 1.77ms、golden 150.74ms（negative31/positive16497）、bm25_snapshot 321.20ms。書込可能初回のBM25は821.98ms。これは部品計測で、実Recall段の速度ではない。</span></li>
 <li><time>2026-11-07 21:10</time><span>保守lease解放済み、ingest liveness ready/alert=false。展開前batchの9/10成功・1失敗は既存事象として保持。rollbackと証跡: ~/.chronovisor/runtime/rollback/recall-cache-20261107-210410。fresh recallは次メッセージ待ち（旧exhausted p50: negative_feedback1989/bm25_snapshot758/evidence_search3055ms、旧ok:736/766/1916ms）。このターンで実hookの速度やfilter成功は未判定。</span></li>
 <li><time>2026-11-07 21:10</time><span>fresh trigger「StartLux の recall filter の閾値」decision_id=20261107T211024-d7e29b9d: degraded / recall search budget exhausted、latency3228ms（dispatcher3281.108ms）。negative_feedback1361 / bm25_snapshot828 / evidence_search2927ms。used_judge=false、judge段なし。候補context_items0、recall_filter field・段ともなし（未実行、keep/drop判定なし）。総予算4800ms内だが検索予算枯渇は継続し、cache部品計測の改善を実ターンでは再現できず。旧exhausted p50比は−628/+70/−128ms、旧ok比は+625/+62/+1011ms。原因は未特定。既存の同じ上流エラーからの明確な新規回帰とは断定せず、rollbackなし。filter実ターン受入は未完了。</span></li>
+<li><time>2026-11-07 21:35</time><span>追記cache/WAL失効修正83225964の展開承認（Claude169テスト、実装側200テスト、531query不一致0、隔離手順negative195–197ms/BM25338–345ms）。remote9d3ee4d6不変。統合a03eb80cは83225964と同一tree。rollback/recall-cache-invalidation-20261107-213430に退避。ingestバッチ自然終了後の保守lock待ち。次の実hook速度は展開後のユーザートリガーで確認。</span></li>
+<li><time>2026-11-07 21:51</time><span>追記cache/WAL失効修正の展開完了。ingest自然終了後に保守leaseを取得し、remote不変を再確認してa03eb80cへfast-forward push（treeは83225964と一致）。runtime.sourceのみ変更、全11ジョブ再起動。常駐5サービスarchive・unpinned hookのrefresh有無両方でa03eb80cを照合。semantic/reranker ready・last_errorなし・reranker drift=false。設定はsource以外・依存制約とも不変。</span></li>
+<li><time>2026-11-07 21:51</time><span>本番cacheをwritable経路で更新（feedback schema2への初回2681.44ms、golden145.37ms、BM25初回851.88ms）。新規read-onlyプロセスでmiss処理を禁止し、全cache命中とsidecar hash/mtime不変を確認: feedback36.79ms、golden138.25ms、bm25_snapshot319.65ms。部品計測であり実Recall速度は次のトリガー待ち。rollback/evidence: ~/.chronovisor/runtime/rollback/recall-cache-invalidation-20261107-213430。既存MCP7プロセスは停止せず保持（旧openerが動けばWAL再失効の可能性あり）。保守lease解放。</span></li>
 </ol>
 </section>
 
