@@ -35,6 +35,7 @@ from chronovisor.core import (
     pi_transcript,
     runtime_config,
 )
+from chronovisor.core.decision_mlx import decision_fingerprint, decision_route
 from chronovisor.core.durable_state import (
     DurableStateError,
     atomic_write_bytes,
@@ -329,12 +330,31 @@ _DISTILLATION_ROLES = {
         "required_capabilities": ["structured_output"],
     },
     "recall.distill.utility_judge": {
-        "capability": "generation",
-        "provider": "local",
-        "model": runtime_config.DEFAULT_DECISION_TIE_BREAK_MODEL,
-        "required_capabilities": ["structured_output"],
+        "capability": "rerank",
+        "provider": "local_decision",
+        "model": "startlux-decision-v1.1-4b-instant-mlx-8bit",
     },
 }
+COUNTERFACTUAL_IDENTITY_REVISION = "local-blind-counterfactual-startlux-v1"
+LEGACY_COUNTERFACTUAL_IDENTITY_REVISION = "local-blind-counterfactual-v1"
+LEGACY_UTILITY_JUDGE_ROUTE = {
+    "role": "recall.distill.utility_judge",
+    "provider": "mtplx",
+    "model": "Ornith-1.5-9B-MTPLX-4bit",
+    "location": "local",
+}
+LEGACY_UTILITY_JUDGE_DIGEST = (
+    "5e8c3a908fa019a60beb23f05b07fc2ea22b0b0ebfcb4fabb6faf9d5b159bf5d"
+)
+LEGACY_COUNTERFACTUAL_GENERATOR_ROUTE = {
+    "role": "recall.distill.answer_generator",
+    "provider": "omlx",
+    "model": "qwen3.8-flash-next-chat",
+    "location": "local",
+}
+LEGACY_COUNTERFACTUAL_GENERATOR_DIGEST = (
+    "92331aa0b4aa8f24dffbaa8da94718c762bdac630a0de9ba1ed68e9bc69631aa"
+)
 
 
 class DistillationError(ValueError):
@@ -423,11 +443,18 @@ class _WorkerCounterfactual:
         routes: Mapping[str, Mapping[str, str]],
         digests: Mapping[str, str],
         deadline_ms: int = 60_000,
+        *,
+        judge_call: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        judge_route: Mapping[str, str] | None = None,
+        judge_digest: str = "",
     ) -> None:
         self.max_input_bytes = max_input_bytes
         self.routes = routes
         self.digests = digests
         self.deadline_ms = deadline_ms
+        self.judge_call = judge_call
+        self.judge_route = dict(judge_route or {})
+        self.judge_digest = judge_digest
 
     def compare(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         self.attempted = False
@@ -490,15 +517,21 @@ class _WorkerCounterfactual:
         )
 
         def judge(a_first: bool) -> Mapping[str, Any]:
+            payload = {
+                **base,
+                "answer_a": a0 if a_first else a1,
+                "answer_b": a1 if a_first else a0,
+                "blind_order": "a_first" if a_first else "b_first",
+            }
+            if self.judge_call is not None:
+                result = dict(self.judge_call(payload))
+                result["_route_identity"] = dict(self.judge_route)
+                result["_model_digest"] = self.judge_digest
+                return result
             return _worker_call(
                 "utility",
                 "recall.distill.utility_judge",
-                {
-                    **base,
-                    "answer_a": a0 if a_first else a1,
-                    "answer_b": a1 if a_first else a0,
-                    "blind_order": "a_first" if a_first else "b_first",
-                },
+                payload,
                 max_input_bytes=self.max_input_bytes,
                 expected_route=self.routes["recall.distill.utility_judge"],
                 expected_digest=self.digests["recall.distill.utility_judge"],
@@ -688,45 +721,110 @@ def _worker_call(
     }
 
 
+def _local_counterfactual_routes() -> tuple[
+    dict[str, str], str, dict[str, str], str
+]:
+    """Resolve the mixed local generator/decision-judge counterfactual pair."""
+
+    from chronovisor.core import ollama
+
+    generator_role = "recall.distill.answer_generator"
+    judge_role = "recall.distill.utility_judge"
+    generator_routes = tuple(
+        route
+        for route in ollama.runtime_generation_routes((generator_role,))
+        if route.role == generator_role
+    )
+    if (
+        len(generator_routes) != 1
+        or generator_routes[0].location != "local"
+        or not generator_routes[0].structured_output
+    ):
+        raise DistillationError("counterfactual generator route is invalid")
+    generator = generator_routes[0]
+    generator_digest = ollama.runtime_generation_route_fingerprints(
+        generator_routes
+    )[generator_role]
+    judge = decision_route(judge_role)
+    judge_identity = {
+        "role": judge.role,
+        "provider": judge.provider,
+        "model": judge.model,
+        "location": judge.location,
+    }
+    return (
+        {
+            "role": generator.role,
+            "provider": generator.provider,
+            "model": generator.model,
+            "location": generator.location,
+        },
+        generator_digest,
+        judge_identity,
+        decision_fingerprint(judge),
+    )
+
+
+def _decision_utility_judge(
+    payload: Mapping[str, Any], *, timeout_ms: int
+) -> Mapping[str, Any]:
+    from chronovisor.core import reranker_client
+    from chronovisor.core.runtime_config import load_reranker_config
+
+    context = payload.get("context")
+    context_text = (
+        "\n".join(str(value) for value in context if isinstance(value, str))
+        if isinstance(context, list)
+        else str(context or "")
+    )
+    try:
+        return reranker_client.decision_judge(
+            "utility",
+            {
+                "query": str(payload.get("query") or ""),
+                "context": context_text,
+                "answer_a": str(payload.get("answer_a") or ""),
+                "answer_b": str(payload.get("answer_b") or ""),
+            },
+            role="recall.distill.utility_judge",
+            config=load_reranker_config(),
+            timeout_ms=min(timeout_ms, 10_000),
+        )
+    except Exception as exc:
+        raise DistillationDeferred(
+            "utility judge service unavailable",
+            failure_class="capacity_unavailable",
+        ) from exc
+
+
 def _default_counterfactual_worker(
     config: DistillationConfig, deadline_ms: int
 ) -> CounterfactualGenerator | None:
     try:
-        from chronovisor.core import ollama
-
-        roles = (
-            "recall.distill.answer_generator",
-            "recall.distill.utility_judge",
-        )
-        routes = ollama.runtime_generation_routes(roles)
-        digests = ollama.runtime_generation_route_fingerprints(routes)
-        identities = {
-            route.role: {
-                "role": route.role,
-                "provider": route.provider,
-                "model": route.model,
-                "location": route.location,
-            }
-            for route in routes
-        }
-        counterfactual = (
-            _WorkerCounterfactual(
-                config.max_input_bytes,
-                identities,
-                digests,
-                deadline_ms,
-            )
-            if tuple(route.role for route in routes) == roles
-            and all(
-                route.location == "local" and route.structured_output
-                for route in routes
-            )
-            and digests[roles[0]] != digests[roles[1]]
-            else None
+        generator_identity, generator_digest, judge_identity, judge_digest = (
+            _local_counterfactual_routes()
         )
     except Exception:
-        counterfactual = None
-    return counterfactual
+        return None
+    if generator_digest == judge_digest:
+        return None
+    return _WorkerCounterfactual(
+        config.max_input_bytes,
+        {
+            "recall.distill.answer_generator": generator_identity,
+            "recall.distill.utility_judge": judge_identity,
+        },
+        {
+            "recall.distill.answer_generator": generator_digest,
+            "recall.distill.utility_judge": judge_digest,
+        },
+        deadline_ms,
+        judge_call=lambda payload: _decision_utility_judge(
+            payload, timeout_ms=deadline_ms
+        ),
+        judge_route=judge_identity,
+        judge_digest=judge_digest,
+    )
 
 
 def _default_workers(
@@ -798,16 +896,19 @@ def _default_workers(
             config, counterfactual_deadline_ms
         )
 
-    roles = (
+    generation_roles = (
         *TEACHER_ROLES,
         "recall.distill.answer_generator",
-        "recall.distill.utility_judge",
     )
     try:
-        routes = ollama.runtime_generation_routes(roles)
+        routes = tuple(
+            route
+            for route in ollama.runtime_generation_routes(generation_roles)
+            if route.role in generation_roles
+        )
     except Exception:
         return {}, None
-    if tuple(route.role for route in routes) != roles or any(
+    if tuple(route.role for route in routes) != generation_roles or any(
         route.location != "local" or not route.structured_output for route in routes
     ):
         return {}, None
@@ -837,12 +938,7 @@ def _default_workers(
             )
             for role in TEACHER_ROLES
         },
-        _WorkerCounterfactual(
-            config.max_input_bytes,
-            identities,
-            digests,
-            counterfactual_deadline_ms,
-        ),
+        _default_counterfactual_worker(config, counterfactual_deadline_ms),
     )
 
 
@@ -6713,39 +6809,38 @@ def _sealed_counterfactual_exposure_binding(
 
 
 def _configured_local_route_binding(row: Mapping[str, Any]) -> bool:
-    """Bind local teacher/CF identities to the currently configured routes."""
+    """Bind local teacher/CF identities to their versioned route contracts."""
 
     source = str(row.get("source") or "")
     if source not in {"teacher-label", "counterfactual-label"}:
         return True
     if source == "teacher-label" and row.get("profile") in SINGLE_TEACHER_PROFILES:
         return True
-    try:
-        from chronovisor.core import ollama
-
-        roles = (
-            *TEACHER_ROLES,
-            "recall.distill.answer_generator",
-            "recall.distill.utility_judge",
-        )
-        routes = ollama.runtime_generation_routes(roles)
-        digests = ollama.runtime_generation_route_fingerprints(routes)
-    except Exception:
-        return False
-    expected = {
-        route.role: {
-            "role": route.role,
-            "provider": route.provider,
-            "model": route.model,
-            "location": route.location,
-        }
-        for route in routes
-    }
-    if tuple(expected) != roles or any(
-        identity["location"] != "local" for identity in expected.values()
-    ):
-        return False
     if source == "teacher-label":
+        try:
+            from chronovisor.core import ollama
+
+            routes = tuple(
+                route
+                for route in ollama.runtime_generation_routes(TEACHER_ROLES)
+                if route.role in TEACHER_ROLES
+            )
+            digests = ollama.runtime_generation_route_fingerprints(routes)
+        except Exception:
+            return False
+        expected = {
+            route.role: {
+                "role": route.role,
+                "provider": route.provider,
+                "model": route.model,
+                "location": route.location,
+            }
+            for route in routes
+        }
+        if tuple(expected) != TEACHER_ROLES or any(
+            identity["location"] != "local" for identity in expected.values()
+        ):
+            return False
         route = str(row.get("route") or "")
         profile = row.get("profile")
         if profile not in LOCAL_TEACHER_PROFILES:
@@ -6762,25 +6857,47 @@ def _configured_local_route_binding(row: Mapping[str, Any]) -> bool:
             "identity_revision": "local-teacher-v1",
             "request_revision": (
                 TEACHER_INPUT_VIEW_REVISION
-                if profile == LOCAL_SINGLE_PROFILE and row.get("request_revision") == TEACHER_INPUT_VIEW_REVISION
+                if profile == LOCAL_SINGLE_PROFILE
+                and row.get("request_revision") == TEACHER_INPUT_VIEW_REVISION
                 else "local-teacher-v1"
             ),
-            "assignment_revision": ("local-single-assignment-v1" if profile == LOCAL_SINGLE_PROFILE else ASSIGNMENT_REVISION),
+            "assignment_revision": (
+                "local-single-assignment-v1"
+                if profile == LOCAL_SINGLE_PROFILE
+                else ASSIGNMENT_REVISION
+            ),
         }
         return (
-            route in (TEACHER_ROLES[:1] if profile == LOCAL_SINGLE_PROFILE else TEACHER_ROLES)
+            route
+            in (
+                TEACHER_ROLES[:1]
+                if profile == LOCAL_SINGLE_PROFILE
+                else TEACHER_ROLES
+            )
             and all(row.get(key) == value for key, value in authority.items())
             and row.get("route_identity") == expected[route]
             and row.get("model_digest") == digests[route]
         )
-    generator = "recall.distill.answer_generator"
-    judge = "recall.distill.utility_judge"
+    revision = str(row.get("identity_revision") or "")
+    if revision == COUNTERFACTUAL_IDENTITY_REVISION:
+        try:
+            generator_identity, generator_digest, judge_identity, judge_digest = (
+                _local_counterfactual_routes()
+            )
+        except Exception:
+            return False
+    elif revision == LEGACY_COUNTERFACTUAL_IDENTITY_REVISION:
+        generator_identity = LEGACY_COUNTERFACTUAL_GENERATOR_ROUTE
+        generator_digest = LEGACY_COUNTERFACTUAL_GENERATOR_DIGEST
+        judge_identity = LEGACY_UTILITY_JUDGE_ROUTE
+        judge_digest = LEGACY_UTILITY_JUDGE_DIGEST
+    else:
+        return False
     return (
         row.get("profile") in TEACHER_PROFILES
         and row.get("cohort") == _profile_cohort(str(row.get("profile") or ""))
         and row.get("assignment_revision") == ASSIGNMENT_REVISION
-        and row.get("identity_revision") == "local-blind-counterfactual-v1"
-        and row.get("request_revision") == "local-blind-counterfactual-v1"
+        and row.get("request_revision") == revision
         and (
             (
                 row.get("profile") in LOCAL_TEACHER_PROFILES
@@ -6808,13 +6925,20 @@ def _configured_local_route_binding(row: Mapping[str, Any]) -> bool:
             )
         )
         and row.get("counterfactual_producer") == "chronovisor-local-blind-v1"
-        and row.get("counterfactual_revision") == "two-order-locked-v2"
         and set(row.get("blind_orders") or []) == {"a0_first", "a1_first"}
-        and row.get("generator_route_identity") == expected[generator]
-        and row.get("judge_route_identity") == expected[judge]
-        and row.get("generator_model_digest") == digests[generator]
-        and row.get("judge_model_digest") == digests[judge]
-        and row.get("generator_model_digest") != row.get("judge_model_digest")
+        and row.get("generator_route_identity") == generator_identity
+        and row.get("generator_model_digest") == generator_digest
+        and row.get("model_digest") == generator_digest
+        and row.get("judge_route_identity") == judge_identity
+        and row.get("judge_model_digest") == judge_digest
+        and (
+            row.get("split") != "test"
+            or (
+                row.get("locked_test_read_only") is True
+                and str(row.get("locked_test_evidence_ref") or "")
+                == f"split-plan:{str(row.get('split_plan_id') or '')}"
+            )
+        )
     )
 
 
@@ -7017,26 +7141,48 @@ def _configured_local_single_cohort() -> dict[str, Any]:
     from chronovisor.core import ollama
     from chronovisor.core.model_execution import local_reasoning_settings
 
-    roles = (TEACHER_ROLES[0], "recall.distill.answer_generator", "recall.distill.utility_judge")
+    teacher_role = TEACHER_ROLES[0]
     digests: dict[str, str] = {}
     reasoning: dict[str, Any] | None = None
+    counterfactual: tuple[str, str] = ("", "")
     try:
-        routes = ollama.runtime_generation_routes(roles)
-        if tuple(route.role for route in routes) != roles or any(route.location != "local" for route in routes):
-            raise ValueError("local cohort routes unavailable")
-        digests = ollama.runtime_generation_route_fingerprints(routes)
-        if any(re.fullmatch(r"[0-9a-f]{64}", digests[role]) is None for role in roles):
-            raise ValueError("local cohort digests unavailable")
-        reasoning = local_reasoning_settings(roles[0], routes[0].model)
+        teacher_routes = tuple(
+            route
+            for route in ollama.runtime_generation_routes((teacher_role,))
+            if route.role == teacher_role
+        )
+        if len(teacher_routes) != 1 or teacher_routes[0].location != "local":
+            raise ValueError("local cohort teacher route unavailable")
+        teacher_digest = ollama.runtime_generation_route_fingerprints(
+            teacher_routes
+        )[teacher_role]
+        (
+            _generator_identity,
+            generator_digest,
+            _judge_identity,
+            judge_digest,
+        ) = _local_counterfactual_routes()
+        if re.fullmatch(r"[0-9a-f]{64}", teacher_digest) is None:
+            raise ValueError("local cohort teacher digest unavailable")
+        digests = {teacher_role: teacher_digest}
+        counterfactual = (generator_digest, judge_digest)
+        reasoning = local_reasoning_settings(teacher_role, teacher_routes[0].model)
     except Exception:
         digests = {}
+        counterfactual = ("", "")
     cohort = {
-        "revision": "configured-local-single-cohort-v1", "profile": LOCAL_SINGLE_PROFILE,
-        "teacher_model_digests": {role: digests.get(role, "") for role in TEACHER_ROLES},
-        "counterfactual_model_digests": [digests.get(role, "") for role in roles[1:]],
+        "revision": "configured-local-single-cohort-startlux-v1",
+        "profile": LOCAL_SINGLE_PROFILE,
+        "teacher_model_digests": {
+            role: digests.get(role, "") for role in TEACHER_ROLES
+        },
+        "counterfactual_model_digests": list(counterfactual),
         "reasoning": reasoning,
     }
-    return {**cohort, "cohort_sha256": canonical_json.canonical_json_sha256_strict(cohort)}
+    return {
+        **cohort,
+        "cohort_sha256": canonical_json.canonical_json_sha256_strict(cohort),
+    }
 
 
 def _active_training_cohort(
@@ -7162,7 +7308,11 @@ def _single_teacher_counterfactual_pairs(
         and row.get("profile") == config.teacher_profile
         and row.get("cohort") == _profile_cohort(config.teacher_profile)
         and row.get("profile_contract_id") == current_contract_id
-        and row.get("identity_revision") == "local-blind-counterfactual-v1"
+        and row.get("identity_revision")
+        in {
+            COUNTERFACTUAL_IDENTITY_REVISION,
+            LEGACY_COUNTERFACTUAL_IDENTITY_REVISION,
+        }
         and (
             (
                 config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
@@ -15939,8 +16089,8 @@ def _compare_and_commit_counterfactual(
             "profile": config.teacher_profile,
             "cohort": _profile_cohort(config.teacher_profile),
             "profile_contract_id": ox_contract_id,
-            "identity_revision": "local-blind-counterfactual-v1",
-            "request_revision": "local-blind-counterfactual-v1",
+            "identity_revision": COUNTERFACTUAL_IDENTITY_REVISION,
+            "request_revision": COUNTERFACTUAL_IDENTITY_REVISION,
             "assignment_revision": ASSIGNMENT_REVISION,
             "expires_at": config.ox_expires_at
             if config.teacher_profile == OX_SINGLE_PROFILE
