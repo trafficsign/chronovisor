@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from chronovisor.core import llm_config, ollama
+from chronovisor.core.decision_mlx import DecisionRoute, decision_fingerprint
 from chronovisor.core.llm_runtime import (
     BackendCapabilities,
     GenerationResult,
@@ -17,12 +18,28 @@ from chronovisor.core.llm_runtime import (
 from chronovisor.recall import recall_answer_adapters
 
 
+@pytest.fixture(autouse=True)
+def _decision_role(monkeypatch):
+    monkeypatch.setattr(
+        recall_answer_adapters, "uses_decision_judge", lambda _role: True
+    )
+
+
 def test_local_effort_binds_sampler_identity_and_actual_runtime_budgets(monkeypatch):
     settings = {"level": "xhigh", "num_ctx": 65536, "num_predict": 16384}
-    monkeypatch.setattr(recall_answer_adapters, "local_reasoning_settings", lambda *_args: settings)
-    monkeypatch.setattr(recall_answer_adapters, "load_decision_router_config", lambda: SimpleNamespace(
-        num_ctx=131072, num_predict=4096, read_timeout_ms=660000, max_output_chars=8000,
-    ))
+    monkeypatch.setattr(
+        recall_answer_adapters, "local_reasoning_settings", lambda *_args: settings
+    )
+    monkeypatch.setattr(
+        recall_answer_adapters,
+        "load_decision_router_config",
+        lambda: SimpleNamespace(
+            num_ctx=131072,
+            num_predict=4096,
+            read_timeout_ms=660000,
+            max_output_chars=8000,
+        ),
+    )
     captured = {}
 
     def structured_chat(_messages, **kwargs):
@@ -30,40 +47,81 @@ def test_local_effort_binds_sampler_identity_and_actual_runtime_budgets(monkeypa
         return ollama.ChatResponse(content='{"answer":"synthetic"}')
 
     monkeypatch.setattr(ollama, "runtime_structured_chat", structured_chat)
-    identity = recall_answer_adapters._sampler_identity(recall_answer_adapters.RUNNER_RUNTIME_ROLE)
+    identity = recall_answer_adapters._sampler_identity(
+        recall_answer_adapters.RUNNER_RUNTIME_ROLE
+    )
     recall_answer_adapters._chat_json(
-        runtime_role=recall_answer_adapters.RUNNER_RUNTIME_ROLE, messages=[], schema={}, seed=7,
+        runtime_role=recall_answer_adapters.RUNNER_RUNTIME_ROLE,
+        messages=[],
+        schema={},
+        seed=7,
     )
     assert captured["think"] == "xhigh"
     assert captured["num_ctx"] == 131072 and captured["num_predict"] == 16384
-    assert identity == recall_answer_adapters.canonical_sha256({
-        "temperature": 0, "seed": "pair_seed", "think": "xhigh",
-        "runtime_budgets": {"num_ctx": 131072, "num_predict": 16384},
-    })
-    settings["level"] = "low"
-    assert recall_answer_adapters._sampler_identity(recall_answer_adapters.RUNNER_RUNTIME_ROLE) != identity
-    monkeypatch.setattr(recall_answer_adapters, "local_reasoning_settings", lambda *_args: None)
-    assert recall_answer_adapters._sampler_identity(recall_answer_adapters.RUNNER_RUNTIME_ROLE) == recall_answer_adapters.SAMPLER_SHA256
-
-
-def _routes(*, location: str = "remote") -> tuple[ollama.RuntimeGenerationRoute, ...]:
-    provider = "ollama" if location == "local" else "remote-test"
-    return (
-        ollama.RuntimeGenerationRoute(
-            recall_answer_adapters.RUNNER_RUNTIME_ROLE,
-            provider,
-            "runner-model",
-            location,
-            True,
-        ),
-        ollama.RuntimeGenerationRoute(
-            recall_answer_adapters.SCORER_RUNTIME_ROLE,
-            provider,
-            "scorer-model",
-            location,
-            True,
-        ),
+    assert identity == recall_answer_adapters.canonical_sha256(
+        {
+            "temperature": 0,
+            "seed": "pair_seed",
+            "think": "xhigh",
+            "runtime_budgets": {"num_ctx": 131072, "num_predict": 16384},
+        }
     )
+    settings["level"] = "low"
+    assert (
+        recall_answer_adapters._sampler_identity(
+            recall_answer_adapters.RUNNER_RUNTIME_ROLE
+        )
+        != identity
+    )
+    monkeypatch.setattr(
+        recall_answer_adapters, "local_reasoning_settings", lambda *_args: None
+    )
+    assert (
+        recall_answer_adapters._sampler_identity(
+            recall_answer_adapters.RUNNER_RUNTIME_ROLE
+        )
+        == recall_answer_adapters.SAMPLER_SHA256
+    )
+
+
+def _runner_route(*, location: str = "remote") -> ollama.RuntimeGenerationRoute:
+    provider = "ollama" if location == "local" else "remote-test"
+    return ollama.RuntimeGenerationRoute(
+        recall_answer_adapters.RUNNER_RUNTIME_ROLE,
+        provider,
+        "runner-model",
+        location,
+        True,
+    )
+
+
+def _decision_route() -> DecisionRoute:
+    return DecisionRoute(
+        role=recall_answer_adapters.SCORER_RUNTIME_ROLE,
+        provider="local-decision",
+        model="startlux-model",
+        location="local",
+        revision="f" * 64,
+    )
+
+
+def _install_identity_routes(
+    monkeypatch: pytest.MonkeyPatch, *, runner_location: str = "remote"
+) -> tuple[ollama.RuntimeGenerationRoute, DecisionRoute]:
+    monkeypatch.setattr(
+        recall_answer_adapters, "uses_decision_judge", lambda _role: True
+    )
+    runner = _runner_route(location=runner_location)
+    scorer = _decision_route()
+
+    def generation_routes(roles: object) -> tuple[ollama.RuntimeGenerationRoute, ...]:
+        if tuple(roles) != (recall_answer_adapters.RUNNER_RUNTIME_ROLE,):
+            pytest.fail("unexpected runtime roles")
+        return (runner,)
+
+    monkeypatch.setattr(ollama, "runtime_generation_routes", generation_routes)
+    monkeypatch.setattr(recall_answer_adapters, "decision_route", lambda _role: scorer)
+    return runner, scorer
 
 
 def _forbid_ollama_controls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -85,19 +143,8 @@ def _forbid_ollama_controls(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_remote_runner_uses_fixed_runtime_and_raw_high_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    routes = _routes()
+    _runner, _scorer = _install_identity_routes(monkeypatch)
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(
-        ollama,
-        "runtime_generation_routes",
-        lambda roles: routes
-        if tuple(roles)
-        == (
-            recall_answer_adapters.RUNNER_RUNTIME_ROLE,
-            recall_answer_adapters.SCORER_RUNTIME_ROLE,
-        )
-        else pytest.fail("unexpected runtime roles"),
-    )
 
     def structured_chat(_messages: object, **kwargs: Any) -> ollama.ChatResponse:
         captured.update(kwargs)
@@ -113,7 +160,9 @@ def test_remote_runner_uses_fixed_runtime_and_raw_high_source(
     )
 
     assert result["answer"] == "grounded answer"
-    assert result["identity"]["identity_schema"] == recall_answer_adapters.IDENTITY_SCHEMA
+    assert (
+        result["identity"]["identity_schema"] == recall_answer_adapters.IDENTITY_SCHEMA
+    )
     assert result["identity"]["route_identity"] == {
         "role": recall_answer_adapters.RUNNER_RUNTIME_ROLE,
         "provider": "remote-test",
@@ -126,23 +175,45 @@ def test_remote_runner_uses_fixed_runtime_and_raw_high_source(
     assert captured["source_sensitivity"] == "high"
 
 
-def test_remote_scorer_uses_its_fixed_runtime_role(
+def test_startlux_scorer_uses_the_decision_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    routes = _routes()
+    _runner, scorer = _install_identity_routes(monkeypatch)
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: routes)
 
-    def structured_chat(_messages: object, **kwargs: Any) -> ollama.ChatResponse:
-        captured.update(kwargs)
-        return ollama.ChatResponse(
-            content=json.dumps(
-                {"correctness": 0.9, "grounding": 0.8, "citation": 0.7}
-            )
+    def decision_judge(
+        kind: str,
+        fields: object,
+        *,
+        role: str,
+        config: object,
+        timeout_ms: int,
+        priority: int | None = None,
+    ) -> dict[str, Any]:
+        captured.update(
+            kind=kind,
+            fields=fields,
+            role=role,
+            config=config,
+            timeout_ms=timeout_ms,
+            priority=priority,
         )
+        return {
+            "scores": {
+                "correctness": 0.9,
+                "grounding": 0.8,
+                "citation": 0.7,
+            }
+        }
 
-    monkeypatch.setattr(ollama, "runtime_structured_chat", structured_chat)
-    _forbid_ollama_controls(monkeypatch)
+    monkeypatch.setattr(
+        recall_answer_adapters.reranker_client, "decision_judge", decision_judge
+    )
+    monkeypatch.setattr(
+        recall_answer_adapters,
+        "load_reranker_config",
+        lambda: SimpleNamespace(service=SimpleNamespace(timeout_ms=1000)),
+    )
     gold = {
         "evidence": {
             "source_packet": {
@@ -153,7 +224,7 @@ def test_remote_scorer_uses_its_fixed_runtime_role(
         "rubric_sha256": "c" * 64,
     }
 
-    result = recall_answer_adapters.builtin_ollama_answer_scorer(
+    result = recall_answer_adapters.builtin_startlux_answer_scorer(
         "question",
         "answer",
         gold,
@@ -169,42 +240,71 @@ def test_remote_scorer_uses_its_fixed_runtime_role(
         "grounding": 0.8,
         "citation": 0.7,
     }
+    assert captured["kind"] == recall_answer_adapters.JUDGE_ANSWER_AXES
+    assert captured["role"] == recall_answer_adapters.SCORER_RUNTIME_ROLE
+    assert captured["timeout_ms"] == recall_answer_adapters.SCORER_TIMEOUT_MS
+    assert captured["priority"] == 1
+    assert captured["fields"]["query"] == "question"
+    assert captured["fields"]["answer"] == "answer"
+    assert "[PAGE page-1]" in captured["fields"]["reference"]
+    assert result["identity"]["scorer_id"] == "builtin-startlux-evidence-scorer-v1"
     assert result["identity"]["route_identity"]["role"] == (
         recall_answer_adapters.SCORER_RUNTIME_ROLE
     )
-    assert captured["runtime_role"] == recall_answer_adapters.SCORER_RUNTIME_ROLE
-    assert captured["source_data_class"] == "raw"
-    assert captured["source_sensitivity"] == "high"
+    assert result["identity"]["route_identity"]["model_digest"] == (
+        decision_fingerprint(scorer)
+    )
+    assert result["identity"]["model_digest"] == decision_fingerprint(scorer)
+    assert result["identity"]["policy_sha256"] == (
+        recall_answer_adapters.SCORER_POLICY_SHA256
+    )
+    assert (
+        result["reset_receipt"]["reset_protocol_sha256"]
+        == (result["identity"]["policy_sha256"])
+    )
 
 
-def test_local_ollama_identity_reads_real_digests_once(
+def test_local_ollama_runner_identity_reads_only_runner_digest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    routes = _routes(location="local")
+    runner = _runner_route(location="local")
+    scorer = _decision_route()
     calls: list[list[str]] = []
-    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: routes)
+
+    def generation_routes(roles: object) -> tuple[ollama.RuntimeGenerationRoute, ...]:
+        assert tuple(roles) == (recall_answer_adapters.RUNNER_RUNTIME_ROLE,)
+        return (runner,)
+
+    monkeypatch.setattr(ollama, "runtime_generation_routes", generation_routes)
+    monkeypatch.setattr(recall_answer_adapters, "decision_route", lambda _role: scorer)
 
     def digests(models: list[str]) -> dict[str, str]:
         calls.append(models)
-        return {"runner-model": "digest-runner", "scorer-model": "digest-scorer"}
+        return {"runner-model": "digest-runner"}
 
     monkeypatch.setattr(ollama, "model_digests", digests)
 
-    runner, scorer = recall_answer_adapters.builtin_answer_adapter_identities(
-        rubric_sha256="a" * 64,
-        evidence_manifest_sha256="b" * 64,
+    runner_identity, scorer_identity = (
+        recall_answer_adapters.builtin_answer_adapter_identities(
+            rubric_sha256="a" * 64,
+            evidence_manifest_sha256="b" * 64,
+        )
     )
 
-    assert calls == [["runner-model", "scorer-model"]]
-    assert runner["route_identity"]["model_digest"] == "digest-runner"
-    assert scorer["route_identity"]["model_digest"] == "digest-scorer"
+    assert calls == [["runner-model"]]
+    assert runner_identity["route_identity"]["model_digest"] == "digest-runner"
+    assert scorer_identity["route_identity"]["model_digest"] == (
+        decision_fingerprint(scorer)
+    )
 
 
-def test_missing_local_digest_and_unstructured_route_fail_before_backend(
+def test_missing_local_digest_unstructured_runner_and_missing_decision_route_fail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    routes = _routes(location="local")
-    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: routes)
+    runner = _runner_route(location="local")
+    scorer = _decision_route()
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: (runner,))
+    monkeypatch.setattr(recall_answer_adapters, "decision_route", lambda _role: scorer)
     monkeypatch.setattr(ollama, "model_digests", lambda _models: {})
     monkeypatch.setattr(
         ollama,
@@ -218,18 +318,15 @@ def test_missing_local_digest_and_unstructured_route_fail_before_backend(
             evidence_manifest_sha256="b" * 64,
         )
 
-    unstructured = (
-        routes[0],
-        ollama.RuntimeGenerationRoute(
-            routes[1].role,
-            routes[1].provider,
-            routes[1].model,
-            routes[1].location,
-            False,
-        ),
+    unstructured = ollama.RuntimeGenerationRoute(
+        runner.role,
+        runner.provider,
+        runner.model,
+        runner.location,
+        False,
     )
     monkeypatch.setattr(
-        ollama, "runtime_generation_routes", lambda _roles: unstructured
+        ollama, "runtime_generation_routes", lambda _roles: (unstructured,)
     )
     monkeypatch.setattr(
         ollama,
@@ -242,11 +339,26 @@ def test_missing_local_digest_and_unstructured_route_fail_before_backend(
             evidence_manifest_sha256="b" * 64,
         )
 
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: (runner,))
+    monkeypatch.setattr(
+        ollama, "model_digests", lambda _models: {"runner-model": "a" * 64}
+    )
+    monkeypatch.setattr(
+        recall_answer_adapters,
+        "decision_route",
+        lambda _role: (_ for _ in ()).throw(RuntimeError("missing")),
+    )
+    with pytest.raises(RuntimeError):
+        recall_answer_adapters.builtin_answer_adapter_identities(
+            rubric_sha256="a" * 64,
+            evidence_manifest_sha256="b" * 64,
+        )
+
 
 def test_malformed_runtime_answer_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: _routes())
+    _install_identity_routes(monkeypatch)
     monkeypatch.setattr(
         ollama,
         "runtime_structured_chat",
@@ -291,14 +403,12 @@ def test_remote_raw_high_egress_denial_runs_no_backend_or_ollama_control(
                 "runner-model",
                 BackendCapabilities(True, False, structured_output=True),
             ),
-            recall_answer_adapters.SCORER_RUNTIME_ROLE: GenerationRoute(
-                backend,
-                "scorer-model",
-                BackendCapabilities(True, False, structured_output=True),
-            ),
         }
     )
     monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        recall_answer_adapters, "decision_route", lambda _role: _decision_route()
+    )
     _forbid_ollama_controls(monkeypatch)
 
     with pytest.raises(ollama.RuntimeBridgeError) as denied:
@@ -310,3 +420,49 @@ def test_remote_raw_high_egress_denial_runs_no_backend_or_ollama_control(
 
     assert denied.value.category == "egress_denied"
     assert backend_calls == []
+
+
+def test_legacy_scorer_keeps_generation_identity_and_prompt(monkeypatch):
+    adapters = recall_answer_adapters
+    monkeypatch.setattr(adapters, "uses_decision_judge", lambda _role: False)
+    monkeypatch.setattr(
+        adapters, "decision_route", lambda *_: pytest.fail("decision route")
+    )
+    routes = (
+        _runner_route(),
+        ollama.RuntimeGenerationRoute(
+            adapters.SCORER_RUNTIME_ROLE,
+            "mtplx",
+            "ornith",
+            "local",
+            True,
+        ),
+    )
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: routes)
+    monkeypatch.setattr(adapters, "_sampler_identity", lambda _role: "sampler")
+    _, scorer = adapters.builtin_answer_adapter_identities(
+        rubric_sha256="r", evidence_manifest_sha256="e"
+    )
+    assert scorer["scorer_id"] == "builtin-runtime-evidence-scorer-v2"
+    assert scorer["policy_sha256"] == adapters.LEGACY_SCORER_POLICY_SHA256
+    seen = []
+    monkeypatch.setattr(
+        adapters,
+        "_chat_json",
+        lambda **kwargs: (
+            seen.append(kwargs)
+            or {
+                "correctness": 1.0,
+                "grounding": 0.8,
+                "citation": 0.7,
+            }
+        ),
+    )
+    result = adapters.builtin_ollama_answer_scorer(
+        "q",
+        "answer",
+        {"evidence": {"source_packet": {"evidence_chunks": []}}},
+        {"seed": 0},
+    )
+    assert seen[0]["messages"][0]["content"] == adapters.LEGACY_SCORER_SYSTEM
+    assert result["dimensions"]["correctness"] == 1.0

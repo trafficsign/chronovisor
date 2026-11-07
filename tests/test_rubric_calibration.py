@@ -851,3 +851,18 @@ def test_empty_calibration_does_not_resolve_runtime(
 
     assert result["status"] == "collecting"
     assert result["external_model_calls"] == 0
+
+
+def test_readonly_rubric_load_does_not_repair_primary(tmp_path):
+    path = tmp_path / "active.json"
+    valid = {
+        "schema_version": rubric_calibration.RUBRIC_SCHEMA_VERSION,
+        "rubric_text": "adopted",
+        "rubric_id": "test",
+    }
+    write_sealed_json(path, valid)
+    write_sealed_json(path, valid)
+    path.write_bytes(b"corrupt")
+    before = {p: p.read_bytes() for p in tmp_path.iterdir()}
+    assert load_active_rubric(path, recover_backup=False)["source"] == "builtin"
+    assert before == {p: p.read_bytes() for p in tmp_path.iterdir()}

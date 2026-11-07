@@ -6,11 +6,26 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from chronovisor.core import decision_mlx
+from chronovisor.core import decision_mlx, llm_config
 from chronovisor.core.decision_mlx import (
+    ANSWER_AXES,
+    ANSWER_AXIS_QUESTIONS,
+    JUDGE_ANSWER_AXES,
+    JUDGE_CERTIFICATE,
+    JUDGE_POLICY_SHA256,
+    JUDGE_ROLE_BY_KIND,
+    JUDGE_UTILITY,
     DecisionMLXBackend,
     DecisionModelConfig,
+    DecisionRoute,
+    answer_axis_scores,
+    certificate_verdict,
+    decision_fingerprint,
+    decision_route,
     decision_state,
+    judge_state,
+    logit_probability,
+    utility_choice,
 )
 from chronovisor.core.llm_config import (
     LLMConfigError,
@@ -119,7 +134,9 @@ def test_readout_is_the_package_read_out_per_state(monkeypatch) -> None:
     }
     prompt_module.messages = lambda row: f"{row['state']}|{row['q']}"
     prompt_module.plain_prompt = lambda _tokenizer, text: text
-    monkeypatch.setitem(sys.modules, "startlux_decide", types.ModuleType("startlux_decide"))
+    monkeypatch.setitem(
+        sys.modules, "startlux_decide", types.ModuleType("startlux_decide")
+    )
     monkeypatch.setitem(sys.modules, "startlux_decide.prompt", prompt_module)
 
     scores = backend._readout(["good one", "bad one"], "Q?")
@@ -156,3 +173,219 @@ def test_rerank_rejects_an_unknown_purpose() -> None:
 
     with pytest.raises(ValueError):
         backend.rerank(RerankRequest("q", ("a",), SOURCE, purpose="other"), model="m")
+
+
+def test_config_pins_the_decision_provider_revision() -> None:
+    config = parse_llm_config(
+        _config(
+            {
+                "kind": "local-decision-mlx",
+                "path": "~/m",
+                "revision": "a" * 64,
+            }
+        )
+    )
+    runtime = build_llm_runtime(config)
+    route = runtime.resolve_rerank("rerank")
+    backend = runtime._rerank["rerank"].backend
+
+    assert route.revision == "a" * 64
+    assert isinstance(backend, DecisionMLXBackend)
+    assert backend.config.revision == "a" * 64
+
+
+def test_config_rejects_a_malformed_decision_revision() -> None:
+    with pytest.raises(LLMConfigError):
+        parse_llm_config(
+            _config(
+                {
+                    "kind": "local-decision-mlx",
+                    "path": "/m",
+                    "revision": "not-a-sha256",
+                }
+            )
+        )
+
+
+def test_judge_states_keep_labels_page_markers_and_bounds() -> None:
+    answer_state = judge_state(
+        JUDGE_ANSWER_AXES,
+        query="q" * 401,
+        answer="a" * 1301,
+        reference="[PAGE page-1]\nfact one\n\n[PAGE page-2]\nfact two",
+    )
+    assert answer_state.startswith("Current question:\n" + "q" * 400)
+    assert "Candidate answer:\n" + "a" * 1200 in answer_state
+    assert "[PAGE page-1]\n[PAGE page-2]" in answer_state
+    assert (
+        len(
+            answer_state.split("Candidate answer:\n", 1)[1].split(
+                "\n\nReference evidence:", 1
+            )[0]
+        )
+        == 1200
+    )
+
+    certificate_state = judge_state(
+        JUDGE_CERTIFICATE,
+        query="question",
+        rubric="rubric",
+        rubric_id="rubric-1",
+        page_id="page-1",
+        evidence="span",
+    )
+    assert "Adopted rubric (rubric-1):\nrubric" in certificate_state
+    assert "Evidence (page page-1):\nspan" in certificate_state
+
+    utility_state = judge_state(
+        JUDGE_UTILITY,
+        query="question",
+        context="context",
+        answer_a="answer a",
+        answer_b="answer b",
+    )
+    assert "Preceding context:\ncontext" in utility_state
+    no_context = judge_state(
+        JUDGE_UTILITY,
+        query="question",
+        answer_a="answer a",
+        answer_b="answer b",
+    )
+    assert "Preceding context:" not in no_context
+    with pytest.raises(ValueError):
+        judge_state("unknown", query="q")
+
+
+def test_judge_policy_and_logit_mappings_are_frozen() -> None:
+    assert len(JUDGE_POLICY_SHA256) == 64
+    assert decision_mlx.JUDGE_POLICY["questions"][JUDGE_ANSWER_AXES] == (
+        ANSWER_AXIS_QUESTIONS
+    )
+    assert logit_probability(0.0) == 0.5
+    assert logit_probability(60.0) > 0.999
+    assert logit_probability(-60.0) < 0.001
+    with pytest.raises(ValueError):
+        logit_probability(float("nan"))
+
+    axes = answer_axis_scores((2.0, -2.0, 0.0))
+    assert list(axes) == list(ANSWER_AXES)
+    assert axes["citation"] == 0.5
+    with pytest.raises(ValueError):
+        answer_axis_scores((0.0,))
+
+    assert certificate_verdict("page-1", 2.5)["decision"] == "pass"
+    assert certificate_verdict("page-1", -2.5)["decision"] == "reject"
+    uncertain = certificate_verdict("page-1", 0.0)
+    assert uncertain["decision"] == "uncertain"
+    assert uncertain["confidence"] == 0.5
+
+    assert utility_choice(2.5)["blind_choice"] == "a"
+    assert utility_choice(-2.5)["blind_choice"] == "b"
+    assert utility_choice(0.0)["blind_choice"] == "uncertain"
+    assert utility_choice(1.0)["blind_choice"] == "uncertain"
+    assert "rationale" in utility_choice(2.5)
+
+
+def test_public_readout_runs_one_question_on_the_owner_thread(monkeypatch) -> None:
+    backend = DecisionMLXBackend(DecisionModelConfig(path="/m"))
+    owner = ThreadPoolExecutor(1)
+    backend._engine = type("Engine", (), {"_executor": owner})()
+    seen: dict[str, object] = {}
+
+    def readout(states: list[str], question: str) -> list[float]:
+        seen.update(states=states, question=question)
+        return [1.0, 2.0]
+
+    monkeypatch.setattr(backend, "_readout", readout)
+    scores = backend.readout("Q?", ("one", "two"))
+    owner.shutdown()
+
+    assert scores == (1.0, 2.0)
+    assert seen == {"states": ["one", "two"], "question": "Q?"}
+    with pytest.raises(ValueError):
+        backend.readout("Q?", ())
+
+
+def test_decision_route_pins_revision_and_fingerprint(monkeypatch) -> None:
+    route = DecisionRoute(
+        role=JUDGE_ROLE_BY_KIND[JUDGE_ANSWER_AXES],
+        provider="local-decision",
+        model="startlux-model",
+        location="local",
+        revision="a" * 64,
+    )
+
+    class Runtime:
+        def resolve_rerank(self, role: str):
+            assert role == route.role
+            return type(
+                "Resolved",
+                (),
+                {
+                    "role": route.role,
+                    "provider": route.provider,
+                    "model": route.model,
+                    "location": decision_mlx.RouteLocation.LOCAL,
+                    "revision": route.revision,
+                },
+            )()
+
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: Runtime())
+    assert decision_route(route.role) == route
+    fingerprint = decision_fingerprint(route)
+    assert len(fingerprint) == 64
+    assert (
+        decision_fingerprint(
+            DecisionRoute(
+                role=route.role,
+                provider=route.provider,
+                model=route.model,
+                location=route.location,
+                revision="b" * 64,
+            )
+        )
+        != fingerprint
+    )
+
+    class UnpinnedRuntime(Runtime):
+        def resolve_rerank(self, role: str):
+            resolved = super().resolve_rerank(role)
+            resolved.revision = None
+            return resolved
+
+    monkeypatch.setattr(
+        llm_config, "load_default_llm_runtime", lambda: UnpinnedRuntime()
+    )
+    with pytest.raises(RuntimeError):
+        decision_route(route.role)
+
+
+@pytest.mark.parametrize(
+    "capability,kind,expected",
+    [
+        ("generation", "mtplx", False),
+        ("rerank", "local-decision-mlx", True),
+        ("generation", "local-decision-mlx", False),
+        ("rerank", "omlx", False),
+    ],
+)
+def test_decision_judge_dispatch_uses_configured_role(
+    monkeypatch, capability, kind, expected
+):
+    from types import SimpleNamespace
+
+    from chronovisor.core import llm_config
+    from chronovisor.core.decision_mlx import uses_decision_judge
+
+    monkeypatch.setattr(
+        llm_config,
+        "load_llm_config",
+        lambda: SimpleNamespace(
+            roles={
+                "judge": SimpleNamespace(capability=capability, provider_id="local")
+            },
+            providers={"local": SimpleNamespace(kind=kind)},
+        ),
+    )
+    assert uses_decision_judge("judge") is expected
+    assert uses_decision_judge("missing") is False

@@ -33,6 +33,29 @@ from chronovisor.recall.recall_distillation_remote_teacher import (
 )
 
 
+def utility_decision_route() -> SimpleNamespace:
+    return SimpleNamespace(
+        role="recall.distill.utility_judge",
+        provider="local-decision",
+        model="startlux-utility",
+        location="local",
+        revision="d" * 64,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _decision_utility_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(distill, "uses_decision_judge", lambda _role: True)
+    route = SimpleNamespace(
+        role="recall.distill.utility_judge",
+        provider="local-decision",
+        model="startlux-utility",
+        location="local",
+        revision="d" * 64,
+    )
+    monkeypatch.setattr(distill, "decision_route", lambda _role: route)
+
+
 @pytest.fixture(autouse=True)
 def _trusted_ox_test_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep legacy in-process stubs outside the production egress authority."""
@@ -5963,6 +5986,7 @@ def test_configured_local_route_binding_rejects_evil_canonical_identities(
             provider=f"provider-{index}",
             model=f"model-{index}",
             location="local",
+            structured_output=True,
         )
         for index, role in enumerate(roles)
     )
@@ -5999,16 +6023,22 @@ def test_configured_local_route_binding_rejects_evil_canonical_identities(
         "cohort": distill.LOCAL_TRIAD_PROFILE,
         "profile_contract_id": "",
         "expires_at": "",
-        "identity_revision": "local-blind-counterfactual-v1",
-        "request_revision": "local-blind-counterfactual-v1",
+        "identity_revision": distill.COUNTERFACTUAL_IDENTITY_REVISION,
+        "request_revision": distill.COUNTERFACTUAL_IDENTITY_REVISION,
         "assignment_revision": distill.ASSIGNMENT_REVISION,
         "counterfactual_producer": "chronovisor-local-blind-v1",
         "counterfactual_revision": "two-order-locked-v2",
         "blind_orders": ["a0_first", "a1_first"],
         "generator_route_identity": identities[roles[-2]],
-        "judge_route_identity": identities[roles[-1]],
+        "judge_route_identity": {
+            "role": utility_decision_route().role,
+            "provider": utility_decision_route().provider,
+            "model": utility_decision_route().model,
+            "location": utility_decision_route().location,
+        },
         "generator_model_digest": digests[roles[-2]],
-        "judge_model_digest": digests[roles[-1]],
+        "model_digest": digests[roles[-2]],
+        "judge_model_digest": distill.decision_fingerprint(utility_decision_route()),
     }
     assert distill._configured_local_route_binding(teacher) is True
     from chronovisor.core import model_execution
@@ -10966,6 +10996,122 @@ def test_counterfactual_judge_input_is_answer_independent(
         assert payload["context"] == ["point-in-time context"]
 
 
+def test_counterfactual_utility_judge_uses_injected_service_both_orders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answers = iter(("without", "with"))
+    judge_payloads: list[dict[str, object]] = []
+
+    def fake_worker_call(
+        operation: str, _role: str, _payload: object, **_kwargs: object
+    ) -> dict[str, object]:
+        assert operation == "answer"
+        return {
+            "answer": next(answers),
+            "_model_digest": "a" * 64,
+            "_route_identity": {},
+        }
+
+    def judge_call(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        judge_payloads.append(dict(payload))
+        return {
+            "blind_choice": "a",
+            "confidence": 0.9,
+            "rationale": "startlux p=0.900000",
+        }
+
+    route = {
+        "role": "recall.distill.utility_judge",
+        "provider": "local-decision",
+        "model": "startlux-utility",
+        "location": "local",
+    }
+    monkeypatch.setattr(distill, "_worker_call", fake_worker_call)
+    worker = distill._WorkerCounterfactual(
+        12_000,
+        {
+            "recall.distill.answer_generator": {},
+            "recall.distill.utility_judge": route,
+        },
+        {
+            "recall.distill.answer_generator": "a" * 64,
+            "recall.distill.utility_judge": "b" * 64,
+        },
+        judge_call=judge_call,
+        judge_route=route,
+        judge_digest="b" * 64,
+    )
+    result = worker.compare(
+        {
+            "rally_id": "rally",
+            "candidate_id": "candidate",
+            "query": "query",
+            "context": ["context"],
+            "a0_evidence": [],
+            "a1_evidence": ["candidate"],
+        }
+    )
+
+    assert [payload["blind_order"] for payload in judge_payloads] == [
+        "a_first",
+        "b_first",
+    ]
+    assert result["judge_route_identity"] == route
+    assert result["judge_model_digest"] == "b" * 64
+    assert result["generator_model_digest"] == "a" * 64
+    assert result["verdict"] == "uncertain"
+
+
+def test_counterfactual_utility_service_failure_defers_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answers = iter(("without", "with"))
+
+    def fake_worker_call(
+        operation: str, _role: str, _payload: object, **_kwargs: object
+    ) -> dict[str, object]:
+        assert operation == "answer"
+        return {
+            "answer": next(answers),
+            "_model_digest": "a" * 64,
+            "_route_identity": {},
+        }
+
+    def judge_call(_payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        raise distill.DistillationDeferred(
+            "utility judge service unavailable",
+            failure_class="capacity_unavailable",
+        )
+
+    monkeypatch.setattr(distill, "_worker_call", fake_worker_call)
+    worker = distill._WorkerCounterfactual(
+        12_000,
+        {
+            "recall.distill.answer_generator": {},
+            "recall.distill.utility_judge": {},
+        },
+        {
+            "recall.distill.answer_generator": "a" * 64,
+            "recall.distill.utility_judge": "b" * 64,
+        },
+        judge_call=judge_call,
+        judge_route={},
+        judge_digest="b" * 64,
+    )
+
+    with pytest.raises(distill.DistillationDeferred):
+        worker.compare(
+            {
+                "rally_id": "rally",
+                "candidate_id": "candidate",
+                "query": "query",
+                "context": [],
+                "a0_evidence": [],
+                "a1_evidence": ["candidate"],
+            }
+        )
+
+
 @pytest.mark.parametrize("candidate_id", ["candidate", "token-guide", "page:日本語/guide"])
 def test_counterfactual_queue_uses_safe_reference_without_changing_target(
     tmp_path: Path, candidate_id: str
@@ -13785,3 +13931,125 @@ def test_raw_snapshot_race_defers_but_corruption_remains_a_worker_failure(
             catalog._catalog_watermark(raw_dir, tmp_path)
     else:
         assert store.read_sealed(state_path)["worker_failure_count"] == 2
+
+
+@pytest.mark.parametrize(
+    "choices,expected",
+    [
+        (("b", "b"), "neutral"),
+        (("a", "a"), "uncertain"),
+        (("uncertain", "uncertain"), "uncertain"),
+    ],
+)
+def test_decision_utility_tie_and_order_flip(monkeypatch, choices, expected):
+    monkeypatch.setattr(
+        distill,
+        "_worker_call",
+        lambda *_a, **_k: {"answer": "same", "_model_digest": "a" * 64},
+    )
+    sequence = iter(choices)
+    worker = distill._WorkerCounterfactual(
+        12000,
+        {"recall.distill.answer_generator": {}},
+        {"recall.distill.answer_generator": "a" * 64},
+        judge_call=lambda _payload: {"blind_choice": next(sequence)},
+        judge_digest="b" * 64,
+    )
+    result = worker.compare(
+        {"rally_id": "r", "candidate_id": "c", "query": "q", "context": []}
+    )
+    assert result["verdict"] == expected
+    assert result["order_agreement"] is (expected == "neutral")
+
+
+def test_service_defer_after_answers_releases_attempt(monkeypatch, tmp_path):
+    def answer(*_args, **kwargs):
+        kwargs["model_turn"].attempted = True
+        return {"answer": "answer", "_model_digest": "a" * 64}
+
+    def unavailable(_payload):
+        raise distill.DistillationDeferred(
+            "service down", failure_class="capacity_unavailable"
+        )
+
+    monkeypatch.setattr(distill, "_worker_call", answer)
+    worker = distill._WorkerCounterfactual(
+        12000,
+        {"recall.distill.answer_generator": {}},
+        {"recall.distill.answer_generator": "a" * 64},
+        judge_call=unavailable,
+        judge_digest="b" * 64,
+    )
+    releases = []
+    queue = SimpleNamespace(
+        commit=lambda *_args: pytest.fail("consumed attempt"),
+        release_unattempted=releases.append,
+    )
+    claim = SimpleNamespace(attempt=3)
+    result = distill._compare_and_commit_counterfactual(
+        workset=queue,
+        claim=claim,
+        counterfactual=worker,
+        payload={"rally_id": "r", "candidate_id": "c", "query": "q", "context": []},
+        label_path=tmp_path / "labels",
+        root=tmp_path,
+        raw_dir=tmp_path,
+        snapshots={},
+        exposure={},
+        exact_features={},
+        rally_id="r",
+        candidate={},
+        mode="add",
+        config=distill.DistillationConfig(),
+    )
+    assert result.deferred and releases == [[claim]]
+    assert not (tmp_path / "labels").exists()
+
+
+def test_legacy_utility_dispatch_keeps_old_worker_and_cohort(monkeypatch):
+    monkeypatch.setattr(distill, "uses_decision_judge", lambda _role: False)
+    monkeypatch.setattr(
+        distill, "decision_route", lambda *_args: pytest.fail("decision route")
+    )
+    sentinel = object()
+    monkeypatch.setattr(
+        distill, "_generation_default_counterfactual_worker", lambda *_a: sentinel
+    )
+    monkeypatch.setattr(
+        distill, "_generation_configured_local_single_cohort", lambda: {"legacy": True}
+    )
+    monkeypatch.setattr(
+        distill,
+        "_generation_configured_local_route_binding",
+        lambda row: row == {"old": True},
+    )
+    assert (
+        distill._default_counterfactual_worker(distill.DistillationConfig(), 1000)
+        is sentinel
+    )
+    assert distill._configured_local_single_cohort() == {"legacy": True}
+    assert distill._configured_local_route_binding({"old": True}) is True
+
+
+@pytest.mark.parametrize("same_model", [False, True])
+def test_legacy_counterfactual_preserves_generation_and_independence(monkeypatch, same_model):
+    from chronovisor.core import ollama
+
+    monkeypatch.setattr(distill, "uses_decision_judge", lambda _role: False)
+    monkeypatch.setattr(distill, "decision_route", lambda *_args: pytest.fail("decision route"))
+    roles = ("recall.distill.answer_generator", "recall.distill.utility_judge")
+    routes = (
+        ollama.RuntimeGenerationRoute(roles[0], "omlx", "qwen", "local", True),
+        ollama.RuntimeGenerationRoute(roles[1], "mtplx", "ornith", "local", True),
+    )
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda requested: routes if requested == roles else ())
+    monkeypatch.setattr(ollama, "runtime_generation_route_fingerprints", lambda _routes: {
+        roles[0]: "a" * 64, roles[1]: ("a" if same_model else "b") * 64,
+    })
+    worker = distill._default_counterfactual_worker(distill.DistillationConfig(), 1000)
+    if same_model:
+        assert worker is None
+    else:
+        assert isinstance(worker, distill._WorkerCounterfactual)
+        assert worker.judge_call is None
+        assert worker.routes[roles[1]]["provider"] == "mtplx"

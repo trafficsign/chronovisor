@@ -7,7 +7,8 @@ from typing import Any
 
 import pytest
 
-from chronovisor.core import llm_config, ollama
+from chronovisor.core import llm_config, ollama, reranker_client
+from chronovisor.core.decision_mlx import DecisionRoute, decision_fingerprint
 from chronovisor.core.llm_runtime import (
     BackendCapabilities,
     GenerationResult,
@@ -232,6 +233,34 @@ def distinct_judge_routes() -> tuple[ollama.RuntimeGenerationRoute, ...]:
     )
 
 
+def primary_decision_route() -> DecisionRoute:
+    return DecisionRoute(
+        role=recall_processor.PRIMARY_JUDGE_RUNTIME_ROLE,
+        provider="local-decision",
+        model="startlux-primary",
+        location="local",
+        revision="a" * 64,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _primary_decision_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(recall_processor, "uses_decision_judge", lambda _role: True)
+    monkeypatch.setattr(
+        recall_processor, "decision_route", lambda _role: primary_decision_route()
+    )
+
+
+@pytest.fixture(autouse=True)
+def _primary_service_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unavailable(*_args: object, **_kwargs: object) -> None:
+        raise reranker_client.RerankerServiceUnavailable("transport_error")
+
+    monkeypatch.setattr(
+        recall_processor.reranker_client, "decision_judge", unavailable
+    )
+
+
 def test_selection_is_dynamic_and_caps_rich_and_pointer_counts(
     monkeypatch, isolated_selection_index
 ) -> None:
@@ -367,7 +396,13 @@ def test_selection_abstains_when_every_certificate_rejects(
     assert metadata["certificate_pass_count"] == 0
 
 
-def test_certificate_judge_resolves_only_two_ambiguous_pages(monkeypatch) -> None:
+@pytest.mark.parametrize("decision", [False, True])
+def test_certificate_judge_resolves_only_two_ambiguous_pages(
+    monkeypatch, decision
+) -> None:
+    monkeypatch.setattr(recall_processor, "uses_decision_judge", lambda _role: decision)
+    if not decision:
+        monkeypatch.setattr(recall_processor, "decision_route", lambda *_args: pytest.fail("legacy route reached decision judge"))
     certificates = [certificate(f"page-{index}") for index in range(3)]
     certificates = [
         item
@@ -589,65 +624,63 @@ def _forbid_ollama_controls(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(ollama, name, forbidden)
 
 
-def test_decisive_primary_does_not_touch_escalation_digest_or_backend(
+def test_decisive_primary_does_not_touch_escalation_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    routes = (
-        ollama.RuntimeGenerationRoute(
-            recall_processor.PRIMARY_JUDGE_RUNTIME_ROLE,
-            "ollama",
-            "primary-local",
-            "local",
-            True,
-        ),
-        ollama.RuntimeGenerationRoute(
-            recall_processor.ESCALATION_JUDGE_RUNTIME_ROLE,
-            "ollama",
-            "escalation-local",
-            "local",
-            True,
+    captured: dict[str, object] = {}
+
+    def decision_judge(
+        kind: str,
+        fields: object,
+        *,
+        role: str,
+        config: object,
+        timeout_ms: int,
+    ) -> dict[str, object]:
+        captured.update(
+            kind=kind,
+            fields=fields,
+            role=role,
+            config=config,
+            timeout_ms=timeout_ms,
+        )
+        return {
+            "verdicts": [
+                {
+                    "page_id": "page-a",
+                    "decision": "pass",
+                    "confidence": 0.9,
+                    "reason": "supported",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        recall_processor.reranker_client, "decision_judge", decision_judge
+    )
+    monkeypatch.setattr(
+        recall_processor,
+        "load_reranker_config",
+        lambda: SimpleNamespace(service=SimpleNamespace(timeout_ms=1000)),
+    )
+    monkeypatch.setattr(
+        ollama,
+        "runtime_generation_routes",
+        lambda _roles: (
+            ollama.RuntimeGenerationRoute(
+                recall_processor.ESCALATION_JUDGE_RUNTIME_ROLE,
+                "remote-test",
+                "judge-escalation-remote",
+                "remote",
+                True,
+            ),
         ),
     )
-    digest_calls: list[list[str]] = []
-    backend_roles: list[str] = []
-    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: routes)
-
-    def model_digests(models: list[str]) -> dict[str, str]:
-        digest_calls.append(models)
-        return {"primary-local": "digest-primary"}
-
-    def structured_chat(_messages: object, **kwargs: Any) -> ollama.ChatResponse:
-        backend_roles.append(str(kwargs["runtime_role"]))
-        return ollama.ChatResponse(
-            content=json.dumps(
-                {
-                    "verdicts": [
-                        {
-                            "page_id": "page-a",
-                            "decision": "pass",
-                            "confidence": 0.9,
-                            "reason": "supported",
-                        }
-                    ]
-                }
-            )
-        )
-
-    monkeypatch.setattr(ollama, "model_digests", model_digests)
-    monkeypatch.setattr(ollama, "runtime_structured_chat", structured_chat)
-    for name in (
-        "chat",
-        "model_resource_lease",
-        "plan_model_residency",
-        "resident_model_rows",
-        "unload_named_model",
-        "unload_model",
-    ):
-        monkeypatch.setattr(
-            ollama,
-            name,
-            lambda *_args, **_kwargs: pytest.fail("touched Ollama control"),
-        )
+    monkeypatch.setattr(
+        ollama,
+        "runtime_structured_chat",
+        lambda *_args, **_kwargs: pytest.fail("escalation backend touched"),
+    )
 
     resolved, metadata = recall_processor.judge_ambiguous_certificates(
         "query",
@@ -662,30 +695,34 @@ def test_decisive_primary_does_not_touch_escalation_digest_or_backend(
 
     assert resolved[0].outcome == "pass"
     assert metadata["escalation_status"] == "not_needed"
-    assert digest_calls == [["primary-local"]]
-    assert backend_roles == [recall_processor.PRIMARY_JUDGE_RUNTIME_ROLE]
+    assert captured["kind"] == "certificate"
+    assert captured["role"] == recall_processor.PRIMARY_JUDGE_RUNTIME_ROLE
+    assert metadata["primary_route_identity"] == {
+        "role": recall_processor.PRIMARY_JUDGE_RUNTIME_ROLE,
+        "provider": "local-decision",
+        "model": "startlux-primary",
+        "location": "local",
+        "model_digest": decision_fingerprint(primary_decision_route()),
+    }
 
 
-def test_duplicate_judge_routes_fail_before_digest_backend_or_control(
+def test_duplicate_primary_and_escalation_routes_fail_before_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    routes = tuple(
-        ollama.RuntimeGenerationRoute(
-            role,
-            "ollama",
-            "same-local-model",
-            "local",
-            True,
-        )
-        for role in (
-            recall_processor.PRIMARY_JUDGE_RUNTIME_ROLE,
-            recall_processor.ESCALATION_JUDGE_RUNTIME_ROLE,
-        )
+    route = primary_decision_route()
+    escalation = ollama.RuntimeGenerationRoute(
+        recall_processor.ESCALATION_JUDGE_RUNTIME_ROLE,
+        route.provider,
+        route.model,
+        route.location,
+        True,
     )
-    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: routes)
     monkeypatch.setattr(
-        ollama,
-        "runtime_structured_chat",
+        ollama, "runtime_generation_routes", lambda _roles: (escalation,)
+    )
+    monkeypatch.setattr(
+        recall_processor.reranker_client,
+        "decision_judge",
         lambda *_args, **_kwargs: pytest.fail("duplicate routes reached backend"),
     )
     _forbid_ollama_controls(monkeypatch)
@@ -707,23 +744,22 @@ def test_duplicate_judge_routes_fail_before_digest_backend_or_control(
     assert metadata["escalation_status"] == "blocked_by_primary"
 
 
-def test_unstructured_judge_route_fails_before_backend_or_digest(
+def test_unstructured_escalation_route_fails_before_backend_or_digest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    routes = list(distinct_judge_routes())
-    routes[0] = ollama.RuntimeGenerationRoute(
-        recall_processor.PRIMARY_JUDGE_RUNTIME_ROLE,
-        "ollama",
-        "primary-local",
-        "local",
+    escalation = ollama.RuntimeGenerationRoute(
+        recall_processor.ESCALATION_JUDGE_RUNTIME_ROLE,
+        "remote-test",
+        "judge-escalation-remote",
+        "remote",
         False,
     )
     monkeypatch.setattr(
-        ollama, "runtime_generation_routes", lambda _roles: tuple(routes)
+        ollama, "runtime_generation_routes", lambda _roles: (escalation,)
     )
     monkeypatch.setattr(
-        ollama,
-        "runtime_structured_chat",
+        recall_processor.reranker_client,
+        "decision_judge",
         lambda *_args, **_kwargs: pytest.fail("invalid route reached backend"),
     )
     _forbid_ollama_controls(monkeypatch)
@@ -892,14 +928,9 @@ def test_invalid_primary_verdicts_reject_without_escalation(
 
     monkeypatch.setattr(ollama, "runtime_generation_routes", resolve)
     monkeypatch.setattr(
-        ollama,
-        "runtime_structured_chat",
-        lambda *_args, **_kwargs: ollama.ChatResponse(content=json.dumps(payload)),
-    )
-    monkeypatch.setattr(
-        ollama,
-        "model_digests",
-        lambda _models: pytest.fail("remote route queried digests"),
+        recall_processor.reranker_client,
+        "decision_judge",
+        lambda *_args, **_kwargs: payload,
     )
     policy = SimpleNamespace(
         processor_judge_timeout_ms=500,
@@ -921,12 +952,7 @@ def test_invalid_primary_verdicts_reject_without_escalation(
     assert all("primary_judge_fail_closed" in item.reasons for item in resolved)
     assert metadata["status"] == "primary_judge_fail_closed"
     assert metadata["escalation_status"] == "blocked_by_primary"
-    assert roles == [
-        (
-            recall_processor.PRIMARY_JUDGE_RUNTIME_ROLE,
-            recall_processor.ESCALATION_JUDGE_RUNTIME_ROLE,
-        )
-    ]
+    assert roles == [(recall_processor.ESCALATION_JUDGE_RUNTIME_ROLE,)]
 
 
 def replace_certificate_confidence(
@@ -948,9 +974,11 @@ def test_primary_backend_failure_rejects_without_fallback(
 
     monkeypatch.setattr(ollama, "runtime_generation_routes", resolve)
     monkeypatch.setattr(
-        ollama,
-        "runtime_structured_chat",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("backend")),
+        recall_processor.reranker_client,
+        "decision_judge",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            reranker_client.RerankerServiceUnavailable("transport_error")
+        ),
     )
     resolved, metadata = recall_processor.judge_ambiguous_certificates(
         "query",
@@ -966,12 +994,14 @@ def test_primary_backend_failure_rejects_without_fallback(
     assert resolved[0].outcome == "reject"
     assert "primary_judge_fail_closed" in resolved[0].reasons
     assert metadata["escalation_status"] == "blocked_by_primary"
-    assert roles == [
-        (
-            recall_processor.PRIMARY_JUDGE_RUNTIME_ROLE,
-            recall_processor.ESCALATION_JUDGE_RUNTIME_ROLE,
-        )
-    ]
+    monkeypatch.setattr(ollama, "runtime_generation_routes", resolve)
+    monkeypatch.setattr(
+        recall_processor.reranker_client,
+        "decision_judge",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            reranker_client.RerankerServiceUnavailable("transport_error")
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -1163,10 +1193,10 @@ def test_remote_raw_high_egress_denial_runs_no_backend_or_ollama_control(
     assert metadata["primary_status"] == "runtime_backend_unavailable"
     assert metadata["primary_route_identity"] == {
         "role": recall_processor.PRIMARY_JUDGE_RUNTIME_ROLE,
-        "provider": "remote-test",
-        "model": "primary-remote",
-        "location": "remote",
-        "model_digest": None,
+        "provider": "local-decision",
+        "model": "startlux-primary",
+        "location": "local",
+        "model_digest": decision_fingerprint(primary_decision_route()),
     }
     assert metadata["escalation_status"] == "blocked_by_primary"
     assert backend_calls == []

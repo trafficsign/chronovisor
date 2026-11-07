@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import threading
 from dataclasses import asdict, replace
@@ -10,6 +11,15 @@ from pathlib import Path
 import pytest
 
 from chronovisor.core import llm_config, reranker_client
+from chronovisor.core.decision_mlx import (
+    ANSWER_AXES,
+    JUDGE_ANSWER_AXES,
+    JUDGE_CERTIFICATE,
+    JUDGE_ROLE_BY_KIND,
+    JUDGE_ROLES,
+    DecisionRoute,
+    decision_fingerprint,
+)
 from chronovisor.core.llm_runtime import (
     EgressDeniedError,
     LLMRuntime,
@@ -96,9 +106,23 @@ def prepare_state(
                 model,
             )
 
+        def readout(self, question: str, states: tuple[str, ...]) -> tuple[float, ...]:
+            self.readout_calls.append((question, states))
+            return tuple(0.0 for _state in states)
+
     backend = Backend()
+    backend.readout_calls = []
+    revision = "f" * 64 if backend.provider == "local-decision" else None
+    rerank_routes = {RERANK_RUNTIME_ROLE: RerankRoute(backend, "route-model", revision)}
+    if backend.provider == "local-decision":
+        rerank_routes.update(
+            {
+                role: RerankRoute(backend, "route-model", revision)
+                for role in JUDGE_ROLES
+            }
+        )
     runtime = LLMRuntime(
-        rerank={RERANK_RUNTIME_ROLE: RerankRoute(backend, "route-model")},
+        rerank=rerank_routes,
         remote_egress_opt_ins=egress or set(),
     )
     status_file = tmp_path / "reranker-status.json"
@@ -226,19 +250,23 @@ def test_client_sends_optional_candidate_evidence(monkeypatch, tmp_path) -> None
     )
     candidate.evidence = (evidence,)
     seen: dict[str, object] = {}
-    monkeypatch.setattr(reranker_client, "request", lambda payload, *_a, **_k: (
-        seen.update(payload)
-        or {
-            "status": "ok",
-            "route": {
-                "role": RERANK_RUNTIME_ROLE,
-                "provider": "local-reranker",
-                "model": "route-model",
-                "location": "local",
-            },
-            "scores": [{"page_id": "a", "raw_score": 0.5}],
-        }
-    ))
+    monkeypatch.setattr(
+        reranker_client,
+        "request",
+        lambda payload, *_a, **_k: (
+            seen.update(payload)
+            or {
+                "status": "ok",
+                "route": {
+                    "role": RERANK_RUNTIME_ROLE,
+                    "provider": "local-reranker",
+                    "model": "route-model",
+                    "location": "local",
+                },
+                "scores": [{"page_id": "a", "raw_score": 0.5}],
+            }
+        ),
+    )
     monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
 
     outcome = reranker_client.rerank("query", [candidate], config=cfg)
@@ -283,9 +311,7 @@ def test_service_forwards_optional_candidate_evidence_to_resolver(
             "method": "rerank",
             "query": "query",
             "page_ids": ["a"],
-            "candidate_evidence": [
-                {"page_id": "a", "evidence": [asdict(evidence)]}
-            ],
+            "candidate_evidence": [{"page_id": "a", "evidence": [asdict(evidence)]}],
         }
     )
 
@@ -533,14 +559,242 @@ def test_recall_filter_takes_the_next_candidate_turn_ahead_of_search(
     assert sorted(call[1] for call in calls[2:]) == [("a2",), ("b1",), ("b2",)]
 
 
-def test_recall_filter_scores_exact_texts_with_the_recall_question(tmp_path, monkeypatch) -> None:
+def test_judge_answer_axes_maps_probabilities_and_uses_background_priority(
+    tmp_path, monkeypatch
+) -> None:
+    cfg = config(tmp_path / "reranker.sock")
+    state, _status, backend, _runtime, controls = prepare_state(
+        tmp_path, monkeypatch, cfg, provider="local-decision"
+    )
+    priorities: list[int] = []
+    original_slot = state._turn.slot
+
+    @contextlib.contextmanager
+    def observed_slot(priority):
+        priorities.append(priority)
+        with original_slot(priority):
+            yield
+
+    monkeypatch.setattr(state._turn, "slot", observed_slot)
+    logits = iter((2.0, -2.0, 0.0))
+    seen: list[tuple[str, tuple[str, ...]]] = []
+
+    def readout(question: str, states: tuple[str, ...]) -> tuple[float, ...]:
+        seen.append((question, states))
+        return (next(logits),)
+
+    backend.readout = readout
+    payload = state.handle(
+        {
+            "method": "judge",
+            "kind": JUDGE_ANSWER_AXES,
+            "role": JUDGE_ROLE_BY_KIND[JUDGE_ANSWER_AXES],
+            "query": "question",
+            "answer": "candidate",
+            "reference": "[PAGE page-1]\nreference fact",
+        }
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["kind"] == JUDGE_ANSWER_AXES
+    assert payload["scores"] == {
+        "correctness": round(1 / (1 + math.exp(-2.0)), 9),
+        "grounding": round(1 / (1 + math.exp(2.0)), 9),
+        "citation": 0.5,
+    }
+    assert priorities == [reranker_service.PRIORITY_SEARCH] * 3
+    assert controls == {"lease": 3, "activity": 3}
+    assert [question for question, _states in seen] == [
+        reranker_service.ANSWER_AXIS_QUESTIONS[axis] for axis in ANSWER_AXES
+    ]
+    assert all("Current question:\nquestion" in states[0] for _q, states in seen)
+    assert all("[PAGE page-1]" in states[0] for _q, states in seen)
+    expected_route = {
+        "role": JUDGE_ROLE_BY_KIND[JUDGE_ANSWER_AXES],
+        "provider": "local-decision",
+        "model": "route-model",
+        "location": "local",
+    }
+    assert payload["route"] == expected_route
+    assert payload["decision_fingerprint"] == decision_fingerprint(
+        DecisionRoute(
+            role=JUDGE_ROLE_BY_KIND[JUDGE_ANSWER_AXES],
+            provider="local-decision",
+            model="route-model",
+            location="local",
+            revision="f" * 64,
+        )
+    )
+
+
+def test_judge_certificate_uses_recall_priority_and_maps_verdicts(
+    tmp_path, monkeypatch
+) -> None:
+    cfg = config(tmp_path / "reranker.sock")
+    state, _status, backend, _runtime, controls = prepare_state(
+        tmp_path, monkeypatch, cfg, provider="local-decision"
+    )
+    priorities: list[int] = []
+    original_slot = state._turn.slot
+
+    @contextlib.contextmanager
+    def observed_slot(priority):
+        priorities.append(priority)
+        with original_slot(priority):
+            yield
+
+    monkeypatch.setattr(state._turn, "slot", observed_slot)
+    backend.readout = lambda _question, _states: (5.0,)
+    payload = state.handle(
+        {
+            "method": "judge",
+            "kind": JUDGE_CERTIFICATE,
+            "role": JUDGE_ROLE_BY_KIND[JUDGE_CERTIFICATE],
+            "query": "question",
+            "rubric": "Pass only answer-bearing evidence.",
+            "rubric_id": "rubric-1",
+            "evidence": [{"page_id": "page-1", "span": "supporting span"}],
+        }
+    )
+
+    assert payload["verdicts"][0]["page_id"] == "page-1"
+    assert payload["verdicts"][0]["decision"] == "pass"
+    assert payload["verdicts"][0]["confidence"] > 0.99
+    assert priorities == [reranker_service.PRIORITY_RECALL]
+    assert controls == {"lease": 1, "activity": 1}
+
+    priorities.clear()
+    payload = state.handle(
+        {
+            "method": "judge",
+            "kind": JUDGE_CERTIFICATE,
+            "role": JUDGE_ROLE_BY_KIND[JUDGE_CERTIFICATE],
+            "query": "question",
+            "rubric": "Pass only answer-bearing evidence.",
+            "evidence": [{"page_id": "page-1", "span": "supporting span"}],
+            "priority": reranker_service.PRIORITY_SEARCH,
+        }
+    )
+    assert payload["priority"] == reranker_service.PRIORITY_SEARCH
+    assert priorities == [reranker_service.PRIORITY_SEARCH]
+
+
+def test_judge_rejects_non_decision_routes_and_bad_fields(
+    tmp_path, monkeypatch
+) -> None:
+    cfg = config(tmp_path / "reranker.sock")
+    state, _status, _backend, _runtime, _controls = prepare_state(
+        tmp_path, monkeypatch, cfg
+    )
+
+    with pytest.raises(Exception, match="rerank is not configured"):
+        state.handle(
+            {
+                "method": "judge",
+                "kind": JUDGE_ANSWER_AXES,
+                "role": JUDGE_ROLE_BY_KIND[JUDGE_ANSWER_AXES],
+                "query": "question",
+                "answer": "candidate",
+                "reference": "reference",
+            }
+        )
+    with pytest.raises(ValueError):
+        state.handle(
+            {
+                "method": "judge",
+                "kind": JUDGE_ANSWER_AXES,
+                "role": JUDGE_ROLE_BY_KIND[JUDGE_ANSWER_AXES],
+                "query": "question",
+                "answer": "candidate",
+            }
+        )
+
+
+def test_decision_judge_client_checks_route_and_fingerprint(
+    tmp_path, monkeypatch
+) -> None:
+    cfg = config(tmp_path / "reranker.sock")
+    route = DecisionRoute(
+        role=JUDGE_ROLE_BY_KIND[JUDGE_ANSWER_AXES],
+        provider="local-decision",
+        model="startlux-model",
+        location="local",
+        revision="f" * 64,
+    )
+    fingerprint = decision_fingerprint(route)
+    monkeypatch.setattr(reranker_client, "decision_route", lambda _role: route)
+    captured: dict[str, object] = {}
+
+    def fake_request(payload, config, *, timeout_ms=None):
+        captured.update(payload=payload, config=config, timeout_ms=timeout_ms)
+        return {
+            "status": "ok",
+            "route": {
+                "role": route.role,
+                "provider": route.provider,
+                "model": route.model,
+                "location": route.location,
+            },
+            "decision_fingerprint": fingerprint,
+            "scores": {
+                "correctness": 0.9,
+                "grounding": 0.8,
+                "citation": 0.7,
+            },
+        }
+
+    monkeypatch.setattr(reranker_client, "request", fake_request)
+    result = reranker_client.decision_judge(
+        JUDGE_ANSWER_AXES,
+        {"query": "q", "answer": "a", "reference": "r"},
+        role=route.role,
+        config=cfg,
+        timeout_ms=250,
+        priority=1,
+    )
+
+    assert result["scores"]["correctness"] == 0.9
+    assert captured["timeout_ms"] == 250
+    assert captured["payload"] == {
+        "method": "judge",
+        "kind": JUDGE_ANSWER_AXES,
+        "role": route.role,
+        "query": "q",
+        "answer": "a",
+        "reference": "r",
+        "priority": 1,
+    }
+
+    def drifted_request(payload, config, *, timeout_ms=None):
+        response = fake_request(payload, config, timeout_ms=timeout_ms)
+        response["decision_fingerprint"] = "0" * 64
+        return response
+
+    monkeypatch.setattr(reranker_client, "request", drifted_request)
+    with pytest.raises(reranker_client.RerankerServiceUnavailable):
+        reranker_client.decision_judge(
+            JUDGE_ANSWER_AXES,
+            {"query": "q", "answer": "a", "reference": "r"},
+            role=route.role,
+            config=cfg,
+        )
+
+
+def test_recall_filter_scores_exact_texts_with_the_recall_question(
+    tmp_path, monkeypatch
+) -> None:
     cfg = config(tmp_path / "reranker.sock")
     state, _status, backend, _runtime, controls = prepare_state(
         tmp_path, monkeypatch, cfg, provider="local-decision"
     )
 
     payload = state.handle(
-        {"method": "recall_filter", "query": "now", "context": "before", "texts": ["a1", "b2"]}
+        {
+            "method": "recall_filter",
+            "query": "now",
+            "context": "before",
+            "texts": ["a1", "b2"],
+        }
     )
 
     assert payload["status"] == "ok" and payload["scores"] == [0.1, 0.9]
@@ -575,7 +829,9 @@ def test_recall_filter_rejects_malformed_requests_before_backend(
     assert backend.requests == []
 
 
-def test_recall_filter_refuses_a_relevance_reranker_route(tmp_path, monkeypatch) -> None:
+def test_recall_filter_refuses_a_relevance_reranker_route(
+    tmp_path, monkeypatch
+) -> None:
     cfg = config(tmp_path / "reranker.sock")
     state, _status, backend, _runtime, _controls = prepare_state(
         tmp_path, monkeypatch, cfg
@@ -844,12 +1100,8 @@ def test_service_passage_cache_includes_selected_evidence_identity(
         0.8,
     )
 
-    first = state._candidate_passage(
-        "a", store=None, evidence=(first_evidence,)
-    )
-    second = state._candidate_passage(
-        "a", store=None, evidence=(second_evidence,)
-    )
+    first = state._candidate_passage("a", store=None, evidence=(first_evidence,))
+    second = state._candidate_passage("a", store=None, evidence=(second_evidence,))
 
     assert first[0] == "passage selected first"
     assert second[0] == "passage selected second"
@@ -898,3 +1150,57 @@ def test_idle_server_publishes_bounded_heartbeat(monkeypatch):
     server.state._publish_status = unavailable_disk
     clock[0] += 5
     server.service_actions()  # Telemetry failure must not stop inference.
+
+
+@pytest.mark.parametrize(
+    "kind,field",
+    [
+        ("answer_axes", "query"),
+        ("answer_axes", "answer"),
+        ("answer_axes", "reference"),
+        ("certificate", "rubric"),
+        ("certificate", "rubric_id"),
+        ("certificate", "page_id"),
+        ("certificate", "span"),
+        ("utility", "context"),
+        ("utility", "answer_a"),
+        ("utility", "answer_b"),
+    ],
+)
+def test_judge_bounds_all_strings_before_any_forward(
+    tmp_path, monkeypatch, kind, field
+):
+    state, _, backend, _, controls = prepare_state(
+        tmp_path,
+        monkeypatch,
+        config(tmp_path / "reranker.sock"),
+        provider="local-decision",
+    )
+    backend.readout = lambda *_args: pytest.fail("invalid request reached model")
+    payload = {
+        "method": "judge",
+        "kind": kind,
+        "role": JUDGE_ROLE_BY_KIND[kind],
+        "query": "q",
+    }
+    payload.update(
+        {
+            "answer_axes": {"answer": "a", "reference": "r"},
+            "certificate": {
+                "rubric": "r",
+                "rubric_id": "id",
+                "evidence": [
+                    {"page_id": "first", "span": "valid"},
+                    {"page_id": "second", "span": "valid"},
+                ],
+            },
+            "utility": {"context": "", "answer_a": "a", "answer_b": "b"},
+        }[kind]
+    )
+    if field in {"page_id", "span"}:
+        payload["evidence"][1][field] = "x" * 16_385
+    else:
+        payload[field] = "x" * 16_385
+    with pytest.raises(ValueError):
+        state.handle(payload)
+    assert controls == {"lease": 0, "activity": 0}
