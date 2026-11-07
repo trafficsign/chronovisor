@@ -98,11 +98,20 @@ def _span_score(query_tokens: set[str], text: str) -> tuple[int, float]:
     return overlap, coverage
 
 
+def certificate_judge_span(text: str) -> str:
+    """Bound evidence only after removing page metadata."""
+    return parse(text)[1].strip()[:180]
+
+
 def supporting_span(
     page_id: str, query: str, snippet: str = ""
 ) -> tuple[str, int, float, str]:
     """Choose one exact, bounded span and return its content digest."""
 
+    try:
+        snippet = parse(snippet)[1]
+    except ValueError:
+        snippet = ""
     path = find_page(page_id)
     if path is None:
         digest = _sha256_bytes(page_id.encode("utf-8"))
@@ -116,7 +125,7 @@ def supporting_span(
     try:
         meta, body = parse(content)
     except Exception:
-        meta, body = {}, content
+        meta, body = {}, ""
     query_tokens = _query_tokens(query)
     candidates: list[tuple[str, int]] = []
     if snippet.strip():

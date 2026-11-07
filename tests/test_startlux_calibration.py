@@ -262,3 +262,58 @@ def test_archived_utility_input_is_hash_verified(field):
     assert module._verified_input(row, rally, archived)
     archived[field] = ["tampered"] if field == "context" else "tampered"
     assert not module._verified_input(row, rally, archived)
+
+
+def test_certificate_smoke_uses_body_before_truncating(tmp_path, monkeypatch):
+    module = script("smoke_startlux_certificate_5")
+    gold = write_rows(
+        tmp_path / "gold.jsonl",
+        [
+            {
+                "case_id": str(i),
+                "query_sha256": sha("q"),
+                "page_id_sha256": sha("p"),
+                "gold": True,
+            }
+            for i in range(5)
+        ],
+    )
+    cases = write_rows(
+        tmp_path / "cases.jsonl",
+        [
+            {
+                "case_id": str(i),
+                "query": "q",
+                "page_id": "p",
+                "evidence_span": "---\ntitle: "
+                + "metadata " * 100
+                + "\n---\nRelevant body.",
+            }
+            for i in range(5)
+        ],
+    )
+    monkeypatch.setattr(
+        module, "load_active_rubric", lambda **_k: {"rubric_text": "rubric"}
+    )
+    monkeypatch.setattr(module, "load_reranker_config", lambda: None)
+    seen = []
+
+    def judge(_kind, fields, **_k):
+        seen.append(fields["evidence"][0]["span"])
+        return {"verdicts": [{"decision": "pass", "confidence": 0.9}]}
+
+    monkeypatch.setattr(module.reranker_client, "decision_judge", judge)
+    assert (
+        module.main(
+            [
+                "--gold",
+                str(gold),
+                "--cases",
+                str(cases),
+                "--output-dir",
+                str(tmp_path / "out"),
+            ]
+        )
+        == 0
+    )
+    assert seen == ["Relevant body."] * 5

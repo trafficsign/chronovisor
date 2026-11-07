@@ -21,6 +21,7 @@ from chronovisor.core.search_types import tokenize
 from chronovisor.recall.evidence_certificate import (
     EvidenceCertificate,
     append_certificates,
+    certificate_judge_span,
     certify_candidate,
 )
 from chronovisor.recall.rubric_calibration import load_active_rubric
@@ -178,7 +179,7 @@ def _certificate_judge_schema(page_ids: list[str]) -> dict[str, Any]:
                 },
             }
         },
-}
+    }
 
 
 def _judge_route_identity(
@@ -255,6 +256,15 @@ def _run_certificate_judge(
     page_ids = [certificate.page_id for certificate in certificates]
     if not page_ids or len(page_ids) > 2 or len(page_ids) != len(set(page_ids)):
         return {}, "invalid_candidate_ids", None
+    try:
+        spans = {
+            item.page_id: certificate_judge_span(item.supporting_span)
+            for item in certificates
+        }
+    except ValueError:
+        return {}, "invalid_evidence_body", None
+    if not all(spans.values()):
+        return {}, "invalid_evidence_body", None
     route_identity: dict[str, str | None] | None = None
     if resolved_decision_route is not None:
         if (
@@ -274,7 +284,7 @@ def _run_certificate_judge(
                     "evidence": [
                         {
                             "page_id": certificate.page_id,
-                            "span": certificate.supporting_span[:180],
+                            "span": spans[certificate.page_id],
                         }
                         for certificate in certificates
                     ],
@@ -305,7 +315,7 @@ def _run_certificate_judge(
         "candidates": [
             {
                 "page_id": certificate.page_id,
-                "evidence_span": certificate.supporting_span[:180],
+                "evidence_span": spans[certificate.page_id],
             }
             for certificate in certificates
         ],
@@ -773,8 +783,7 @@ def is_ambiguous_certificate(certificate: EvidenceCertificate) -> bool:
     """Bound judge work to the narrow uncertainty band only."""
 
     return bool(
-        certificate.outcome == "reject"
-        and 0.25 <= certificate.confidence < 0.52
+        certificate.outcome == "reject" and 0.25 <= certificate.confidence < 0.52
     )
 
 

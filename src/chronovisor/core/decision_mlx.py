@@ -23,6 +23,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from chronovisor.core.frontmatter import parse
 from chronovisor.core.llm_runtime import (
     RerankItem,
     RerankRequest,
@@ -120,7 +121,8 @@ def _canonical_sha256(value: object) -> str:
 
 
 JUDGE_POLICY: dict[str, Any] = {
-    "version": 2,
+    "version": 3,
+    "certificate_evidence": "body-before-truncation",
     "utility_both_no": "neutral",
     "roles": JUDGE_ROLE_BY_KIND,
     "questions": JUDGE_QUESTIONS,
@@ -210,6 +212,9 @@ def judge_state(
             source_pages=_source_pages(reference),
         )
     if kind == JUDGE_CERTIFICATE:
+        evidence = parse(evidence)[1].strip()
+        if not evidence:
+            raise ValueError("certificate evidence body is empty")
         return _CERTIFICATE_STATE.format(
             query=query[:JUDGE_QUERY_CHARS],
             rubric_id=rubric_id,

@@ -1204,3 +1204,33 @@ def test_judge_bounds_all_strings_before_any_forward(
     with pytest.raises(ValueError):
         state.handle(payload)
     assert controls == {"lease": 0, "activity": 0}
+
+
+def test_certificate_judge_strips_frontmatter_before_model_limit(tmp_path, monkeypatch):
+    state, _status, backend, _runtime, _controls = prepare_state(
+        tmp_path,
+        monkeypatch,
+        config(tmp_path / "reranker.sock"),
+        provider="local-decision",
+    )
+    seen = []
+    backend.readout = lambda _q, states: seen.extend(states) or (5.0,)
+    state.handle(
+        {
+            "method": "judge",
+            "kind": JUDGE_CERTIFICATE,
+            "role": JUDGE_ROLE_BY_KIND[JUDGE_CERTIFICATE],
+            "query": "Which GPU?",
+            "rubric": "Require answer-bearing evidence.",
+            "evidence": [
+                {
+                    "page_id": "gpu",
+                    "span": "---\ntitle: "
+                    + "metadata " * 100
+                    + "\n---\nInference uses MPS.",
+                }
+            ],
+        }
+    )
+    assert "Inference uses MPS." in seen[0]
+    assert "metadata" not in seen[0]
