@@ -1106,11 +1106,13 @@ def promote_candidate(
     return result
 
 
-def load_active_rubric(path: Path = ACTIVE_FILE) -> dict[str, Any]:
+def load_active_rubric(
+    path: Path = ACTIVE_FILE, *, recover_backup: bool = True
+) -> dict[str, Any]:
     """Load only a sealed adopted artifact; no model is called synchronously."""
 
     try:
-        payload = read_sealed_json(path, recover_backup=True)
+        payload = read_sealed_json(path, recover_backup=recover_backup)
     except DurableStateError:
         return {
             "rubric_id": "builtin-v1",

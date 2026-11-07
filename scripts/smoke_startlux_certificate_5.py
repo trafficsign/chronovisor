@@ -17,7 +17,9 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core import reranker_client
+from chronovisor.core.durable_state import atomic_write_bytes
 from chronovisor.core.runtime_config import load_reranker_config
+from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.recall.recall_processor import PRIMARY_JUDGE_RUNTIME_ROLE
 from chronovisor.recall.rubric_calibration import load_active_rubric
 
@@ -37,10 +39,11 @@ def _jsonl(path: Path) -> list[dict[str, Any]]:
             for line in handle:
                 try:
                     value = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(value, dict):
-                    rows.append(value)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"invalid JSONL input: {path.name}") from exc
+                if not isinstance(value, dict):
+                    raise ValueError(f"invalid JSONL row: {path.name}")
+                rows.append(value)
     except OSError:
         return []
     return rows
@@ -79,9 +82,13 @@ def _source_rows(path: Path) -> dict[str, dict[str, Any]]:
 
 
 def _case_index(path: Path) -> dict[str, dict[str, Any]]:
-    return {
-        str(row.get("case_id") or ""): row for row in _jsonl(path) if row.get("case_id")
-    }
+    index: dict[str, dict[str, Any]] = {}
+    for row in _jsonl(path):
+        case_id = row.get("case_id")
+        if not isinstance(case_id, str) or not case_id or case_id in index:
+            raise ValueError("invalid or duplicate case_id")
+        index[case_id] = row
+    return index
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -94,17 +101,31 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     output_dir = args.output_dir.expanduser().resolve()
+    if output_dir.is_relative_to(CHRONOVISOR_ROOT.expanduser().resolve()):
+        raise SystemExit("output-dir must be outside the production root")
     output_dir.mkdir(parents=True, exist_ok=True)
     gold_rows = _jsonl(args.gold.expanduser())
     cases = _case_index(args.cases.expanduser()) if args.cases else {}
     sources = {} if args.cases else _source_rows(args.source_ledger.expanduser())
-    rubric = load_active_rubric()
+    valid_gold = (
+        len(gold_rows) == 5
+        and len(
+            {
+                row.get("case_id")
+                for row in gold_rows
+                if isinstance(row.get("case_id"), str) and row["case_id"]
+            }
+        )
+        == 5
+        and all(type(row.get("gold")) is bool for row in gold_rows)
+    )
+    rubric = load_active_rubric(recover_backup=False)
     rubric_text = str(rubric.get("rubric_text") or "")
     rubric_id = str(rubric.get("rubric_id") or "")
     config = load_reranker_config()
     results: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
-    for row in gold_rows:
+    for row in gold_rows if valid_gold else []:
         case_id = str(row.get("case_id") or "")
         source = cases.get(case_id)
         if source is None:
@@ -117,6 +138,11 @@ def main(argv: list[str] | None = None) -> int:
         ):
             skipped.append({"case_id": case_id, "reason": "source_text_unavailable"})
             continue
+        if _sha(source["query"]) != row.get("query_sha256") or _sha(
+            source["page_id"]
+        ) != row.get("page_id_sha256"):
+            skipped.append({"case_id": case_id, "reason": "input_hash_mismatch"})
+            continue
         response = reranker_client.decision_judge(
             "certificate",
             {
@@ -126,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
                 "evidence": [
                     {
                         "page_id": source["page_id"],
-                        "span": source["evidence_span"],
+                        "span": source["evidence_span"][:180],
                     }
                 ],
             },
@@ -158,7 +184,8 @@ def main(argv: list[str] | None = None) -> int:
     payload = {
         "status": (
             "complete"
-            if len(results) == len(gold_rows)
+            if valid_gold
+            and len(results) == 5
             and matched == len(gold_rows)
             and false_pass == 0
             else "held"
@@ -172,9 +199,12 @@ def main(argv: list[str] | None = None) -> int:
         "priority": PRIORITY_SEARCH,
         "results": results,
     }
-    (output_dir / "certificate-smoke.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    atomic_write_bytes(
+        output_dir / "certificate-smoke.json",
+        (
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8"),
+        backup=False,
     )
     print(json.dumps(payload))
     return 0 if payload["status"] == "complete" else 1

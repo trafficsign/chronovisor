@@ -1,11 +1,12 @@
 #!/usr/bin/env python3.14
 """Reconstruct and cross-validate the 58 historical utility pairs on StartLux.
 
-The label ledger stores answer hashes, not answer text. This script rebuilds
-each pair from the sealed rally/exposure artifacts, regenerates the two answers
-with the recorded Qwen generator, verifies both SHA-256 values, and only then
-calls the StartLux utility judge in both blind orders. It is read-only apart
-from ``--output-dir`` and uses PRIORITY_SEARCH for every service call.
+The label ledger stores answer hashes, not answer text. Supply archived inputs
+with --answers (JSONL: rally_id, candidate_id, query, context, a0, a1). Query and
+context hashes must match the rally manifest, and both answer hashes must match
+the label ledger before either blind order is judged. No generation, catalog
+connection, lock, repair, or production output is performed. Only --output-dir
+is writable; every service call uses PRIORITY_SEARCH.
 
 Prepared for a later run; it is intentionally not invoked by the test suite.
 """
@@ -15,22 +16,19 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 from chronovisor.core import reranker_client
 from chronovisor.core.decision_mlx import logit_probability
+from chronovisor.core.durable_state import atomic_write_bytes
 from chronovisor.core.runtime_config import load_reranker_config
 from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.recall import recall_distillation as distill
-from chronovisor.recall import recall_distillation_store as store
-from chronovisor.recall.recall_distillation_catalog import CatalogTextCache
 
 PRIORITY_SEARCH = 1
 JUDGE_ROLE = "recall.distill.utility_judge"
-GENERATOR_ROLE = "recall.distill.answer_generator"
-MAX_INPUT_BYTES = 12_000
 DEPENDENT = "helpful"
 HARMFUL = "harmful"
 
@@ -39,13 +37,11 @@ def _jsonl(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with path.open(encoding="utf-8") as handle:
         for line in handle:
-            if '"dimension":"answer_utility"' not in line:
-                continue
             try:
                 value = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if isinstance(value, dict):
+            if isinstance(value, dict) and value.get("dimension") == "answer_utility":
                 rows.append(value)
     return rows
 
@@ -69,102 +65,32 @@ def _rallies(path: Path, wanted: set[str]) -> dict[str, dict[str, Any]]:
     return found
 
 
-def _rendered(ref: dict[str, Any], texts: CatalogTextCache) -> str:
-    rendered = ref.get("rendered_context")
-    if isinstance(rendered, str) and rendered:
-        return rendered
-    refs = ref.get("evidence_refs")
-    if isinstance(refs, list):
-        parts = [
-            texts.get(str(item.get("semantic_sha256") or ""), "")
-            for item in refs
-            if isinstance(item, dict)
-        ]
-        return "\n".join(part for part in parts if part)
-    return ""
-
-
-def _payload(
-    row: dict[str, Any],
-    rally: dict[str, Any],
-    artifact: dict[str, Any],
-    texts: CatalogTextCache,
-) -> dict[str, Any] | None:
-    refs = artifact.get("candidate_refs")
-    if not isinstance(refs, list):
-        return None
-    original: dict[str, str] = {}
-    target_text = ""
-    for ref in refs:
-        if not isinstance(ref, dict):
-            continue
-        candidate_id = str(ref.get("candidate_id") or "")
-        rendered = _rendered(ref, texts)
-        if not candidate_id or not rendered:
-            continue
-        original[candidate_id] = rendered
-    target = str(row.get("candidate_id") or "")
-    if target in original:
-        mode = "remove"
-        target_text = original[target]
-    else:
-        mode = "add"
-        for pool in artifact.get("candidate_pool_refs") or []:
-            if not isinstance(pool, dict) or pool.get("selected") is not False:
-                continue
-            if str(pool.get("candidate_id") or "") != target:
-                continue
-            target_text = _rendered(pool, texts)
-            if not target_text:
-                text_hash = str(
-                    pool.get("text_sha256") or pool.get("content_sha256") or ""
-                )
-                target_text = texts.get(text_hash, "")
-            break
-    if not target_text:
-        return None
-    query = texts.get(str(rally.get("query_sha256") or ""), "")
-    if not query:
-        return None
-    context = [
-        texts.get(str(ref.get("semantic_sha256") or ""), "")
-        for ref in rally.get("context_refs") or []
-        if isinstance(ref, dict)
-    ]
-    context = [value for value in context if value]
-    values = list(original.values())
-    return {
-        "rally_id": str(rally.get("rally_id") or ""),
-        "candidate_id": target,
-        "query": query,
-        "context": context,
-        "a0_evidence": [v for k, v in original.items() if k != target]
-        if mode == "remove"
-        else values,
-        "a1_evidence": values if mode == "remove" else [*values, target_text],
-        "mode": mode,
-    }
-
-
-def _answer(
-    evidence: list[str],
-    base: dict[str, Any],
-    generator_identity: dict[str, str],
-    generator_digest: str,
-) -> str:
-    result = distill._worker_call(
-        "answer",
-        GENERATOR_ROLE,
-        {**base, "evidence": evidence},
-        max_input_bytes=MAX_INPUT_BYTES,
-        expected_route=generator_identity,
-        expected_digest=generator_digest,
-        deadline_ms=60_000,
+def _verified_input(
+    row: dict[str, Any], rally: dict[str, Any], archived: dict[str, Any]
+) -> bool:
+    query, context = archived.get("query"), archived.get("context")
+    a0, a1 = archived.get("a0"), archived.get("a1")
+    refs = rally.get("context_refs")
+    if (
+        not isinstance(query, str)
+        or not query
+        or not isinstance(context, list)
+        or not all(isinstance(text, str) for text in context)
+        or not isinstance(a0, str)
+        or not a0
+        or not isinstance(a1, str)
+        or not a1
+        or not isinstance(refs, list)
+        or not all(isinstance(ref, dict) for ref in refs)
+    ):
+        return False
+    return (
+        hashlib.sha256(query.encode()).hexdigest() == rally.get("query_sha256")
+        and [hashlib.sha256(text.encode()).hexdigest() for text in context]
+        == [ref.get("semantic_sha256") for ref in refs]
+        and hashlib.sha256(a0.encode()).hexdigest() == row.get("a0_sha256")
+        and hashlib.sha256(a1.encode()).hexdigest() == row.get("a1_sha256")
     )
-    answer = result.get("answer")
-    if not isinstance(answer, str) or not answer:
-        raise distill.DistillationError("answer generator returned no answer")
-    return answer
 
 
 def _judge(
@@ -194,13 +120,11 @@ def _judge(
     return float(logit)
 
 
-def _choice(probability: float, decisive: float, tie_band: float) -> str:
+def _choice(probability: float, decisive: float) -> str:
     if probability >= decisive:
         return "a"
     if probability <= 1.0 - decisive:
         return "b"
-    if abs(probability - 0.5) <= tie_band:
-        return "tie"
     return "uncertain"
 
 
@@ -218,12 +142,13 @@ def _verdict(
     second_logit: float,
     a0_first: bool,
     decisive: float,
-    tie_band: float,
 ) -> tuple[str, bool]:
     first = logit_probability(first_logit)
     second = logit_probability(second_logit)
-    first_choice = _choice(first, decisive, tie_band)
-    second_choice = _choice(second, decisive, tie_band)
+    first_choice = _choice(first, decisive)
+    second_choice = _choice(second, decisive)
+    if first_choice == second_choice == "b":
+        return "neutral", True
     first_verdict = _decode(first_choice, a0_first)
     second_verdict = _decode(second_choice, not a0_first)
     if first_verdict == second_verdict and first_verdict != "uncertain":
@@ -232,25 +157,20 @@ def _verdict(
 
 
 def _fit(rows: list[dict[str, Any]], folds: int) -> dict[str, Any]:
-    def fit_one(group: list[dict[str, Any]]) -> tuple[float, float]:
-        best = (-1.0, 0.75, 0.10)
+    def fit_one(group: list[dict[str, Any]]) -> float:
+        best = (-1.0, 0.75)
         for decisive in (0.65, 0.70, 0.75, 0.80, 0.85, 0.90):
-            for tie_band in (0.05, 0.10, 0.15):
-                correct = sum(
-                    _verdict(
-                        row["first_logit"],
-                        row["second_logit"],
-                        row["a0_first"],
-                        decisive,
-                        tie_band,
-                    )[0]
-                    == row["gold"]
-                    for row in group
-                )
-                score = correct / len(group) if group else 0.0
-                if score > best[0]:
-                    best = (score, decisive, tie_band)
-        return best[1], best[2]
+            correct = sum(
+                _verdict(
+                    row["first_logit"], row["second_logit"], row["a0_first"], decisive
+                )[0]
+                == row["gold"]
+                for row in group
+            )
+            score = correct / len(group) if group else 0.0
+            if score > best[0]:
+                best = (score, decisive)
+        return best[1]
 
     groups: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -264,7 +184,7 @@ def _fit(rows: list[dict[str, Any]], folds: int) -> dict[str, Any]:
         test = groups.get(fold, [])
         if not train or not test:
             continue
-        decisive, tie_band = fit_one(train)
+        decisive = fit_one(train)
         correct = 0
         directional = 0
         directional_total = 0
@@ -276,7 +196,6 @@ def _fit(rows: list[dict[str, Any]], folds: int) -> dict[str, Any]:
                 row["second_logit"],
                 row["a0_first"],
                 decisive,
-                tie_band,
             )
             correct += predicted == row["gold"]
             if row["gold"] in {DEPENDENT, HARMFUL}:
@@ -284,12 +203,13 @@ def _fit(rows: list[dict[str, Any]], folds: int) -> dict[str, Any]:
                 directional += predicted == row["gold"]
             agreements += agreement
             uncertain += predicted == "uncertain"
-            predictions.append({**row, "predicted": predicted})
+            predictions.append(
+                {**row, "predicted": predicted, "order_agreement": agreement}
+            )
         folds_out.append(
             {
                 "fold": fold,
                 "decisive": decisive,
-                "tie_band": tie_band,
                 "cases": len(test),
                 "accuracy": round(correct / len(test), 6),
                 "directional_accuracy": round(directional / directional_total, 6)
@@ -313,7 +233,42 @@ def _fit(rows: list[dict[str, Any]], folds: int) -> dict[str, Any]:
         for predicted in predictions
         if predicted["gold"] in {DEPENDENT, HARMFUL}
     )
+    n = directional_total
+    p = directional / n if n else 0.0
+    z = 1.959963984540054
+    lower_bound = (
+        (
+            (p + z * z / (2 * n) - z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)))
+            / (1 + z * z / n)
+        )
+        if n
+        else 0.0
+    )
+    counts = {
+        label: sum(row["predicted"] == label for row in predictions)
+        for label in ("helpful", "harmful", "neutral", "uncertain")
+    }
+    agreement_rate = (
+        sum(row["order_agreement"] for row in predictions) / len(predictions)
+        if predictions
+        else 0.0
+    )
+    uncertain_rate = counts["uncertain"] / len(predictions) if predictions else 1.0
+    gates = {
+        "accuracy": accuracy >= 0.80,
+        "directional_accuracy": p >= 0.85,
+        "directional_lcb": lower_bound >= 0.65,
+        "order_agreement": agreement_rate >= 0.90,
+        "uncertain_rate": uncertain_rate <= 0.10,
+        "helpful_count": counts["helpful"] >= 20,
+        "harmful_count": counts["harmful"] >= 20,
+    }
     return {
+        "gates": gates,
+        "passed": all(gates.values()),
+        "directional_lcb": lower_bound,
+        "order_agreement": agreement_rate,
+        "distribution": counts,
         "folds": folds_out,
         "cases": len(predictions),
         "accuracy": round(accuracy, 6),
@@ -349,73 +304,51 @@ def main(argv: list[str] | None = None) -> int:
         / "recall-distillation"
         / "rally-manifest.jsonl",
     )
+    parser.add_argument("--answers", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--folds", type=int, default=5)
-    parser.add_argument("--root", type=Path, default=CHRONOVISOR_ROOT)
     args = parser.parse_args(argv)
 
     output_dir = args.output_dir.expanduser().resolve()
+    if output_dir.is_relative_to(CHRONOVISOR_ROOT.expanduser().resolve()):
+        raise SystemExit("output-dir must be outside the production root")
     output_dir.mkdir(parents=True, exist_ok=True)
-    root = args.root.expanduser().resolve()
-    texts = CatalogTextCache(root / "raw", root)
     rows = _jsonl(args.labels.expanduser())
+    if (
+        len(rows) != 58
+        or any(
+            not isinstance(row.get("rally_id"), str)
+            or not row["rally_id"]
+            or not isinstance(row.get("candidate_id"), str)
+            or not row["candidate_id"]
+            or row.get("verdict") not in {"helpful", "harmful", "neutral", "uncertain"}
+            for row in rows
+        )
+        or len({(row["rally_id"], row["candidate_id"]) for row in rows}) != 58
+    ):
+        raise SystemExit("expected 58 distinct labeled utility pairs")
     wanted = {str(row.get("rally_id") or "") for row in rows}
     rallies = _rallies(args.rallies.expanduser(), wanted)
-    generator_identity, generator_digest, _judge_identity, _judge_digest = (
-        distill._local_counterfactual_routes()
-    )
+    answers = {}
+    for line in args.answers.expanduser().read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        key = (row["rally_id"], row["candidate_id"])
+        if key in answers:
+            raise SystemExit("duplicate archived answer pair")
+        answers[key] = row
     config = load_reranker_config()
     enriched: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
     for row in sorted(rows, key=lambda value: str(value.get("rally_id"))):
         rally_id = str(row.get("rally_id") or "")
         rally = rallies.get(rally_id)
-        receipt = (rally or {}).get("exposure_receipts")
-        exposure_id = ""
-        if isinstance(receipt, list) and receipt and isinstance(receipt[0], dict):
-            exposure_id = str(receipt[0].get("exposure_artifact_id") or "")
-        if not rally or not exposure_id:
-            skipped.append({"rally_id": rally_id, "reason": "rally_exposure_missing"})
-            continue
-        try:
-            artifact = store.read_sealed(
-                store.distillation_dir(root) / "exposures" / f"{exposure_id}.json",
-                schema="chronovisor.recall-exact-exposure.v1",
-            )
-        except Exception:
-            skipped.append({"rally_id": rally_id, "reason": "exposure_unreadable"})
-            continue
-        payload = _payload(row, rally, artifact, texts)
-        if payload is None:
+        archived = answers.get((rally_id, row.get("candidate_id")), {})
+        if not rally or not _verified_input(row, rally, archived):
             skipped.append(
-                {"rally_id": rally_id, "reason": "payload_unreconstructable"}
+                {"rally_id": rally_id, "reason": "input_missing_or_hash_mismatch"}
             )
             continue
-        base = {
-            key: payload[key]
-            for key in ("rally_id", "candidate_id", "query", "context")
-        }
-        try:
-            a0 = _answer(
-                payload["a0_evidence"], base, generator_identity, generator_digest
-            )
-            a1 = _answer(
-                payload["a1_evidence"], base, generator_identity, generator_digest
-            )
-        except Exception as exc:
-            skipped.append(
-                {
-                    "rally_id": rally_id,
-                    "reason": f"answer_unavailable:{type(exc).__name__}",
-                }
-            )
-            continue
-        if hashlib.sha256(a0.encode()).hexdigest() != row.get("a0_sha256"):
-            skipped.append({"rally_id": rally_id, "reason": "a0_hash_mismatch"})
-            continue
-        if hashlib.sha256(a1.encode()).hexdigest() != row.get("a1_sha256"):
-            skipped.append({"rally_id": rally_id, "reason": "a1_hash_mismatch"})
-            continue
+        a0, a1 = archived["a0"], archived["a1"]
         a0_first = (
             int.from_bytes(
                 hashlib.sha256(
@@ -428,15 +361,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         try:
             first_logit = _judge(
-                query=payload["query"],
-                context=payload["context"],
+                query=archived["query"],
+                context=archived["context"],
                 answer_a=a0 if a0_first else a1,
                 answer_b=a1 if a0_first else a0,
                 config=config,
             )
             second_logit = _judge(
-                query=payload["query"],
-                context=payload["context"],
+                query=archived["query"],
+                context=archived["context"],
                 answer_a=a1 if a0_first else a0,
                 answer_b=a0 if a0_first else a1,
                 config=config,
@@ -463,16 +396,21 @@ def main(argv: list[str] | None = None) -> int:
         )
     metrics = _fit(enriched, max(1, args.folds))
     payload = {
-        "status": "complete" if metrics["cases"] == len(rows) else "held",
+        "status": "complete"
+        if len(rows) == 58 and metrics["cases"] == 58 and metrics["passed"]
+        else "held",
         "labels": len(rows),
         "replayed": metrics["cases"],
         "skipped": skipped,
         "metrics": metrics,
         "priority": PRIORITY_SEARCH,
     }
-    (output_dir / "utility-cv.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    atomic_write_bytes(
+        output_dir / "utility-cv.json",
+        (
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8"),
+        backup=False,
     )
     print(json.dumps(payload))
     return 0 if payload["status"] == "complete" else 1
