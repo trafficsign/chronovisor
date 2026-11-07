@@ -2141,14 +2141,129 @@ def state_context_for_request(request: RecallRequest, policy: RecallPolicy) -> s
         return format_state_context(host=request.host, cwd=request.cwd)
 
 
+# Reserved after the recall filter for rendering, the receipt and the log.
+RECALL_FILTER_MARGIN_MS = 150
+# Stored previous-turn length; the decision model reads its head only.
+LAST_PROMPT_CHARS = 1_000
+
+
+def _apply_recall_filter(
+    result: RecallResult,
+    policy: RecallPolicy,
+    *,
+    user_turn: str,
+    session_id: str,
+    deadline_at: float | None,
+) -> None:
+    """Judge each published item against this user turn with the decision model.
+
+    The judged text is exactly what the payload publishes (title + newline +
+    evidence), the frozen threshold's input. "shadow" scores and logs only;
+    "on" keeps a context item when any of its published texts passes and,
+    when the filter cannot run, publishes nothing: unjudged items are what
+    the filter exists to stop.
+    """
+
+    config = runtime_config.load_reranker_config()
+    mode = config.recall_filter
+    if mode == "off" or not result.context_items:
+        return
+    record: dict[str, Any] = {"mode": mode}
+    result.evidence_features["recall_filter"] = record
+    if result.evidence_packet is not None:
+        record["status"] = "not_applied_evidence_packet"
+        return
+    started = time.perf_counter()
+    try:
+        from chronovisor.core import reranker_client
+        from chronovisor.core.decision_mlx import DecisionMLXBackend
+        from chronovisor.core.llm_config import load_default_llm_runtime
+        from chronovisor.core.reranker import RERANK_RUNTIME_ROLE
+        from chronovisor.recall.recall_session import load_session_state
+
+        route = load_default_llm_runtime().resolve_rerank(RERANK_RUNTIME_ROLE)
+        if route.provider != DecisionMLXBackend.provider:
+            # A relevance reranker (e.g. after a rollback) has no filter question.
+            record["status"] = "inapplicable_route"
+            return
+        owners = [
+            index
+            for index, item in enumerate(result.context_items)
+            for _passage in item.source_passages or (None,)
+        ]
+        texts = [
+            f"{item.get('title', '')}\n{item.get('evidence', '')}"
+            for item in _recall_payload(result, policy).get("items", [])
+        ]
+        if len(texts) != len(owners):
+            raise ValueError("published items do not follow context items")
+        remaining_ms = _remaining_budget_ms(deadline_at)
+        timeout_ms = config.service.timeout_ms
+        if remaining_ms is not None:
+            timeout_ms = min(timeout_ms, remaining_ms - RECALL_FILTER_MARGIN_MS)
+        if timeout_ms < 50:
+            raise RecallBudgetExhausted("recall filter budget exhausted")
+        state = load_session_state(session_id)
+        turn = user_turn.strip()
+        previous = state.last_prompt if state is not None else ""
+        context = previous if previous != turn[:LAST_PROMPT_CHARS] else ""
+        scores = reranker_client.recall_filter(
+            turn, context, texts, config=config, timeout_ms=timeout_ms
+        )
+    except Exception as exc:
+        record.update(
+            status="unavailable",
+            reason=getattr(exc, "category", type(exc).__name__),
+            latency_ms=int(round((time.perf_counter() - started) * 1_000)),
+        )
+        if mode == "on":
+            result.context_items = []
+            result.reasons.append("recall filter unavailable")
+        return
+    probability = config.recall_filter_min_probability
+    threshold = math.log(probability / (1 - probability))
+    kept = {owners[index] for index, score in enumerate(scores) if score >= threshold}
+    record.update(
+        status="applied" if mode == "on" else "observed",
+        threshold_logit=round(threshold, 4),
+        preceding_turn=bool(context),
+        latency_ms=int(round((time.perf_counter() - started) * 1_000)),
+        items=[
+            {
+                "page_id": result.context_items[owners[index]].page_id,
+                "score": round(score, 4),
+            }
+            for index, score in enumerate(scores)
+        ],
+        dropped_page_ids=[
+            item.page_id
+            for index, item in enumerate(result.context_items)
+            if index not in kept
+        ],
+    )
+    if mode == "on":
+        result.context_items = [
+            item for index, item in enumerate(result.context_items) if index in kept
+        ]
+
+
 def _render_final_context(
     result: RecallResult,
     *,
     active_request: RecallRequest,
     policy: RecallPolicy,
+    user_turn: str | None = None,
+    filter_deadline_at: float | None = None,
 ) -> tuple[str, str, str]:
-    """Render Recall first, then fit the always-on state block into the remainder."""
+    """Filter, render Recall, then fit the always-on state block into the remainder."""
 
+    _apply_recall_filter(
+        result,
+        policy,
+        user_turn=active_request.prompt if user_turn is None else user_turn,
+        session_id=active_request.session_id,
+        deadline_at=filter_deadline_at,
+    )
     max_total = max(0, int(policy.max_total_context_chars))
     recall_policy = replace(
         policy,
@@ -2501,6 +2616,7 @@ def _finalize_recall_result(
         result,
         active_request=active_request,
         policy=policy,
+        filter_deadline_at=deadline_at,
     )
     retained_page_ids = (
         []
@@ -4142,6 +4258,7 @@ def _run_distilled_fast_path(
     started: float,
     final_deadline_at: float,
     telemetry: dict[str, Any] | None,
+    user_turn: str | None = None,
 ) -> RecallResult:
     """Score only existing anchor/BM25 results, with no mutable Recall lanes."""
 
@@ -4324,6 +4441,8 @@ def _run_distilled_fast_path(
             result,
             active_request=active_request,
             policy=replace(policy, max_state_context_chars=0),
+            user_turn=user_turn,
+            filter_deadline_at=final_deadline_at,
         )
     except Exception:
         trace.update(status="abstained", fallback="fast_path_error", candidate_count=len(scored))
@@ -4480,6 +4599,7 @@ def _run_active_distillation_recall(
         active_request, matched, [], policy,
         session_state=load_session_state(active_request.session_id),
     )
+    user_turn = active_request.prompt
     if resolved and resolved[0] != _compact_query(active_request.prompt):
         active_request = replace(active_request, prompt=resolved[0])
     result = _run_distilled_fast_path(
@@ -4490,6 +4610,7 @@ def _run_active_distillation_recall(
         started=started,
         final_deadline_at=final_deadline_at,
         telemetry=telemetry,
+        user_turn=user_turn,
     )
     if not result.queries:
         result.queries = [active_request.prompt]
@@ -5185,6 +5306,7 @@ def run_deterministic_fallback(
                 result,
                 active_request=active_request,
                 policy=policy,
+                filter_deadline_at=final_deadline_at,
             )
     except RecallBudgetExhausted, RecallWallClockTimeout:
         result.context_items = []
@@ -5210,6 +5332,28 @@ def run_deterministic_fallback(
 
 def _elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
+
+
+def _remember_user_turn(request: RecallRequest) -> None:
+    """Keep this turn as the next turn's preceding turn (the recall filter's context)."""
+
+    if not request.session_id or os.environ.get("CHRONOVISOR_READ_ONLY") == "1":
+        return
+    turn = strip_non_user_blocks(request.prompt)[0].strip()
+    if not turn:
+        return
+    try:
+        from chronovisor.recall.recall_session import (
+            load_session_state,
+            save_session_state,
+        )
+
+        state = load_session_state(request.session_id)
+        if state is not None:
+            state.last_prompt = turn[:LAST_PROMPT_CHARS]
+            save_session_state(state)
+    except OSError, ValueError:
+        pass
 
 
 def append_recall_log(request: RecallRequest, result: RecallResult) -> None:
@@ -5284,6 +5428,7 @@ def append_recall_log(request: RecallRequest, result: RecallResult) -> None:
         "error": result.error,
     }
     append_jsonl(RECALL_LOG_FILE, record)
+    _remember_user_turn(request)
     if (
         (result.status == "degraded" or result.search_mode == "readonly_anchor_bm25")
         and request.session_id
