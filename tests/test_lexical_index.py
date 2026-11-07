@@ -936,3 +936,140 @@ def test_normal_writer_rebuilds_when_metadata_snapshot_is_invalid(
     assert calls == 1
     assert [row.page_id for row in index.query("writerrecoverytoken")] == ["page"]
     assert index.snapshot_available is True
+
+
+@pytest.fixture
+def quick_check_projection(tmp_path, monkeypatch):
+    monkeypatch.delenv("CHRONOVISOR_READ_ONLY", raising=False)
+    page = tmp_path / "page.md"
+    page.write_text("---\ntitle: Alpha\nstatus: stable\ntype: knowledge\n---\nexistingtoken\n")
+    path = tmp_path / "lexical.sqlite"
+    writer = LexicalIndex(path=path, pages=lambda: [page])
+    writer.build()
+    writer.close()
+    path.with_suffix(".quick-check.json").unlink(missing_ok=True)
+    checks = []
+    original = LexicalIndex._run_quick_check
+
+    def check(connection):
+        checks.append(True)
+        original(connection)
+
+    monkeypatch.setattr(LexicalIndex, "_run_quick_check", staticmethod(check))
+    return path, checks
+
+
+def test_quick_check_success_reused_across_instances(quick_check_projection):
+    path, checks = quick_check_projection
+    first = LexicalIndex(path=path, pages=lambda: [])
+    assert first.load_existing()
+    expected = first.query_existing("existingtoken")
+    first.close()
+    assert len(checks) == 1
+    second = LexicalIndex(path=path, pages=lambda: [])
+    assert second.load_existing()
+    assert second.query_existing("existingtoken") == expected
+    second.close()
+    assert len(checks) == 1
+    assert path.with_suffix(".quick-check.json").stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("corruption", ["truncated", "wrong_digest", "wrong_result"])
+def test_quick_check_corrupt_receipt_falls_back(quick_check_projection, corruption):
+    path, checks = quick_check_projection
+    reader = LexicalIndex(path=path, pages=lambda: [])
+    assert reader.load_existing()
+    reader.close()
+    sidecar = path.with_suffix(".quick-check.json")
+    value = json.loads(sidecar.read_text())
+    if corruption == "truncated":
+        sidecar.write_text("{")
+    else:
+        if corruption == "wrong_digest":
+            value["source"]["db_sha256"] = "0" * 64
+        else:
+            value["quick_check"] = "failed"
+        sidecar.write_text(json.dumps(value))
+    assert LexicalIndex(path=path, pages=lambda: []).load_existing()
+    assert len(checks) == 2
+
+
+def test_quick_check_content_hash_invalidates_preserved_stat(quick_check_projection):
+    path, checks = quick_check_projection
+    reader = LexicalIndex(path=path, pages=lambda: [])
+    assert reader.load_existing()
+    reader.close()
+    before = path.stat()
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE pages SET title = 'Gamma'")
+    connection.close()
+    assert path.stat().st_size == before.st_size
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert LexicalIndex(path=path, pages=lambda: []).load_existing()
+    assert len(checks) == 2
+
+
+def test_quick_check_wal_changes_invalidate(quick_check_projection):
+    path, checks = quick_check_projection
+    writer = sqlite3.connect(path)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("UPDATE pages SET title = 'Gamma'")
+    writer.commit()
+    assert Path(f"{path}-wal").stat().st_size > 0
+    assert LexicalIndex(path=path, pages=lambda: []).load_existing()
+    writer.execute("UPDATE pages SET title = 'Delta'")
+    writer.commit()
+    assert LexicalIndex(path=path, pages=lambda: []).load_existing()
+    assert len(checks) == 2
+    writer.close()
+
+
+def test_quick_check_hit_keeps_schema_and_metadata_validation(quick_check_projection, monkeypatch):
+    path, _checks = quick_check_projection
+    reader = LexicalIndex(path=path, pages=lambda: [])
+    assert reader.load_existing()
+    reader.close()
+    # Even an alleged cached success cannot override per-request validation.
+    monkeypatch.setattr(LexicalIndex, "_quick_check_cached", lambda *_: True)
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE pages SET content_sha256 = 'invalid'")
+    connection.close()
+    assert not LexicalIndex(path=path, pages=lambda: []).load_existing()
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA user_version = 999")
+    connection.close()
+    assert not LexicalIndex(path=path, pages=lambda: []).load_existing()
+
+
+def test_quick_check_concurrent_update_rechecks_snapshot(quick_check_projection, monkeypatch):
+    path, checks = quick_check_projection
+    reader = LexicalIndex(path=path, pages=lambda: [])
+    assert reader.load_existing()
+    reader.close()
+    original = LexicalIndex._quick_check_cached
+
+    def racing_cache(self, key):
+        cached = original(self, key)
+        with sqlite3.connect(path) as writer:
+            writer.execute("UPDATE pages SET title = 'Gamma'")
+        writer.close()
+        return cached
+
+    monkeypatch.setattr(LexicalIndex, "_quick_check_cached", racing_cache)
+    assert LexicalIndex(path=path, pages=lambda: []).load_existing()
+    assert len(checks) == 2
+
+
+def test_quick_check_read_only_never_writes_receipt(quick_check_projection, monkeypatch):
+    path, checks = quick_check_projection
+    sidecar = path.with_suffix(".quick-check.json")
+    monkeypatch.setenv("CHRONOVISOR_READ_ONLY", "1")
+    assert LexicalIndex(path=path, pages=lambda: []).load_existing()
+    assert not sidecar.exists()
+    monkeypatch.delenv("CHRONOVISOR_READ_ONLY")
+    assert LexicalIndex(path=path, pages=lambda: []).load_existing()
+    before = sidecar.read_bytes(), sidecar.stat().st_mtime_ns
+    monkeypatch.setenv("CHRONOVISOR_READ_ONLY", "1")
+    assert LexicalIndex(path=path, pages=lambda: []).load_existing()
+    assert (sidecar.read_bytes(), sidecar.stat().st_mtime_ns) == before
+    assert len(checks) == 2
