@@ -8,6 +8,7 @@ import tempfile
 import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,21 @@ from chronovisor.core.knowledge_graph_schema import (
     validate_event,
 )
 from chronovisor.core.store import CHRONOVISOR_ROOT
+
+
+@lru_cache(maxsize=4)
+def _verified_relation_records(
+    path: Path, signature: tuple[int, int, int, int, int],
+) -> tuple[RelationRecord, ...]:
+    # Atomic replacement or in-place edits invalidate the verified process cache.
+    snapshot = read_sealed_json(path, recover_backup=True)
+    values = snapshot.get("relations")
+    if not isinstance(values, dict):
+        return ()
+    return tuple(sorted(
+        (RelationRecord.from_dict(row) for row in values.values()),
+        key=lambda row: row.relation_id,
+    ))
 
 
 class KnowledgeGraphStore:
@@ -170,15 +186,19 @@ class KnowledgeGraphStore:
         statuses: Iterable[str] | None = None,
     ) -> list[RelationRecord]:
         allowed = set(statuses) if statuses is not None else None
-        snapshot = self.load_snapshot()
-        values = snapshot.get("relations")
-        if not isinstance(values, dict):
-            return []
-        records = [RelationRecord.from_dict(row) for row in values.values()]
-        return sorted(
-            (row for row in records if allowed is None or row.status in allowed),
-            key=lambda row: row.relation_id,
-        )
+        try:
+            stat = self.snapshot_file.stat()
+            records = _verified_relation_records(self.snapshot_file, (
+                stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
+            ))
+        except (OSError, DurableStateError):
+            self.materialize_snapshot()
+            stat = self.snapshot_file.stat()
+            records = _verified_relation_records(self.snapshot_file, (
+                stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
+            ))
+        return [row for row in records if allowed is None or row.status in allowed]
+
 
     def write_derived_snapshot(
         self, name: str, payload: dict[str, Any]

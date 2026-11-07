@@ -356,6 +356,12 @@ def disable_live_recall_policy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
         (root / name).write_text("legacy\n", encoding="utf-8")
     monkeypatch.setattr(recall_runtime, "CHRONOVISOR_ROOT", root)
     monkeypatch.setenv("CHRONOVISOR_RECALL_IMPROVEMENT_POLICY", "0")
+    from chronovisor.core import background_jobs
+    from chronovisor.core.durable_state import exclusive_text_file_lock
+
+    monkeypatch.setattr(background_jobs, "JOB_DIR", root / "jobs")
+    monkeypatch.setattr(background_jobs, "STATE_FILE", root / "jobs/state.json")
+    monkeypatch.setattr(background_jobs, "_lock", lambda: exclusive_text_file_lock(root / "jobs/state.lock"))
     evidence_composition.bind_recall_provider()
 
 
@@ -7273,3 +7279,57 @@ def test_legacy_capture_keeps_ambiguous_semantic_binding_on_page_fallback(
 
     assert exact_receipts == []
     assert len(page_receipts) == 1
+
+
+@pytest.mark.parametrize("slow_lane", ["enqueue", "inline"])
+def test_slow_observer_keeps_results_and_search_timings(monkeypatch, slow_lane) -> None:
+    from chronovisor.recall import recall_shadow
+
+    candidate = ScoredPage("page", "Page", "", "", 1.0)
+    monkeypatch.setattr(recall_runtime, "_run_evidence_search", lambda **_k:
+        recall_runtime._EvidenceSearchOutcome(
+            score=0.8, session_state=None, pre_results=[candidate], search_mode="bm25",
+            evidence_features={"stage_timings_ms": {"bm25_snapshot": 31}},
+            rewrite_queries=[], reranker_metadata={}, field_shadow_metadata={},
+            post_authority={"field_deferred": True},
+        ))
+    monkeypatch.setattr(recall_runtime, "collect_context", lambda *_a, **_k:
+        [ContextItem("page", "Page", "", 1.0)])
+    monkeypatch.setattr(recall_runtime, "observe_evidence_reconstruction", lambda *_a, **_k: {})
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_a: "")
+    monkeypatch.setattr(recall_shadow, "enqueue_observers", lambda *_a: {"status": "queued", "job_id": "test"})
+
+    def slow(*_a, **_k):
+        time.sleep(1)
+        pytest.fail("observer was not interrupted")
+
+    if slow_lane == "enqueue":
+        monkeypatch.setattr(recall_shadow, "enqueue_observers", slow)
+    else:
+        monkeypatch.setattr(recall_runtime, "_run_post_authority_shadows", slow)
+    result = recall_runtime._run_recall_impl(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="query"),
+        RecallPolicy(rewrite_enabled=False, judge_mode="off", log_decisions=False),
+    )
+    assert result.status == "ok"
+    assert [item.page_id for item in result.context_items] == ["page"]
+    assert result.evidence_features["post_authority_shadows"]["reason"] == "timeout"
+    timings = result.evidence_features["stage_timings_ms"]
+    assert timings["bm25_snapshot"] == 31
+    assert 50 <= timings["shadow_observers"] < 500
+
+
+def test_successful_search_never_runs_graph_observer(monkeypatch) -> None:
+    from chronovisor.core import knowledge_graph_retrieval
+
+    monkeypatch.setattr(knowledge_graph_retrieval, "shadow_candidate_paths",
+                        lambda *_a, **_k: pytest.fail("observer ran on search path"))
+    candidate = ScoredPage("page", "Page", "", "", 1.0)
+    monkeypatch.setattr(recall_runtime, "run_search", lambda **_k: ([candidate], "bm25"))
+    monkeypatch.setattr(recall_runtime, "last_search_trace", lambda: {"stage_timings_ms": {"semantic": 30}})
+    timings = {}
+    results, _mode = search_candidates(["long mixed query"], RecallPolicy(),
+        request=RecallRequest(host="codex", event="UserPromptSubmit", prompt="query"),
+        deadline_at=time.monotonic() + 0.1, stage_timings_ms=timings)
+    assert results[0].page_id == "page"
+    assert timings == {"semantic": 30}

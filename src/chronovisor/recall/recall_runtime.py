@@ -1310,84 +1310,19 @@ def search_candidates(
     if not queries:
         return [], ""
     _require_remaining_budget(deadline_at, "search")
+    from chronovisor.recall.recall_shadow import typed_graph_trace_rows
+
     trace_decision_id = (
         request.decision_id
         if request is not None and request.decision_id
         else new_decision_id()
     )
 
-    def trace_rows(
-        query: str,
-        paths: dict[str, Any],
-        *,
-        shadow: bool,
-        query_plan: str = "",
-    ) -> list[dict[str, Any]]:
-        if request is None:
-            return []
-        query_sha = hashlib.sha256(query.encode()).hexdigest()
-        session = (
-            hashlib.sha256(request.session_id.encode()).hexdigest()[:16]
-            if request.session_id
-            else ""
-        )
-        created_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
-        output = []
-        for page_id, value in paths.items():
-            if not isinstance(value, dict):
-                continue
-            path_ids = [
-                str(item)
-                for item in value.get("relation_ids") or []
-                if isinstance(item, str)
-                and (item.startswith("rel_") or item.startswith("merge_"))
-            ]
-            relation_ids = [item for item in path_ids if item.startswith("rel_")]
-            entity_merge_ids = [item for item in path_ids if item.startswith("merge_")]
-            if not path_ids:
-                continue
-            path_id = str(value.get("path_id") or "")
-            if not path_id:
-                path_id = (
-                    "path_"
-                    + hashlib.sha256(
-                        "|".join([page_id, *path_ids]).encode()
-                    ).hexdigest()[:24]
-                )
-            output.append(
-                {
-                    "schema_version": 1,
-                    "trace_id": hashlib.sha256(
-                        f"{trace_decision_id}:{path_id}:{page_id}:{shadow}".encode()
-                    ).hexdigest()[:24],
-                    "decision_id": trace_decision_id,
-                    "session_hash": session,
-                    "query_sha256": query_sha,
-                    "query_plan": str(value.get("query_plan") or query_plan),
-                    "page_id": str(page_id),
-                    "path_id": path_id,
-                    "page_ids": [
-                        str(item)
-                        for item in value.get("pages") or value.get("path") or []
-                        if isinstance(item, str)
-                    ],
-                    "relation_ids": relation_ids,
-                    "entity_merge_ids": entity_merge_ids,
-                    "relations": value.get("relations") or [],
-                    "community_id": str(value.get("community_id") or ""),
-                    "activation": float(value.get("activation") or 0.0),
-                    "shadow": shadow,
-                    "supervision": "exposure",
-                    "candidate_generated": True,
-                    "created_at": created_at,
-                    "external_model_calls": 0,
-                }
-            )
-        return output
+    timing_lock = threading.Lock()
 
     def search_one(
         query: str,
-    ) -> tuple[list[Any], str, list[dict[str, Any]], dict[str, int]]:
+    ) -> tuple[list[Any], str, list[dict[str, Any]]]:
         remaining_ms = _require_remaining_budget(deadline_at, "search")
         search_kwargs: dict[str, Any] = {
             "query": query,
@@ -1419,17 +1354,16 @@ def search_candidates(
             search_kwargs["rollout_key"] = request.session_id
         try:
             results, mode = run_search(**search_kwargs)
-        except BaseException:
-            failed_trace = last_search_trace()
-            failed_timings = failed_trace.get("stage_timings_ms")
-            if stage_timings_ms is not None and isinstance(failed_timings, dict):
-                for name, elapsed_ms in failed_timings.items():
-                    if isinstance(name, str) and isinstance(elapsed_ms, int):
-                        stage_timings_ms[name] = (
-                            stage_timings_ms.get(name, 0) + elapsed_ms
-                        )
-            raise
-        actual_trace = last_search_trace()
+        finally:
+            actual_trace = last_search_trace()
+            search_timings = actual_trace.get("stage_timings_ms")
+            with timing_lock:
+                if stage_timings_ms is not None and isinstance(search_timings, dict):
+                    for name, elapsed_ms in search_timings.items():
+                        if isinstance(name, str) and isinstance(elapsed_ms, int):
+                            stage_timings_ms[name] = (
+                                stage_timings_ms.get(name, 0) + elapsed_ms
+                            )
         if partial_search is not None:
             partial_search.append(
                 {
@@ -1443,29 +1377,18 @@ def search_candidates(
                 }
             )
         actual_paths = actual_trace.get("paths")
-        rows = trace_rows(
-            query,
-            actual_paths if isinstance(actual_paths, dict) else {},
-            shadow=False,
-            query_plan=str(actual_trace.get("query_plan") or ""),
+        rows = (
+            typed_graph_trace_rows(
+                query,
+                actual_paths if isinstance(actual_paths, dict) else {},
+                shadow=False,
+                decision_id=trace_decision_id,
+                session_id=request.session_id,
+                query_plan=str(actual_trace.get("query_plan") or ""),
+            )
+            if request is not None else []
         )
-        diagnostic_remaining_ms = _remaining_budget_ms(deadline_at)
-        if diagnostic_remaining_ms is None or diagnostic_remaining_ms > 0:
-            try:
-                from chronovisor.core.knowledge_graph_retrieval import (
-                    shadow_candidate_paths,
-                )
-
-                shadow_paths = shadow_candidate_paths(
-                    [str(result.page_id) for result in results[:20]], query=query
-                )
-            except Exception:
-                shadow_paths = {}
-        else:
-            shadow_paths = {}
-        rows.extend(trace_rows(query, shadow_paths, shadow=True))
-        timings = actual_trace.get("stage_timings_ms")
-        return results, mode, rows, timings if isinstance(timings, dict) else {}
+        return results, mode, rows
 
     # Recall rewrites produce up to three independent entrances. Offline
     # callers may run them together so the semantic service can micro-batch;
@@ -1507,14 +1430,10 @@ def search_candidates(
     merged: dict[str, Any] = {}
     mode = "bm25"
     typed_trace_rows: list[dict[str, Any]] = []
-    for query_index, (results, search_mode, trace_values, timings) in enumerate(
+    for query_index, (results, search_mode, trace_values) in enumerate(
         searched
     ):
         typed_trace_rows.extend(trace_values)
-        if stage_timings_ms is not None:
-            for name, elapsed_ms in timings.items():
-                if isinstance(name, str) and isinstance(elapsed_ms, int):
-                    stage_timings_ms[name] = stage_timings_ms.get(name, 0) + elapsed_ms
         if search_mode != "bm25":
             mode = search_mode
         query_weight = max(0.50, 1.0 - (0.25 * query_index))
@@ -3119,6 +3038,16 @@ def _run_evidence_search(
             "teacher_search_mode": teacher_search_mode,
             "reranker_shadow_deferred": reranker_mode == "shadow",
             "diagnostic_rows": deferred_diagnostic_rows,
+            "graph_queries": [
+                {
+                    "query": row["query"],
+                    "seeds": [
+                        str(item.page_id)
+                        for item in row["channels"].get("completed_search", [])[:20]
+                    ],
+                }
+                for row in completed_searches
+            ],
         },
     )
 
@@ -3224,18 +3153,6 @@ def _run_post_authority_shadows(
         except Exception as exc:
             field_metadata.update(status="error", reason=type(exc).__name__)
         _stage_completed(telemetry, "field", deadline_at)
-    _stage_started(telemetry, "compiler", deadline_at)
-    try:
-        from chronovisor.recall.recall_compiler import compile_query
-
-        field_metadata["recall_compiler"] = compile_query(request.prompt)
-    except Exception as exc:
-        field_metadata["recall_compiler"] = {
-            "status": "error",
-            "reason": type(exc).__name__,
-            "page_ids": [],
-        }
-    _stage_completed(telemetry, "compiler", deadline_at)
     if post_authority.get("reranker_shadow_deferred"):
         _stage_started(telemetry, "reranker_shadow", deadline_at)
         try:
@@ -4653,7 +4570,7 @@ def _finalize_legacy_recall_pipeline(
     post_authority: dict[str, Any],
     processor_authority: bool,
 ) -> RecallResult:
-    """Run legacy post-search observation and publication in its original order."""
+    """Observe only within spare time, preserving the committed context."""
 
     evidence_features = result.evidence_features
     _stage_started(telemetry, "evidence_reconstruction", deadline_at)
@@ -4666,11 +4583,30 @@ def _finalize_legacy_recall_pipeline(
     _stage_completed(telemetry, "evidence_reconstruction", deadline_at)
     if post_authority:
         remaining_ms = _remaining_budget_ms(deadline_at)
-        if remaining_ms is None or remaining_ms >= 100:
+        if (
+            (remaining_ms is None or remaining_ms >= 100)
+            and threading.current_thread() is threading.main_thread()
+        ):
+            # deadline_at already excludes filter and finalization reserves.
             try:
                 with recall_wall_clock_deadline(
-                    max(25, (remaining_ms or policy.total_timeout_ms) - 25)
+                    min(100, max(1, (remaining_ms or policy.total_timeout_ms) - 25))
                 ):
+                    from chronovisor.recall.recall_shadow import enqueue_observers
+
+                    _stage_started(telemetry, "shadow_observers", deadline_at)
+                    evidence_features["shadow_observers"] = enqueue_observers({
+                        "decision_id": active_request.decision_id,
+                        "session_id": active_request.session_id,
+                        "prompt": active_request.prompt,
+                        "graph_queries": post_authority.get("graph_queries", []),
+                        "teacher_page_ids": [
+                            str(item.page_id) for item in pre_results[:30]
+                        ],
+                        "committed_page_ids": [
+                            item.page_id for item in result.context_items
+                        ],
+                    })
                     _run_post_authority_shadows(
                         request=active_request,
                         policy=policy,
@@ -4685,36 +4621,18 @@ def _finalize_legacy_recall_pipeline(
                         telemetry=telemetry,
                     )
             except (RecallBudgetExhausted, RecallWallClockTimeout):
+                dropped = {"status": "dropped", "reason": "timeout"}
+                evidence_features.setdefault("shadow_observers", dropped)
+                evidence_features["post_authority_shadows"] = dropped
+            except Exception as exc:
+                dropped = {"status": "dropped", "reason": type(exc).__name__}
+                evidence_features.setdefault("shadow_observers", dropped)
+                evidence_features["post_authority_shadows"] = dropped
+            finally:
+                _stage_completed(telemetry, "shadow_observers", deadline_at)
                 _stage_interrupted(telemetry)
-    compiler_metadata = field_shadow_metadata.get("recall_compiler")
-    if isinstance(compiler_metadata, dict):
-        compiler_ids = {
-            str(value)
-            for value in compiler_metadata.get("page_ids", [])
-            if isinstance(value, str)
-        }
-        teacher_ids = [str(item.page_id) for item in pre_results[:30]]
-        committed_ids = [item.page_id for item in result.context_items]
-        evidence_features["shadow_teacher"] = {
-            "compiler_status": str(compiler_metadata.get("status") or ""),
-            "compiler_page_ids": sorted(compiler_ids),
-            "teacher_overlap": len(compiler_ids & set(teacher_ids)),
-            "commit_overlap": len(compiler_ids & set(committed_ids)),
-            "authority": "teacher",
-        }
-        diagnostic_remaining_ms = _remaining_budget_ms(deadline_at)
-        if diagnostic_remaining_ms is None or diagnostic_remaining_ms > 0:
-            try:
-                from chronovisor.recall.recall_compiler import append_shadow_trace
-
-                append_shadow_trace(
-                    prompt=active_request.prompt,
-                    compiler=compiler_metadata,
-                    teacher_page_ids=teacher_ids,
-                    committed_page_ids=committed_ids,
-                )
-            except Exception:
-                pass
+        else:
+            evidence_features["shadow_observers"] = {"status": "dropped", "reason": "budget"}
     result.latency_ms = _elapsed_ms(started)
     _merge_telemetry(result.evidence_features, telemetry)
     result = _finalize_recall_result(

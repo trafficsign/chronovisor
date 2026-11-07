@@ -1,0 +1,593 @@
+{
+  "command": "CODEX_HOME=/Users/trafficsign/.config/codex uvx --python /opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/bin/python3.14 --from git+ssh://git@github.com/trafficsign/chronovisor chronovisor-hook --host codex --event UserPromptSubmit --hook",
+  "cwd": "/Users/trafficsign",
+  "candidate_override": "/Users/trafficsign/projects/sandbox/chronovisor-decision-reranker-20261107/src",
+  "successful_batch": [
+    {
+      "prompt": "StartLuxのrecall filterの凍結閾値はいくつ？",
+      "run": "final-1",
+      "status": "ok",
+      "error": "",
+      "recall_log_latency_ms": 1442,
+      "hook_dispatcher_ms": 1566.487,
+      "process_wall_ms": 2447.166,
+      "stage_timings_ms": {
+        "bm25_load": 0,
+        "bm25_snapshot": 376,
+        "bm25_anchor": 2,
+        "bm25_query": 17,
+        "context_seed": 1,
+        "semantic": 436,
+        "graph": 18,
+        "verify": 15,
+        "usage": 0,
+        "negative_feedback": 267,
+        "filter": 0,
+        "scheduler": 0,
+        "prepare": 134,
+        "cleanup": 2,
+        "session_load": 0,
+        "teacher": 1144,
+        "reranker": 0,
+        "evidence_search": 1154,
+        "evidence_reconstruction": 0,
+        "shadow_observers": 104,
+        "field": 104,
+        "finalize": 4
+      },
+      "shadow_observers": {
+        "status": "skipped",
+        "reason": "read_only"
+      },
+      "post_authority_shadows": {
+        "status": "dropped",
+        "reason": "timeout"
+      },
+      "recall_filter": null,
+      "page_count": 0,
+      "semantic_eligible_before_breaker": true,
+      "breaker_open": false,
+      "identity": {
+        "name": "identity",
+        "epoch": 1794057132.025676,
+        "module": "/Users/trafficsign/projects/sandbox/chronovisor-decision-reranker-20261107/src/chronovisor/recall/recall_runtime.py",
+        "commit": {
+          "url": "ssh://git@github.com/trafficsign/chronovisor",
+          "vcs_info": {
+            "vcs": "git",
+            "commit_id": "a03eb80cd17253425d43513264bf006a13ce613f"
+          }
+        },
+        "python": "3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 21.0.0 (clang-2100.1.1.101)]"
+      }
+    },
+    {
+      "prompt": "Chronovisorのrecall予算は何秒にした？",
+      "run": "final-2",
+      "status": "ok",
+      "error": "",
+      "recall_log_latency_ms": 1246,
+      "hook_dispatcher_ms": 1322.091,
+      "process_wall_ms": 2118.655,
+      "stage_timings_ms": {
+        "bm25_load": 0,
+        "bm25_snapshot": 364,
+        "bm25_anchor": 13,
+        "bm25_query": 46,
+        "context_seed": 1,
+        "semantic": 268,
+        "graph": 14,
+        "verify": 17,
+        "usage": 0,
+        "negative_feedback": 247,
+        "filter": 0,
+        "scheduler": 0,
+        "prepare": 120,
+        "cleanup": 0,
+        "session_load": 0,
+        "teacher": 979,
+        "reranker": 0,
+        "evidence_search": 986,
+        "evidence_reconstruction": 0,
+        "shadow_observers": 103,
+        "field": 103,
+        "finalize": 3
+      },
+      "shadow_observers": {
+        "status": "skipped",
+        "reason": "read_only"
+      },
+      "post_authority_shadows": {
+        "status": "dropped",
+        "reason": "timeout"
+      },
+      "recall_filter": null,
+      "page_count": 0,
+      "semantic_eligible_before_breaker": true,
+      "breaker_open": false,
+      "identity": {
+        "name": "identity",
+        "epoch": 1794057134.407691,
+        "module": "/Users/trafficsign/projects/sandbox/chronovisor-decision-reranker-20261107/src/chronovisor/recall/recall_runtime.py",
+        "commit": {
+          "url": "ssh://git@github.com/trafficsign/chronovisor",
+          "vcs_info": {
+            "vcs": "git",
+            "commit_id": "a03eb80cd17253425d43513264bf006a13ce613f"
+          }
+        },
+        "python": "3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 21.0.0 (clang-2100.1.1.101)]"
+      }
+    },
+    {
+      "prompt": "Ornithを停止できなかった役割は何だった？",
+      "run": "final-3",
+      "status": "ok",
+      "error": "",
+      "recall_log_latency_ms": 1220,
+      "hook_dispatcher_ms": 1501.592,
+      "process_wall_ms": 2240.527,
+      "stage_timings_ms": {
+        "bm25_load": 0,
+        "bm25_snapshot": 362,
+        "bm25_anchor": 1,
+        "bm25_query": 32,
+        "context_seed": 1,
+        "semantic": 258,
+        "graph": 19,
+        "verify": 13,
+        "usage": 0,
+        "negative_feedback": 259,
+        "filter": 0,
+        "scheduler": 0,
+        "prepare": 118,
+        "cleanup": 0,
+        "session_load": 0,
+        "teacher": 955,
+        "reranker": 0,
+        "evidence_search": 961,
+        "evidence_reconstruction": 0,
+        "field": 67,
+        "shadow_observers": 104,
+        "processor_shadow": 37,
+        "finalize": 211
+      },
+      "shadow_observers": {
+        "status": "skipped",
+        "reason": "read_only"
+      },
+      "post_authority_shadows": {
+        "status": "dropped",
+        "reason": "timeout"
+      },
+      "recall_filter": null,
+      "page_count": 0,
+      "semantic_eligible_before_breaker": true,
+      "breaker_open": false,
+      "identity": {
+        "name": "identity",
+        "epoch": 1794057136.478275,
+        "module": "/Users/trafficsign/projects/sandbox/chronovisor-decision-reranker-20261107/src/chronovisor/recall/recall_runtime.py",
+        "commit": {
+          "url": "ssh://git@github.com/trafficsign/chronovisor",
+          "vcs_info": {
+            "vcs": "git",
+            "commit_id": "a03eb80cd17253425d43513264bf006a13ce613f"
+          }
+        },
+        "python": "3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 21.0.0 (clang-2100.1.1.101)]"
+      }
+    },
+    {
+      "prompt": "検索rerankerを4Bに決めた理由は？",
+      "run": "final-4",
+      "status": "ok",
+      "error": "",
+      "recall_log_latency_ms": 1311,
+      "hook_dispatcher_ms": 1561.7,
+      "process_wall_ms": 2286.996,
+      "stage_timings_ms": {
+        "bm25_load": 0,
+        "bm25_snapshot": 366,
+        "bm25_anchor": 1,
+        "bm25_query": 16,
+        "context_seed": 1,
+        "semantic": 394,
+        "graph": 21,
+        "verify": 13,
+        "usage": 0,
+        "negative_feedback": 223,
+        "filter": 0,
+        "scheduler": 0,
+        "prepare": 119,
+        "cleanup": 0,
+        "session_load": 0,
+        "teacher": 1045,
+        "reranker": 0,
+        "evidence_search": 1051,
+        "evidence_reconstruction": 0,
+        "field": 57,
+        "shadow_observers": 104,
+        "processor_shadow": 46,
+        "finalize": 181
+      },
+      "shadow_observers": {
+        "status": "skipped",
+        "reason": "read_only"
+      },
+      "post_authority_shadows": {
+        "status": "dropped",
+        "reason": "timeout"
+      },
+      "recall_filter": null,
+      "page_count": 0,
+      "semantic_eligible_before_breaker": true,
+      "breaker_open": false,
+      "identity": {
+        "name": "identity",
+        "epoch": 1794057138.736659,
+        "module": "/Users/trafficsign/projects/sandbox/chronovisor-decision-reranker-20261107/src/chronovisor/recall/recall_runtime.py",
+        "commit": {
+          "url": "ssh://git@github.com/trafficsign/chronovisor",
+          "vcs_info": {
+            "vcs": "git",
+            "commit_id": "a03eb80cd17253425d43513264bf006a13ce613f"
+          }
+        },
+        "python": "3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 21.0.0 (clang-2100.1.1.101)]"
+      }
+    },
+    {
+      "prompt": "recallのキャッシュ高速化で何を変えた？",
+      "run": "final-5",
+      "status": "ok",
+      "error": "",
+      "recall_log_latency_ms": 1062,
+      "hook_dispatcher_ms": 1299.71,
+      "process_wall_ms": 1943.727,
+      "stage_timings_ms": {
+        "bm25_load": 0,
+        "bm25_snapshot": 322,
+        "bm25_anchor": 2,
+        "bm25_query": 25,
+        "context_seed": 0,
+        "semantic": 200,
+        "graph": 16,
+        "verify": 13,
+        "usage": 0,
+        "negative_feedback": 218,
+        "filter": 0,
+        "scheduler": 0,
+        "prepare": 113,
+        "cleanup": 0,
+        "session_load": 0,
+        "teacher": 807,
+        "reranker": 0,
+        "evidence_search": 813,
+        "evidence_reconstruction": 0,
+        "field": 55,
+        "shadow_observers": 103,
+        "processor_shadow": 47,
+        "finalize": 175
+      },
+      "shadow_observers": {
+        "status": "skipped",
+        "reason": "read_only"
+      },
+      "post_authority_shadows": {
+        "status": "dropped",
+        "reason": "timeout"
+      },
+      "recall_filter": null,
+      "page_count": 0,
+      "semantic_eligible_before_breaker": true,
+      "breaker_open": false,
+      "identity": {
+        "name": "identity",
+        "epoch": 1794057140.979727,
+        "module": "/Users/trafficsign/projects/sandbox/chronovisor-decision-reranker-20261107/src/chronovisor/recall/recall_runtime.py",
+        "commit": {
+          "url": "ssh://git@github.com/trafficsign/chronovisor",
+          "vcs_info": {
+            "vcs": "git",
+            "commit_id": "a03eb80cd17253425d43513264bf006a13ce613f"
+          }
+        },
+        "python": "3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 21.0.0 (clang-2100.1.1.101)]"
+      }
+    },
+    {
+      "prompt": "<hc from=\"t1\">StartLux の recall filter の凍結閾値っていくつだった？ ― From Claude: fresh recall trigger. Report this prompt's recall-log entry: status, error, total latency, stage timings (negative_feedback, bm25_snapshot, evidence_search), whether recall_filter ran, its status, kept and dropped. Compare with the old p50s. Short Japanese.</hc>",
+      "run": "final-6",
+      "status": "ok",
+      "error": "",
+      "recall_log_latency_ms": 1338,
+      "hook_dispatcher_ms": 1404.746,
+      "process_wall_ms": 2059.358,
+      "stage_timings_ms": {
+        "bm25_load": 0,
+        "bm25_snapshot": 315,
+        "bm25_anchor": 5,
+        "bm25_query": 94,
+        "context_seed": 0,
+        "semantic": 285,
+        "graph": 149,
+        "verify": 17,
+        "usage": 0,
+        "negative_feedback": 203,
+        "filter": 0,
+        "scheduler": 0,
+        "prepare": 115,
+        "cleanup": 0,
+        "session_load": 0,
+        "teacher": 1081,
+        "reranker": 0,
+        "evidence_search": 1087,
+        "evidence_reconstruction": 0,
+        "shadow_observers": 102,
+        "field": 102,
+        "finalize": 3
+      },
+      "shadow_observers": {
+        "status": "skipped",
+        "reason": "read_only"
+      },
+      "post_authority_shadows": {
+        "status": "dropped",
+        "reason": "timeout"
+      },
+      "recall_filter": null,
+      "page_count": 0,
+      "semantic_eligible_before_breaker": true,
+      "breaker_open": false,
+      "identity": {
+        "name": "identity",
+        "epoch": 1794057142.9298859,
+        "module": "/Users/trafficsign/projects/sandbox/chronovisor-decision-reranker-20261107/src/chronovisor/recall/recall_runtime.py",
+        "commit": {
+          "url": "ssh://git@github.com/trafficsign/chronovisor",
+          "vcs_info": {
+            "vcs": "git",
+            "commit_id": "a03eb80cd17253425d43513264bf006a13ce613f"
+          }
+        },
+        "python": "3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 21.0.0 (clang-2100.1.1.101)]"
+      }
+    }
+  ],
+  "final_recheck": [
+    {
+      "prompt": "StartLuxのrecall filterの凍結閾値はいくつ？",
+      "run": "verified-1",
+      "status": "degraded",
+      "error": "SemanticServiceUnavailable: lexical snapshot unavailable",
+      "recall_log_latency_ms": 544,
+      "hook_dispatcher_ms": 637.178,
+      "process_wall_ms": 1550.869,
+      "stage_timings_ms": {
+        "scheduler": 0,
+        "prepare": 128,
+        "cleanup": 2,
+        "session_load": 0,
+        "bm25_load": 0,
+        "bm25_snapshot": 362,
+        "evidence_search": 371,
+        "teacher": 364
+      },
+      "shadow_observers": null,
+      "post_authority_shadows": null,
+      "recall_filter": null,
+      "page_count": 0,
+      "semantic_eligible_before_breaker": true,
+      "breaker_open": false,
+      "identity": {
+        "name": "identity",
+        "epoch": 1794057289.830239,
+        "module": "/Users/trafficsign/projects/sandbox/chronovisor-decision-reranker-20261107/src/chronovisor/recall/recall_runtime.py",
+        "commit": {
+          "url": "ssh://git@github.com/trafficsign/chronovisor",
+          "vcs_info": {
+            "vcs": "git",
+            "commit_id": "a03eb80cd17253425d43513264bf006a13ce613f"
+          }
+        },
+        "python": "3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 21.0.0 (clang-2100.1.1.101)]"
+      }
+    },
+    {
+      "prompt": "Chronovisorのrecall予算は何秒にした？",
+      "run": "verified-2",
+      "status": "degraded",
+      "error": "SemanticServiceUnavailable: lexical snapshot unavailable",
+      "recall_log_latency_ms": 479,
+      "hook_dispatcher_ms": 539.055,
+      "process_wall_ms": 1288.479,
+      "stage_timings_ms": {
+        "scheduler": 0,
+        "prepare": 115,
+        "cleanup": 0,
+        "session_load": 0,
+        "bm25_load": 0,
+        "bm25_snapshot": 321,
+        "evidence_search": 327,
+        "teacher": 322
+      },
+      "shadow_observers": null,
+      "post_authority_shadows": null,
+      "recall_filter": null,
+      "page_count": 0,
+      "semantic_eligible_before_breaker": true,
+      "breaker_open": false,
+      "identity": {
+        "name": "identity",
+        "epoch": 1794057291.179304,
+        "module": "/Users/trafficsign/projects/sandbox/chronovisor-decision-reranker-20261107/src/chronovisor/recall/recall_runtime.py",
+        "commit": {
+          "url": "ssh://git@github.com/trafficsign/chronovisor",
+          "vcs_info": {
+            "vcs": "git",
+            "commit_id": "a03eb80cd17253425d43513264bf006a13ce613f"
+          }
+        },
+        "python": "3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 21.0.0 (clang-2100.1.1.101)]"
+      }
+    },
+    {
+      "prompt": "Ornithを停止できなかった役割は何だった？",
+      "run": "verified-3",
+      "status": "degraded",
+      "error": "SemanticServiceUnavailable: lexical snapshot unavailable",
+      "recall_log_latency_ms": 481,
+      "hook_dispatcher_ms": 534.999,
+      "process_wall_ms": 1150.08,
+      "stage_timings_ms": {
+        "scheduler": 0,
+        "prepare": 111,
+        "cleanup": 0,
+        "session_load": 0,
+        "bm25_load": 0,
+        "bm25_snapshot": 329,
+        "evidence_search": 335,
+        "teacher": 331
+      },
+      "shadow_observers": null,
+      "post_authority_shadows": null,
+      "recall_filter": null,
+      "page_count": 0,
+      "semantic_eligible_before_breaker": true,
+      "breaker_open": false,
+      "identity": {
+        "name": "identity",
+        "epoch": 1794057292.402102,
+        "module": "/Users/trafficsign/projects/sandbox/chronovisor-decision-reranker-20261107/src/chronovisor/recall/recall_runtime.py",
+        "commit": {
+          "url": "ssh://git@github.com/trafficsign/chronovisor",
+          "vcs_info": {
+            "vcs": "git",
+            "commit_id": "a03eb80cd17253425d43513264bf006a13ce613f"
+          }
+        },
+        "python": "3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 21.0.0 (clang-2100.1.1.101)]"
+      }
+    },
+    {
+      "prompt": "検索rerankerを4Bに決めた理由は？",
+      "run": "verified-4",
+      "status": "degraded",
+      "error": "SemanticServiceUnavailable: lexical snapshot unavailable",
+      "recall_log_latency_ms": 472,
+      "hook_dispatcher_ms": 526.574,
+      "process_wall_ms": 1180.569,
+      "stage_timings_ms": {
+        "scheduler": 0,
+        "prepare": 110,
+        "cleanup": 0,
+        "session_load": 0,
+        "bm25_load": 0,
+        "bm25_snapshot": 322,
+        "evidence_search": 328,
+        "teacher": 324
+      },
+      "shadow_observers": null,
+      "post_authority_shadows": null,
+      "recall_filter": null,
+      "page_count": 0,
+      "semantic_eligible_before_breaker": true,
+      "breaker_open": false,
+      "identity": {
+        "name": "identity",
+        "epoch": 1794057293.536051,
+        "module": "/Users/trafficsign/projects/sandbox/chronovisor-decision-reranker-20261107/src/chronovisor/recall/recall_runtime.py",
+        "commit": {
+          "url": "ssh://git@github.com/trafficsign/chronovisor",
+          "vcs_info": {
+            "vcs": "git",
+            "commit_id": "a03eb80cd17253425d43513264bf006a13ce613f"
+          }
+        },
+        "python": "3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 21.0.0 (clang-2100.1.1.101)]"
+      }
+    },
+    {
+      "prompt": "recallのキャッシュ高速化で何を変えた？",
+      "run": "verified-5",
+      "status": "degraded",
+      "error": "SemanticServiceUnavailable: lexical snapshot unavailable",
+      "recall_log_latency_ms": 469,
+      "hook_dispatcher_ms": 526.041,
+      "process_wall_ms": 1181.69,
+      "stage_timings_ms": {
+        "scheduler": 0,
+        "prepare": 114,
+        "cleanup": 0,
+        "session_load": 0,
+        "bm25_load": 0,
+        "bm25_snapshot": 315,
+        "evidence_search": 321,
+        "teacher": 317
+      },
+      "shadow_observers": null,
+      "post_authority_shadows": null,
+      "recall_filter": null,
+      "page_count": 0,
+      "semantic_eligible_before_breaker": true,
+      "breaker_open": false,
+      "identity": {
+        "name": "identity",
+        "epoch": 1794057294.710002,
+        "module": "/Users/trafficsign/projects/sandbox/chronovisor-decision-reranker-20261107/src/chronovisor/recall/recall_runtime.py",
+        "commit": {
+          "url": "ssh://git@github.com/trafficsign/chronovisor",
+          "vcs_info": {
+            "vcs": "git",
+            "commit_id": "a03eb80cd17253425d43513264bf006a13ce613f"
+          }
+        },
+        "python": "3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 21.0.0 (clang-2100.1.1.101)]"
+      }
+    },
+    {
+      "prompt": "<hc from=\"t1\">StartLux の recall filter の凍結閾値っていくつだった？ ― From Claude: fresh recall trigger. Report this prompt's recall-log entry: status, error, total latency, stage timings (negative_feedback, bm25_snapshot, evidence_search), whether recall_filter ran, its status, kept and dropped. Compare with the old p50s. Short Japanese.</hc>",
+      "run": "verified-6",
+      "status": "degraded",
+      "error": "SemanticServiceUnavailable: lexical snapshot unavailable",
+      "recall_log_latency_ms": 475,
+      "hook_dispatcher_ms": 527.461,
+      "process_wall_ms": 1105.743,
+      "stage_timings_ms": {
+        "scheduler": 0,
+        "prepare": 113,
+        "cleanup": 0,
+        "session_load": 0,
+        "bm25_load": 0,
+        "bm25_snapshot": 321,
+        "evidence_search": 327,
+        "teacher": 322
+      },
+      "shadow_observers": null,
+      "post_authority_shadows": null,
+      "recall_filter": null,
+      "page_count": 0,
+      "semantic_eligible_before_breaker": true,
+      "breaker_open": false,
+      "identity": {
+        "name": "identity",
+        "epoch": 1794057295.8916109,
+        "module": "/Users/trafficsign/projects/sandbox/chronovisor-decision-reranker-20261107/src/chronovisor/recall/recall_runtime.py",
+        "commit": {
+          "url": "ssh://git@github.com/trafficsign/chronovisor",
+          "vcs_info": {
+            "vcs": "git",
+            "commit_id": "a03eb80cd17253425d43513264bf006a13ce613f"
+          }
+        },
+        "python": "3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 21.0.0 (clang-2100.1.1.101)]"
+      }
+    }
+  ],
+  "source_sha256": {
+    "src/chronovisor/recall/recall_runtime.py": "e9dcd8da969f783b31312f28198ee31b831009adf5bc6f31af5e48e3086821f2",
+    "src/chronovisor/recall/recall_shadow.py": "f30215f6a23bbd19f083e8660944c0098d2a12c239344176e97dfacb113ac437",
+    "src/chronovisor/core/knowledge_graph_store.py": "8d99ab26ebade8baf3e2d939e445deefa071c4e1e03b3770e819ee58ae8c0b90"
+  }
+}

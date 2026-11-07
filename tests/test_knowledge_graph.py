@@ -1809,3 +1809,30 @@ def test_relation_authority_requires_rollout_and_distinct_used_sessions(
     assert held["promoted"] == 0
     assert promoted["promoted"] == 1
     assert store.relations()[0].status == "authoritative"
+
+
+def test_relation_snapshot_verified_once_and_invalidated(monkeypatch, tmp_path) -> None:
+    from chronovisor.core import knowledge_graph_store as module
+
+    store = KnowledgeGraphStore(tmp_path / "graph")
+    first = relation()
+    store.append(first, action="propose")
+    original = module.read_sealed_json
+    reads = []
+
+    def read(path, **kwargs):
+        reads.append(path)
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(module, "read_sealed_json", read)
+    assert store.relations() == [first]
+    assert KnowledgeGraphStore(store.root).relations() == [first]
+    assert store.relations(statuses={"authoritative"}) == []
+    assert len(reads) == 1
+    second = relation(target="other")
+    store.append(second, action="propose")
+    assert len(store.relations()) == 2
+    assert len(reads) == 2
+    store.snapshot_file.write_text('{"broken":')
+    assert store.relations()  # Reverify/recover; never reuse the corrupt file's receipt.
+    assert len(reads) == 3
