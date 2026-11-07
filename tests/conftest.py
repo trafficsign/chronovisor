@@ -413,6 +413,24 @@ def isolate_operator_raw_layout(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def isolate_operator_recall_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the operator's live recall filter mode out of tests that do not set one."""
+
+    from dataclasses import replace
+
+    from chronovisor.core import runtime_config
+
+    live = runtime_config.load_reranker_config
+    monkeypatch.setattr(
+        runtime_config,
+        "load_reranker_config",
+        lambda path=None: live(path)
+        if path is not None
+        else replace(live(None), recall_filter="off"),
+    )
+
+
+@pytest.fixture(autouse=True)
 def isolate_operator_search_rollout(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep tests from enqueueing work against the live semantic service."""
 
