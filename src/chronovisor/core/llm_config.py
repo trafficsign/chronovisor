@@ -18,7 +18,6 @@ from urllib.parse import urlsplit
 
 from chronovisor.core import runtime_status
 from chronovisor.core.anthropic_adapter import compose_anthropic_adapter
-from chronovisor.core.decision_mlx import DecisionMLXBackend, DecisionModelConfig
 from chronovisor.core.llm_runtime import (
     BackendCapabilities,
     EmbeddingBackend,
@@ -129,7 +128,6 @@ class ProviderDefinition:
     capabilities: BackendCapabilities
     profile: ProviderProfile | None = None
     reranker_config: RerankerConfig | None = None
-    decision_config: DecisionModelConfig | None = None
     embedding_device: str | None = None
     endpoint: str | None = None
 
@@ -373,22 +371,6 @@ def _provider(provider_id: str, value: object) -> ProviderDefinition:
             kind,
             BackendCapabilities(generation=False, embedding=False, rerank=True),
             reranker_config=config,
-        )
-    if kind == "local-decision-mlx":
-        _exact_keys(table, {"kind", "path", "max_chars"})
-        path = _string(table.get("path"))
-        if not path or any(ord(character) < 32 for character in path):
-            raise _fail()
-        return ProviderDefinition(
-            provider_id,
-            kind,
-            BackendCapabilities(generation=False, embedding=False, rerank=True),
-            decision_config=DecisionModelConfig(
-                path=str(Path(path).expanduser()),
-                max_chars=_positive_int(
-                    table.get("max_chars"), DecisionModelConfig.max_chars
-                ),
-            ),
         )
     if kind == "semantic-service":
         _exact_keys(table, {"kind"})
@@ -637,10 +619,6 @@ def build_llm_runtime(
             if provider.reranker_config is None:
                 raise _fail()
             backends[provider_id] = LocalRerankBackend(provider.reranker_config)
-        elif provider.kind == "local-decision-mlx":
-            if provider.decision_config is None:
-                raise _fail()
-            backends[provider_id] = DecisionMLXBackend(provider.decision_config)
         elif provider.kind == "nemotron":
             if provider.embedding_device is None:
                 raise _fail()

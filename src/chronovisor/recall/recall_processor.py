@@ -555,10 +555,6 @@ def select_certified_candidates(
     model_revision = (
         str(route.get("model") or "") if isinstance(route, Mapping) else ""
     )
-    if isinstance(route, Mapping) and route.get("provider") == "local-decision":
-        # logit P(yes), not a BGE logit: the certificate's reranker constants
-        # (sigmoid, raw >= -12, clear_deterministic >= 4.0) do not apply to it.
-        metadata = {**metadata, "scores": []}
     raw_scores = {
         str(row.get("page_id") or ""): {
             **row,

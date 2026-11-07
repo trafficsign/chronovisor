@@ -13,12 +13,10 @@ import statistics
 import threading
 import time
 from collections import OrderedDict, deque
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from chronovisor.core import index_store, llm_config
-from chronovisor.core.decision_mlx import RECALL_FILTER_PURPOSE, DecisionMLXBackend
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.llm_runtime import (
     SAFE_FAILURE_CATEGORIES,
@@ -53,8 +51,6 @@ from chronovisor.search.accelerator_lease import accelerator_lease
 
 SERVICE_STATUS_FILE = CHRONOVISOR_ROOT / "runtime" / "reranker-service-status.json"
 PASSAGE_CACHE_SIZE = 512
-# A recall turn publishes at most a few items; this only bounds one filter request's work.
-RECALL_FILTER_MAX_TEXTS = 16
 
 
 def _candidate_evidence_from_payload(
@@ -162,26 +158,12 @@ class RerankerServiceState:
     def ready(self) -> bool:
         return self._warm.get("status") == "ready"
 
-    def _route_payload(self) -> dict[str, str]:
-        return {
-            "role": self._route.role,
-            "provider": self._route.provider,
-            "model": self._route.model,
-            "location": self._route.location.value,
-        }
-
-    def _record_request(self, started: float) -> float:
-        elapsed_ms = (time.perf_counter() - started) * 1_000
-        self._latencies.append(elapsed_ms)
-        self._requests += 1
-        self._last_error = ""
-        self._publish_status()
-        return elapsed_ms
-
     def _local_resources(self) -> contextlib.ExitStack:
         stack = contextlib.ExitStack()
-        # Any on-device model shares the accelerator, whatever its provider name.
-        if self._route.location is RouteLocation.LOCAL:
+        if (
+            self._route.provider == "local-reranker"
+            and self._route.location is RouteLocation.LOCAL
+        ):
             stack.enter_context(
                 accelerator_lease(timeout_ms=self.config.service.timeout_ms)
             )
@@ -193,35 +175,6 @@ class RerankerServiceState:
                 )
             )
         return stack
-
-    def _score(self, request: RerankRequest) -> list[float]:
-        """Raw score per candidate, in request order.
-
-        A decision model is compute-bound (4B: ~0.2 s a candidate, batching does
-        not help), so it takes the accelerator lease one candidate at a time:
-        the semantic service then waits at most one forward, not ~2 s.
-        """
-
-        count = len(request.candidates)
-        groups = (
-            [[index] for index in range(count)]
-            if self._route.provider == DecisionMLXBackend.provider
-            else [list(range(count))]
-        )
-        scores = [0.0] * count
-        for group in groups:
-            part = replace(
-                request,
-                candidates=tuple(request.candidates[index] for index in group),
-                candidate_sources=None
-                if request.candidate_sources is None
-                else tuple(request.candidate_sources[index] for index in group),
-            )
-            with self._local_resources():
-                result = self._llm_runtime.rerank(RERANK_RUNTIME_ROLE, part)
-            for item in result.items:
-                scores[group[item.index]] = float(item.score)
-        return scores
 
     def _warm_route(self) -> dict[str, Any]:
         with self._local_resources():
@@ -262,7 +215,12 @@ class RerankerServiceState:
             "pid": os.getpid(),
             "observed_at_epoch": time.time(),
             "device": self.config.device,
-            "route": self._route_payload(),
+            "route": {
+                "role": self._route.role,
+                "provider": self._route.provider,
+                "model": self._route.model,
+                "location": self._route.location.value,
+            },
             "socket": str(Path(self.config.service.socket).expanduser()),
             "warmup": self._warm,
             "requests": {
@@ -322,9 +280,7 @@ class RerankerServiceState:
         try:
             with self._work_lock:
                 try:
-                    # Snapshot reload, not a corpus walk: a full refresh() costs
-                    # ~0.7 s per request and alone consumes most of the budget.
-                    self._store.refresh_if_stale()
+                    self._store.refresh()
                     candidate_store: index_store.IndexStore | None = self._store
                 except Exception:
                     candidate_store = None
@@ -336,22 +292,34 @@ class RerankerServiceState:
                     )
                     for page_id in page_ids
                 ]
-                raw_scores = self._score(
-                    RerankRequest(
-                        query,
-                        tuple(
-                            passage for passage, _source, _digest in passages_and_hashes
-                        ),
-                        QUERY_SOURCE,
-                        timeout_ms=self.config.service.timeout_ms,
-                        candidate_sources=tuple(
-                            source for _passage, source, _digest in passages_and_hashes
+                with self._local_resources():
+                    result = self._llm_runtime.rerank(
+                        RERANK_RUNTIME_ROLE,
+                        RerankRequest(
+                            query,
+                            tuple(
+                                passage
+                                for passage, _source, _digest in passages_and_hashes
+                            ),
+                            QUERY_SOURCE,
+                            timeout_ms=self.config.service.timeout_ms,
+                            candidate_sources=tuple(
+                                source
+                                for _passage, source, _digest in passages_and_hashes
+                            ),
                         ),
                     )
-                )
         finally:
             self._slots.release()
-        elapsed_ms = self._record_request(started)
+        raw_scores = {
+            item.index: float(item.score)
+            for item in result.items
+        }
+        elapsed_ms = (time.perf_counter() - started) * 1_000
+        self._latencies.append(elapsed_ms)
+        self._requests += 1
+        self._last_error = ""
+        self._publish_status()
         return {
             "status": "ok",
             "method": "rerank",
@@ -363,50 +331,18 @@ class RerankerServiceState:
                 }
                 for page_id, score, (_passage, _source, digest) in zip(
                     page_ids,
-                    raw_scores,
+                    (raw_scores[index] for index in range(len(page_ids))),
                     passages_and_hashes,
                     strict=True,
                 )
             ],
             "latency_ms": int(round(elapsed_ms)),
-            "route": self._route_payload(),
-        }
-
-    def _recall_filter(self, query: str, context: str, texts: list[str]) -> dict[str, Any]:
-        """Score exact publishable recall texts against the user turn (logit P(yes) each, in order)."""
-
-        # The filter question and its threshold belong to a decision model; a
-        # relevance reranker would answer a different question silently.
-        if self._route.provider != DecisionMLXBackend.provider:
-            raise ValueError("recall_filter requires a decision model route")
-        if not query.strip():
-            raise ValueError("query must not be empty")
-        if not texts or len(texts) > RECALL_FILTER_MAX_TEXTS:
-            raise ValueError("recall_filter requires 1..RECALL_FILTER_MAX_TEXTS texts")
-        if not self._slots.acquire(blocking=False):
-            raise ServiceBusy("reranker queue is full")
-        started = time.perf_counter()
-        try:
-            with self._work_lock:
-                scores = self._score(
-                    RerankRequest(
-                        query,
-                        tuple(texts),
-                        QUERY_SOURCE,
-                        timeout_ms=self.config.service.timeout_ms,
-                        purpose=RECALL_FILTER_PURPOSE,
-                        context=context,
-                    )
-                )
-        finally:
-            self._slots.release()
-        elapsed_ms = self._record_request(started)
-        return {
-            "status": "ok",
-            "method": "recall_filter",
-            "scores": scores,
-            "latency_ms": int(round(elapsed_ms)),
-            "route": self._route_payload(),
+            "route": {
+                "role": self._route.role,
+                "provider": self._route.provider,
+                "model": self._route.model,
+                "location": self._route.location.value,
+            },
         }
 
     def handle(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -439,20 +375,6 @@ class RerankerServiceState:
                 normalized_ids,
                 evidence_by_page=evidence_by_page,
             )
-        if method == "recall_filter":
-            query, context, texts = (
-                payload.get("query"),
-                payload.get("context", ""),
-                payload.get("texts"),
-            )
-            if (
-                not isinstance(query, str)
-                or not isinstance(context, str)
-                or not isinstance(texts, list)
-                or not all(isinstance(text, str) and text for text in texts)
-            ):
-                raise ValueError("recall_filter requires query, context and non-empty texts")
-            return self._recall_filter(query, context, texts)
         raise ValueError(f"unknown reranker method: {method}")
 
 

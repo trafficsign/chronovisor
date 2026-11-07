@@ -301,42 +301,6 @@ def test_selection_uses_resolved_rerank_route_model(
     assert seen[0]["model_revision"] == "route-model"
 
 
-def test_selection_ignores_decision_model_scores(
-    monkeypatch, isolated_selection_index
-) -> None:
-    seen: list[dict[str, Any] | None] = []
-
-    def certify(_query, value, **kwargs):
-        seen.append(kwargs.get("reranker_score"))
-        return certificate(value.page_id)
-
-    monkeypatch.setattr(recall_processor, "certify_candidate", certify)
-    monkeypatch.setattr(recall_processor, "append_certificates", lambda _values: 1)
-
-    recall_processor.select_certified_candidates(
-        "query",
-        [page("page-a")],
-        reranker_metadata={
-            "route": {
-                "role": "search.rerank",
-                "provider": "local-decision",
-                "model": "startlux-decision",
-                "location": "local",
-            },
-            "candidate_count": 1,
-            "scores": [{"page_id": "page-a", "raw_score": 9.0}],
-        },
-        max_candidates=1,
-        max_pointer_cards=1,
-        max_rich_evidence=1,
-        injection_token_budget=1200,
-        certificate_required=True,
-    )
-
-    # logit P(yes) must not meet the BGE-calibrated certificate constants
-    assert seen == [None]
-
-
 def test_selection_abstains_when_every_certificate_rejects(
     monkeypatch, isolated_selection_index
 ) -> None:

@@ -439,12 +439,6 @@ class RerankerConfig:
     dtype: str = "float32"
     weight: float = 1.0
     service: RerankerServiceConfig = field(default_factory=RerankerServiceConfig)
-    # Recall filter (decision-model routes only): "off", "shadow" (score and log)
-    # or "on" (drop published items under the threshold; fail closed).
-    recall_filter: str = "off"
-    # Raw P(yes) threshold frozen with the StartLux-Decision 4B (8-bit) strict_en
-    # question on the laya run3 dev split (keeps >= 95% of dev relevant items).
-    recall_filter_min_probability: float = 0.011624461214494347
 
 
 @dataclass(frozen=True)
@@ -1225,20 +1219,10 @@ def load_reranker_config(path: Path | str | None = None) -> RerankerConfig:
     if service_mode not in {"off", "shadow", "canary", "on"}:
         service_mode = "off"
     service_socket = service_data.get("socket")
-    recall_filter = str(reranker.get("recall_filter") or "off").strip().lower()
     return RerankerConfig(
         enabled=reranker.get("enabled") is True,
         top_n=_positive_int(reranker.get("top_n"), RerankerConfig.top_n),
         weight=_nonnegative_float(reranker.get("weight"), RerankerConfig.weight),
-        recall_filter=recall_filter
-        if recall_filter in {"off", "shadow", "on"}
-        else "off",
-        recall_filter_min_probability=_bounded_float(
-            reranker.get("recall_filter_min_probability"),
-            RerankerConfig.recall_filter_min_probability,
-            minimum=1e-6,
-            maximum=1 - 1e-6,
-        ),
         service=RerankerServiceConfig(
             enabled=service_data.get("enabled") is True,
             socket=service_socket

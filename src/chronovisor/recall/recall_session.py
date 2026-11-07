@@ -29,8 +29,6 @@ class RecallSessionState:
     injected_pages: dict[str, dict[str, Any]] = field(default_factory=dict)
     last_seen: float = field(default_factory=time.time)
     cwd: str = ""
-    # Previous user turn (non-user blocks stripped), the recall filter's context.
-    last_prompt: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -41,7 +39,6 @@ class RecallSessionState:
             "injected_pages": self.injected_pages,
             "last_seen": self.last_seen,
             "cwd": self.cwd,
-            "last_prompt": self.last_prompt,
         }
 
     @classmethod
@@ -64,9 +61,6 @@ class RecallSessionState:
             injected_pages=injected_pages,
             last_seen=float(last_seen) if isinstance(last_seen, int | float) else time.time(),
             cwd=data.get("cwd", "") if isinstance(data.get("cwd", ""), str) else "",
-            last_prompt=data.get("last_prompt", "")
-            if isinstance(data.get("last_prompt", ""), str)
-            else "",
         )
 
 
