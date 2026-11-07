@@ -15,6 +15,7 @@ from chronovisor.core.decision_mlx import (
     ANSWER_AXIS_QUESTIONS,
     JUDGE_ANSWER_AXES,
     JUDGE_POLICY_SHA256,
+    decision_fingerprint,
     decision_route,
 )
 from chronovisor.core.durable_state import canonical_sha256
@@ -55,18 +56,16 @@ RUNNER_POLICY_SHA256 = canonical_sha256(
 )
 
 
-def _scorer_policy_sha256(decision_revision: str) -> str:
-    return canonical_sha256(
-        {
-            "version": 2,
-            "kind": "startlux-answer-axes",
-            "system": SCORER_SYSTEM,
-            "schema": SCORER_SCHEMA,
-            "questions": ANSWER_AXIS_QUESTIONS,
-            "judge_policy_sha256": JUDGE_POLICY_SHA256,
-            "decision_revision": decision_revision,
-        }
-    )
+SCORER_POLICY_SHA256 = canonical_sha256(
+    {
+        "version": 2,
+        "kind": "startlux-answer-axes",
+        "system": SCORER_SYSTEM,
+        "schema": SCORER_SCHEMA,
+        "questions": ANSWER_AXIS_QUESTIONS,
+        "judge_policy_sha256": JUDGE_POLICY_SHA256,
+    }
+)
 
 
 SAMPLER_SHA256 = canonical_sha256(
@@ -124,6 +123,7 @@ def builtin_answer_adapter_identities(
         raise RuntimeError(
             "independent answer runner/scorer models unavailable"
         ) from exc
+    scorer_digest = decision_fingerprint(scorer)
     if (
         runner.provider,
         runner.model,
@@ -142,9 +142,7 @@ def builtin_answer_adapter_identities(
         "provider": scorer.provider,
         "model": scorer.model,
         "location": scorer.location,
-        # The adapter identity schema permits a digest only for local ollama.
-        # The model revision is pinned inside policy_sha256 instead.
-        "model_digest": None,
+        "model_digest": scorer_digest,
     }
     runner_identity = {
         "identity_schema": IDENTITY_SCHEMA,
@@ -162,10 +160,10 @@ def builtin_answer_adapter_identities(
         "version": "1",
         "route_identity": scorer_route,
         "model": scorer_route["model"],
-        "model_digest": None,
+        "model_digest": scorer_digest,
         "system_sha256": canonical_sha256(SCORER_SYSTEM),
         "sampler_sha256": DECISION_SAMPLER_SHA256,
-        "policy_sha256": _scorer_policy_sha256(scorer.revision),
+        "policy_sha256": SCORER_POLICY_SHA256,
         "rubric_sha256": rubric_sha256,
         "evidence_manifest_sha256": evidence_manifest_sha256,
         "calibration_protocol_sha256": canonical_sha256(
@@ -273,6 +271,7 @@ def builtin_startlux_answer_scorer(
         role=SCORER_RUNTIME_ROLE,
         config=load_reranker_config(),
         timeout_ms=SCORER_TIMEOUT_MS,
+        priority=1,  # PRIORITY_SEARCH: calibration is background work.
     )
     raw_scores = response.get("scores")
     if not isinstance(raw_scores, Mapping) or set(raw_scores) != set(ANSWER_AXES):

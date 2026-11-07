@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from chronovisor.core import llm_config, ollama
-from chronovisor.core.decision_mlx import DecisionRoute
+from chronovisor.core.decision_mlx import DecisionRoute, decision_fingerprint
 from chronovisor.core.llm_runtime import (
     BackendCapabilities,
     GenerationResult,
@@ -178,6 +178,7 @@ def test_startlux_scorer_uses_the_decision_contract(
         role: str,
         config: object,
         timeout_ms: int,
+        priority: int | None = None,
     ) -> dict[str, Any]:
         captured.update(
             kind=kind,
@@ -185,6 +186,7 @@ def test_startlux_scorer_uses_the_decision_contract(
             role=role,
             config=config,
             timeout_ms=timeout_ms,
+            priority=priority,
         )
         return {
             "scores": {
@@ -231,6 +233,7 @@ def test_startlux_scorer_uses_the_decision_contract(
     assert captured["kind"] == recall_answer_adapters.JUDGE_ANSWER_AXES
     assert captured["role"] == recall_answer_adapters.SCORER_RUNTIME_ROLE
     assert captured["timeout_ms"] == recall_answer_adapters.SCORER_TIMEOUT_MS
+    assert captured["priority"] == 1
     assert captured["fields"]["query"] == "question"
     assert captured["fields"]["answer"] == "answer"
     assert "[PAGE page-1]" in captured["fields"]["reference"]
@@ -238,10 +241,12 @@ def test_startlux_scorer_uses_the_decision_contract(
     assert result["identity"]["route_identity"]["role"] == (
         recall_answer_adapters.SCORER_RUNTIME_ROLE
     )
-    assert result["identity"]["route_identity"]["model_digest"] is None
-    assert result["identity"]["model_digest"] is None
+    assert result["identity"]["route_identity"]["model_digest"] == (
+        decision_fingerprint(scorer)
+    )
+    assert result["identity"]["model_digest"] == decision_fingerprint(scorer)
     assert result["identity"]["policy_sha256"] == (
-        recall_answer_adapters._scorer_policy_sha256(scorer.revision)
+        recall_answer_adapters.SCORER_POLICY_SHA256
     )
     assert (
         result["reset_receipt"]["reset_protocol_sha256"]
@@ -278,9 +283,8 @@ def test_local_ollama_runner_identity_reads_only_runner_digest(
 
     assert calls == [["runner-model"]]
     assert runner_identity["route_identity"]["model_digest"] == "digest-runner"
-    assert scorer_identity["route_identity"]["model_digest"] is None
-    assert scorer_identity["policy_sha256"] == (
-        recall_answer_adapters._scorer_policy_sha256(scorer.revision)
+    assert scorer_identity["route_identity"]["model_digest"] == (
+        decision_fingerprint(scorer)
     )
 
 

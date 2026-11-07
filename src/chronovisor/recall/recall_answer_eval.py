@@ -906,6 +906,10 @@ def _identity_error(identity: Mapping[str, Any], required: Sequence[str]) -> str
             if "runner_id" in required
             else "recall.answer.scorer"
         )
+        requires_digest = isinstance(route, Mapping) and (
+            route.get("provider") in {"ollama", "local-decision"}
+            and route.get("location") == "local"
+        )
         if (
             identity.get("identity_schema") != ANSWER_ADAPTER_IDENTITY_SCHEMA
             or not isinstance(route, Mapping)
@@ -919,17 +923,13 @@ def _identity_error(identity: Mapping[str, Any], required: Sequence[str]) -> str
             or route.get("model") != identity.get("model")
             or route.get("model_digest") != identity.get("model_digest")
             or (
-                route.get("provider") == "ollama"
-                and route.get("location") == "local"
+                requires_digest
                 and (
                     not isinstance(route.get("model_digest"), str)
                     or not str(route["model_digest"]).strip()
                 )
             )
-            or (
-                (route.get("provider") != "ollama" or route.get("location") != "local")
-                and route.get("model_digest") is not None
-            )
+            or (not requires_digest and route.get("model_digest") is not None)
         ):
             return "invalid_route_identity"
     return ""
