@@ -20,6 +20,24 @@ from typing import Any
 
 from chronovisor.core import index_store, llm_config
 from chronovisor.core.decision_mlx import RECALL_FILTER_PURPOSE, DecisionMLXBackend
+
+# isort: split
+from chronovisor.core.decision_mlx import (
+    ANSWER_AXES,
+    ANSWER_AXIS_QUESTIONS,
+    JUDGE_ANSWER_AXES,
+    JUDGE_CERTIFICATE,
+    JUDGE_QUESTIONS,
+    JUDGE_ROLE_BY_KIND,
+    JUDGE_ROLES,
+    JUDGE_UTILITY,
+    DecisionRoute,
+    answer_axis_scores,
+    certificate_verdict,
+    decision_fingerprint,
+    judge_state,
+    utility_choice,
+)
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.llm_runtime import (
     SAFE_FAILURE_CATEGORIES,
@@ -170,6 +188,7 @@ class RerankerServiceState:
         self.config = config
         self._llm_runtime = llm_runtime or llm_config.load_default_llm_runtime()
         self._route = self._llm_runtime.resolve_rerank(RERANK_RUNTIME_ROLE)
+        self._decision_fingerprint = self._judge_fingerprint()
         self._store = index_store.get_store()
         self._work_lock = threading.Lock()
         self._turn = _PriorityTurn()
@@ -228,6 +247,205 @@ class RerankerServiceState:
                 )
             )
         return stack
+
+    def _judge_fingerprint(self) -> str:
+        if (
+            self._route.provider != DecisionMLXBackend.provider
+            or not self._route.revision
+        ):
+            return ""
+        return decision_fingerprint(
+            DecisionRoute(
+                role=RERANK_RUNTIME_ROLE,
+                provider=self._route.provider,
+                model=self._route.model,
+                location=self._route.location.value,
+                revision=self._route.revision,
+            )
+        )
+
+    def _judge_route(self, role: str) -> dict[str, str]:
+        if role not in JUDGE_ROLES:
+            raise ValueError("unknown decision judge role")
+        route = self._llm_runtime.resolve_rerank(role)
+        if (
+            route.provider != self._route.provider
+            or route.model != self._route.model
+            or route.location is not self._route.location
+            or route.revision != self._route.revision
+            or not self._decision_fingerprint
+        ):
+            raise ValueError("decision judge route mismatch")
+        return {
+            "role": role,
+            "provider": route.provider,
+            "model": route.model,
+            "location": route.location.value,
+        }
+
+    def _judge_forward(
+        self, role: str, question: str, state: str, priority: int
+    ) -> float:
+        with self._turn.slot(priority), self._local_resources():
+            scores = self._llm_runtime.decision_readout(role, question, (state,))
+        if len(scores) != 1:
+            raise ValueError("decision judge returned the wrong number of scores")
+        return float(scores[0])
+
+    def _judge(self, payload: dict[str, Any]) -> dict[str, Any]:
+        kind = payload.get("kind")
+        if not isinstance(kind, str) or kind not in JUDGE_ROLE_BY_KIND:
+            raise ValueError("judge requires a known kind")
+        role = payload.get("role")
+        if not isinstance(role, str) or role != JUDGE_ROLE_BY_KIND[kind]:
+            raise ValueError("judge role does not match kind")
+        expected = {
+            JUDGE_ANSWER_AXES: {
+                "method",
+                "kind",
+                "role",
+                "query",
+                "answer",
+                "reference",
+            },
+            JUDGE_CERTIFICATE: {
+                "method",
+                "kind",
+                "role",
+                "query",
+                "rubric",
+                "evidence",
+            },
+            JUDGE_UTILITY: {
+                "method",
+                "kind",
+                "role",
+                "query",
+                "context",
+                "answer_a",
+                "answer_b",
+            },
+        }[kind]
+        allowed = expected | ({"rubric_id"} if kind == JUDGE_CERTIFICATE else set())
+        if set(payload) - allowed or not expected <= set(payload):
+            raise ValueError("judge request has invalid fields")
+        query = payload.get("query")
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("judge requires a non-empty query")
+        route = self._judge_route(role)
+        priority = PRIORITY_RECALL if kind == JUDGE_CERTIFICATE else PRIORITY_SEARCH
+        if not self._slots.acquire(blocking=False):
+            raise ServiceBusy("reranker queue is full")
+        started = time.perf_counter()
+        body: dict[str, Any]
+        try:
+            if kind == JUDGE_ANSWER_AXES:
+                answer = payload.get("answer")
+                reference = payload.get("reference")
+                if (
+                    not isinstance(answer, str)
+                    or not answer
+                    or not isinstance(reference, str)
+                    or not reference
+                ):
+                    raise ValueError("answer_axes requires answer and reference")
+                state = judge_state(
+                    kind, query=query, answer=answer, reference=reference
+                )
+                axis_logits = tuple(
+                    self._judge_forward(
+                        role, ANSWER_AXIS_QUESTIONS[axis], state, priority
+                    )
+                    for axis in ANSWER_AXES
+                )
+                body = {
+                    "scores": answer_axis_scores(axis_logits),
+                    "logits": dict(zip(ANSWER_AXES, axis_logits, strict=True)),
+                }
+            elif kind == JUDGE_CERTIFICATE:
+                rubric = payload.get("rubric")
+                rubric_id = payload.get("rubric_id", "")
+                evidence = payload.get("evidence")
+                if (
+                    not isinstance(rubric, str)
+                    or not rubric
+                    or not isinstance(rubric_id, str)
+                    or not isinstance(evidence, list)
+                    or not 1 <= len(evidence) <= 2
+                ):
+                    raise ValueError(
+                        "certificate requires rubric and 1..2 evidence spans"
+                    )
+                verdicts: list[dict[str, Any]] = []
+                certificate_logits: list[float] = []
+                seen: set[str] = set()
+                for row in evidence:
+                    if not isinstance(row, dict) or set(row) != {"page_id", "span"}:
+                        raise ValueError("certificate evidence is invalid")
+                    page_id = row.get("page_id")
+                    span = row.get("span")
+                    if (
+                        not isinstance(page_id, str)
+                        or not page_id
+                        or page_id in seen
+                        or not isinstance(span, str)
+                        or not span
+                    ):
+                        raise ValueError("certificate evidence is invalid")
+                    seen.add(page_id)
+                    state = judge_state(
+                        kind,
+                        query=query,
+                        rubric=rubric,
+                        rubric_id=rubric_id,
+                        page_id=page_id,
+                        evidence=span,
+                    )
+                    logit = self._judge_forward(
+                        role, JUDGE_QUESTIONS[JUDGE_CERTIFICATE], state, priority
+                    )
+                    certificate_logits.append(logit)
+                    verdicts.append(certificate_verdict(page_id, logit))
+                body = {
+                    "verdicts": verdicts,
+                    "logits": certificate_logits,
+                }
+            else:
+                context = payload.get("context")
+                answer_a = payload.get("answer_a")
+                answer_b = payload.get("answer_b")
+                if (
+                    not isinstance(context, str)
+                    or not isinstance(answer_a, str)
+                    or not answer_a
+                    or not isinstance(answer_b, str)
+                    or not answer_b
+                ):
+                    raise ValueError("utility requires context, answer_a and answer_b")
+                state = judge_state(
+                    kind,
+                    query=query,
+                    context=context,
+                    answer_a=answer_a,
+                    answer_b=answer_b,
+                )
+                logit = self._judge_forward(
+                    role, JUDGE_QUESTIONS[JUDGE_UTILITY], state, priority
+                )
+                body = {**utility_choice(logit), "logit": logit}
+        finally:
+            self._slots.release()
+        elapsed_ms = self._record_request(started)
+        return {
+            "status": "ok",
+            "method": "judge",
+            "kind": kind,
+            "role": role,
+            "route": route,
+            "decision_fingerprint": self._decision_fingerprint,
+            "latency_ms": int(round(elapsed_ms)),
+            **body,
+        }
 
     def _score(self, request: RerankRequest, priority: int) -> list[float]:
         """Raw score per candidate, in request order, in priority turn order.
@@ -477,6 +695,8 @@ class RerankerServiceState:
                 normalized_ids,
                 evidence_by_page=evidence_by_page,
             )
+        if method == "judge":
+            return self._judge(payload)
         if method == "recall_filter":
             query, context, texts = (
                 payload.get("query"),
