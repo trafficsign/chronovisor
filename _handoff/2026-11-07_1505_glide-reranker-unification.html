@@ -150,7 +150,7 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 
 <section class="blockers" data-section="ブロッカー">
 <h2>ブロッカー（発生時のみ）</h2>
-<ul><li>fbf4511b / shadow（priority step 1受入済み）は反映済み。fresh hook 19:35:47 は degraded / recall search budget exhausted / 3,157 ms、候補0件のためfilter未実行。observed・有限scores・dropped_page_ids・filter latencyの実ターン受入は未達。BGE時の同じ上流エラー（3,258 / 3,161 ms）を照合済みで、判定モデルの実障害とは認定せず本番を維持。候補を持つ実Recallターンの観測待ち。</li></ul>
+<ul><li>Ornith完全退役は3roleの独立性validatorにより未完了（answer.scorer / certificate_judge.primary / distill.utility_judgeを維持）。judge_mode=off適用後のfresh recall検証は次のトリガー待ち。</li><li>fbf4511b / shadow（priority step 1受入済み）は反映済み。fresh hook 19:35:47 は degraded / recall search budget exhausted / 3,157 ms、候補0件のためfilter未実行。observed・有限scores・dropped_page_ids・filter latencyの実ターン受入は未達。BGE時の同じ上流エラー（3,258 / 3,161 ms）を照合済みで、判定モデルの実障害とは認定せず本番を維持。候補を持つ実Recallターンの観測待ち。</li></ul>
 </section>
 
 <section data-section="受け渡しメモ">
@@ -199,6 +199,10 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 <li><time>2026-11-07 20:20</time><span>本番優先処理probe（10候補検索、開始306.07ms後に5textsフィルタ）: filter 648.64ms、search 1839.64ms。filter単独643.28msとの差は+5.36msで、filterが検索より先に完了。5 scoresすべて有限。入力長204/202/178/221/187文字。単独warm検索1321.12/1267.93ms。</span></li>
 <li><time>2026-11-07 20:20</time><span>初回計測の注意: MCPを経由しないbare socket初回検索は4213.658msでclient 3500ms timeout、reranker再起動後にも4000.845msで再現。これを隠さず証跡保存。基準2.4sはMCP経路の値のため、fresh reranker+同じMCP harnessで条件を照合: rerank 2289/1336/1366ms、total 7815.92/3623.75/3867.51ms、全3回applied・10候補。受入基準を満たすので展開を維持。bare socket初回とMCP経路の差の原因は未確定で、解決済みとは扱わない。</span></li>
 <li><time>2026-11-07 20:20</time><span>保守lease解放済み。証跡・rollback: ~/.chronovisor/runtime/rollback/reranker-priority-20261107-200756（deployment-summary.json、priority-probe-result.json、mcp-search-summary.json、初回timeout記録）。本stepの実装追加なし。旧MCP/他端末は触れていない。以前からの実Recall observed確認待ちは本stepの合否と分離し、全体planはblockedを維持。</span></li>
+<li><time>2026-11-07 20:24</time><span>Ornith退役（config/launchdのみ）の承認を受領。config・mtplx plist・launchd状態・process/memoryをrollback/ornith-retire-20261107-202247に退避。judge_mode=offと6roles→mlx_serve/qwen3.8-flash-next-chat（revision 98165936...）の候補を作成しparse/runtime解決・judge無効を確認。recall_filterは既にon。distillation/answer adapter固定条件の確認中。既存MCPはプロセス内config cacheを持つため、前指示の旧MCP終了禁止との調整を確認中。本番設定とOrnithはまだ変更していない。</span></li>
+<li><time>2026-11-07 20:34</time><span>Ornith退役の部分適用完了: judge_mode=off、recall.gate/query_rewriter/distill.teacher.bをmlx_serve/qwen3.8-flash-next-chat revision98165936...へ変更。他の設定・runtime.source・コードは維持。scorerはrunnerと異なるprovider/model/location必須（recall_answer_adapters.py:74）、certificate primaryはescalationとの異種route必須（recall_processor.py:350-364）、utility_judgeはanswer_generatorとの異なるfingerprint必須（recall_distillation.py:724）。この3roleはmtplxを維持し、ユーザー指示どおりOrnithを停止/disableしていない。</span></li>
+<li><time>2026-11-07 20:34</time><span>全11管理ジョブを再起動。適用後のload_llm_config/load_default_llm_runtime/load_policy/load_distillation_configが正常。judge offを確認し、single teacher.aとcounterfactual worker、answer runner/scorer adapter identityが成立。semantic/reranker ready、Qwen healthとloaded正常。DashboardはOrnith running=true/configured=falseと表示するが、表示対象外の3rolesは実設定でOrnithを使用中。Ornith PID783継続、停止前physical footprint約5.7GB、今回は解放していない。</span></li>
+<li><time>2026-11-07 20:34</time><span>configとplistのrollback copyは元hash一致（rollback/ornith-retire-20261107-202247）。保守lease解放済み。既存MCPは旧設定cacheの可能性があるが終了せず維持、Ornith継続のため退役の受入とは扱わない。fresh recallの無エラー・judge未呼出しは次のユーザートリガー待ち。サブエージェントは停止し以後不使用。</span></li>
 </ol>
 </section>
 
