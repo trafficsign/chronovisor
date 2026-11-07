@@ -1073,3 +1073,68 @@ def test_quick_check_read_only_never_writes_receipt(quick_check_projection, monk
     assert LexicalIndex(path=path, pages=lambda: []).load_existing()
     assert (sidecar.read_bytes(), sidecar.stat().st_mtime_ns) == before
     assert len(checks) == 2
+
+
+def test_matching_schema_open_does_not_touch_wal(quick_check_projection):
+    path, _checks = quick_check_projection
+    keeper = sqlite3.connect(path)
+    keeper.execute("PRAGMA journal_mode=WAL")
+    keeper.execute("UPDATE pages SET title = 'Gamma'")
+    keeper.commit()
+    wal = Path(f"{path}-wal")
+    before = wal.read_bytes(), wal.stat().st_mtime_ns, path.read_bytes()
+    index = LexicalIndex(path=path, pages=lambda: [])
+    index._open()
+    index.close()
+    assert (wal.read_bytes(), wal.stat().st_mtime_ns, path.read_bytes()) == before
+    keeper.close()
+
+
+def test_writer_update_and_close_publish_quick_check(tmp_path, monkeypatch):
+    monkeypatch.delenv("CHRONOVISOR_READ_ONLY", raising=False)
+    page = tmp_path / "page.md"
+    page.write_text("---\ntitle: Alpha\nstatus: stable\ntype: knowledge\n---\nfirsttoken\n")
+    path = tmp_path / "lexical.sqlite"
+    writer = LexicalIndex(path=path, pages=lambda: [page], refresh_interval_seconds=0)
+    writer.build()
+    check = LexicalIndex._run_quick_check
+
+    def forbidden(_connection):
+        pytest.fail("reader repeated writer integrity check")
+
+    for token in ("firsttoken", "secondtoken"):
+        if token == "secondtoken":
+            monkeypatch.setattr(LexicalIndex, "_run_quick_check", staticmethod(check))
+            page.write_text(page.read_text().replace("firsttoken", token))
+            writer.build()
+        monkeypatch.setattr(LexicalIndex, "_run_quick_check", staticmethod(forbidden))
+        reader = LexicalIndex(path=path, pages=lambda: [])
+        assert reader.load_existing()
+        assert [p.page_id for p in reader.query_existing(token)] == ["page"]
+        reader.close()
+    monkeypatch.setattr(LexicalIndex, "_run_quick_check", staticmethod(check))
+    writer.close()
+    monkeypatch.setattr(LexicalIndex, "_run_quick_check", staticmethod(forbidden))
+    reader = LexicalIndex(path=path, pages=lambda: [])
+    assert reader.load_existing()
+    reader.close()
+
+
+def test_writer_receipt_not_published_for_concurrent_bytes(quick_check_projection, monkeypatch):
+    path, _checks = quick_check_projection
+    index = LexicalIndex(path=path, pages=lambda: [])
+    connection = index._open()
+    receipt = path.with_suffix(".quick-check.json")
+    assert not receipt.exists()
+    original = LexicalIndex._run_quick_check
+
+    def racing_check(reader):
+        original(reader)
+        with sqlite3.connect(path) as writer:
+            writer.execute("UPDATE pages SET title = 'Gamma'")
+        writer.close()
+
+    monkeypatch.setattr(LexicalIndex, "_run_quick_check", staticmethod(racing_check))
+    index._refresh_quick_check(connection)
+    assert not receipt.exists()
+    index.close()
