@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import socket
 import threading
 import time
@@ -158,6 +159,55 @@ def request(
     return response
 
 
+def _expected_route() -> dict[str, str]:
+    try:
+        from chronovisor.core.llm_config import load_default_llm_runtime
+
+        route = load_default_llm_runtime().resolve_rerank(RERANK_RUNTIME_ROLE)
+    except Exception as exc:
+        raise RerankerServiceUnavailable(safe_reranker_error(exc)) from exc
+    return {
+        "role": route.role,
+        "provider": route.provider,
+        "model": route.model,
+        "location": route.location.value,
+    }
+
+
+def recall_filter(
+    query: str,
+    context: str,
+    texts: list[str],
+    *,
+    config: RerankerConfig,
+    timeout_ms: int | None = None,
+) -> list[float]:
+    """Decision-model logit P(yes) per exact recall text, in order."""
+
+    expected_route = _expected_route()
+    response = request(
+        {"method": "recall_filter", "query": query, "context": context, "texts": texts},
+        config,
+        timeout_ms=timeout_ms,
+    )
+    # The recall threshold is fitted to one model: a drifted route is unusable.
+    if response.get("route") != expected_route:
+        raise RerankerServiceUnavailable("backend_contract_error")
+    scores = response.get("scores")
+    if (
+        not isinstance(scores, list)
+        or len(scores) != len(texts)
+        or not all(
+            isinstance(score, int | float)
+            and not isinstance(score, bool)
+            and math.isfinite(score)
+            for score in scores
+        )
+    ):
+        raise RerankerServiceUnavailable("invalid_response")
+    return [float(score) for score in scores]
+
+
 def rerank(
     query: str,
     candidates: list[ScoredPage],
@@ -171,18 +221,7 @@ def rerank(
         )
     rerank_n = min(max(1, config.top_n), len(candidates))
     head = candidates[:rerank_n]
-    try:
-        from chronovisor.core.llm_config import load_default_llm_runtime
-
-        route = load_default_llm_runtime().resolve_rerank(RERANK_RUNTIME_ROLE)
-    except Exception as exc:
-        raise RerankerServiceUnavailable(safe_reranker_error(exc)) from exc
-    expected_route = {
-        "role": route.role,
-        "provider": route.provider,
-        "model": route.model,
-        "location": route.location.value,
-    }
+    expected_route = _expected_route()
     request_payload: dict[str, Any] = {
         "method": "rerank",
         "query": query,
