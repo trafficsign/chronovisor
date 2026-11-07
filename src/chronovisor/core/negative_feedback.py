@@ -43,7 +43,7 @@ RECALL_LOG_FILE_OVERRIDE: Path | None = None
 PERSISTENT_CACHE_FILE = (
     CHRONOVISOR_ROOT / "runtime" / "search" / "negative-feedback-cache.json"
 )
-PERSISTENT_CACHE_SCHEMA = 1
+PERSISTENT_CACHE_SCHEMA = 2
 GOLDEN_CACHE_FILE = CHRONOVISOR_ROOT / "runtime" / "search" / "golden-feedback-cache.json"
 GOLDEN_CACHE_SCHEMA = 1
 
@@ -178,11 +178,57 @@ def _read_persistent_entries(key: dict[str, object]) -> list[_FeedbackEntry] | N
         payload = json.loads(PERSISTENT_CACHE_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if (
-        not isinstance(payload, dict)
-        or payload.get("schema_version") != PERSISTENT_CACHE_SCHEMA
-        or payload.get("source") != key
+    if not isinstance(payload, dict) or payload.get("schema_version") != PERSISTENT_CACHE_SCHEMA:
+        return None
+    previous = payload.get("source")
+    if not isinstance(previous, dict) or any(
+        previous.get(name) != value
+        for name, value in key.items()
+        if name not in {"mtime_ns", "size"}
     ):
+        return None
+    old_size = previous.get("size")
+    if not isinstance(old_size, int) or isinstance(old_size, bool) or old_size < 0:
+        return None
+    path = Path(str(key["path"]))
+    try:
+        signature = _golden_signature(path)
+        if signature[2:4] != (key["size"], key["mtime_ns"]) or old_size > signature[2]:
+            return None
+        with path.open("rb") as stream:
+            digest = hashlib.sha256()
+            remaining = old_size
+            last = b""
+            while remaining:
+                chunk = stream.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    return None
+                digest.update(chunk)
+                remaining -= len(chunk)
+                last = chunk[-1:]
+            if digest.hexdigest() != payload.get("source_sha256"):
+                return None
+            tail = stream.read()
+        if tail:
+            # A partial old/new row could become a target when completed later.
+            if (old_size and last != b"\n") or not tail.endswith(b"\n"):
+                return None
+            targets = set(cast(list[str], key["kinds"])) | {
+                "false-positive", "strong-contradiction", "contradiction",
+                "page_ignored", feedback_ledger.PAGE_IGNORED_RETRACTION_KIND,
+            }
+            for line in tail.decode("utf-8").split("\n"):
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if not isinstance(row, dict) or not isinstance(row.get("kind"), str):
+                    return None
+                if row["kind"] in targets:
+                    return None
+            digest.update(tail)
+        if signature != _golden_signature(path):
+            return None
+    except (OSError, ValueError):
         return None
     raw_entries = payload.get("entries")
     if not isinstance(raw_entries, list):
@@ -190,12 +236,17 @@ def _read_persistent_entries(key: dict[str, object]) -> list[_FeedbackEntry] | N
     entries = [_entry_from_payload(value) for value in raw_entries]
     if any(entry is None for entry in entries):
         return None
-    return [entry for entry in entries if entry is not None]
+    decoded = [entry for entry in entries if entry is not None]
+    if previous != key:
+        _write_persistent_entries(key, decoded, source_sha256=digest.hexdigest())
+    return decoded
 
 
 def _write_persistent_entries(
     key: dict[str, object],
     entries: list[_FeedbackEntry],
+    *,
+    source_sha256: str = "",
 ) -> None:
     if FEEDBACK_FILE_OVERRIDE is not None or os.environ.get("CHRONOVISOR_READ_ONLY") == "1":
         return
@@ -207,6 +258,7 @@ def _write_persistent_entries(
                 {
                     "schema_version": PERSISTENT_CACHE_SCHEMA,
                     "source": key,
+                    "source_sha256": source_sha256,
                     "entries": [_entry_payload(entry) for entry in entries],
                 },
                 ensure_ascii=False,
@@ -230,6 +282,8 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
         str(path),
         stat.st_mtime_ns,
         stat.st_size,
+        stat.st_ctime_ns,
+        stat.st_ino,
         config.kinds,
         config.max_age_days,
         config.max_entries,
@@ -252,6 +306,14 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
             _CACHE.entries = persisted
         return persisted
 
+    # Bind a rebuilt cache to the exact source validated below, even if a writer races it.
+    try:
+        source_signature = _golden_signature(path)
+        with path.open("rb") as stream:
+            source_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
+    except OSError:
+        source_signature = ()
+        source_sha256 = ""
     cutoff = (
         datetime.now(UTC) - timedelta(days=config.max_age_days)
         if config.max_age_days > 0
@@ -333,10 +395,19 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
     if len(entries) > config.max_entries:
         entries = entries[-config.max_entries :]
 
-    with _CACHE_LOCK:
-        _CACHE.key = cache_key
-        _CACHE.entries = entries
-    _write_persistent_entries(persistent_key, entries)
+    try:
+        stable = (
+            source_signature == _golden_signature(path)
+            and source_signature[2:4] == (stat.st_size, stat.st_mtime_ns)
+            and bool(source_sha256)
+        )
+    except OSError:
+        stable = False
+    if stable:
+        with _CACHE_LOCK:
+            _CACHE.key = cache_key
+            _CACHE.entries = entries
+        _write_persistent_entries(persistent_key, entries, source_sha256=source_sha256)
     return entries
 
 
