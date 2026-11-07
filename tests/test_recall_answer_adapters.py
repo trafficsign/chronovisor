@@ -18,6 +18,13 @@ from chronovisor.core.llm_runtime import (
 from chronovisor.recall import recall_answer_adapters
 
 
+@pytest.fixture(autouse=True)
+def _decision_role(monkeypatch):
+    monkeypatch.setattr(
+        recall_answer_adapters, "uses_decision_judge", lambda _role: True
+    )
+
+
 def test_local_effort_binds_sampler_identity_and_actual_runtime_budgets(monkeypatch):
     settings = {"level": "xhigh", "num_ctx": 65536, "num_predict": 16384}
     monkeypatch.setattr(
@@ -101,6 +108,9 @@ def _decision_route() -> DecisionRoute:
 def _install_identity_routes(
     monkeypatch: pytest.MonkeyPatch, *, runner_location: str = "remote"
 ) -> tuple[ollama.RuntimeGenerationRoute, DecisionRoute]:
+    monkeypatch.setattr(
+        recall_answer_adapters, "uses_decision_judge", lambda _role: True
+    )
     runner = _runner_route(location=runner_location)
     scorer = _decision_route()
 
@@ -410,3 +420,49 @@ def test_remote_raw_high_egress_denial_runs_no_backend_or_ollama_control(
 
     assert denied.value.category == "egress_denied"
     assert backend_calls == []
+
+
+def test_legacy_scorer_keeps_generation_identity_and_prompt(monkeypatch):
+    adapters = recall_answer_adapters
+    monkeypatch.setattr(adapters, "uses_decision_judge", lambda _role: False)
+    monkeypatch.setattr(
+        adapters, "decision_route", lambda *_: pytest.fail("decision route")
+    )
+    routes = (
+        _runner_route(),
+        ollama.RuntimeGenerationRoute(
+            adapters.SCORER_RUNTIME_ROLE,
+            "mtplx",
+            "ornith",
+            "local",
+            True,
+        ),
+    )
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: routes)
+    monkeypatch.setattr(adapters, "_sampler_identity", lambda _role: "sampler")
+    _, scorer = adapters.builtin_answer_adapter_identities(
+        rubric_sha256="r", evidence_manifest_sha256="e"
+    )
+    assert scorer["scorer_id"] == "builtin-runtime-evidence-scorer-v2"
+    assert scorer["policy_sha256"] == adapters.LEGACY_SCORER_POLICY_SHA256
+    seen = []
+    monkeypatch.setattr(
+        adapters,
+        "_chat_json",
+        lambda **kwargs: (
+            seen.append(kwargs)
+            or {
+                "correctness": 1.0,
+                "grounding": 0.8,
+                "citation": 0.7,
+            }
+        ),
+    )
+    result = adapters.builtin_ollama_answer_scorer(
+        "q",
+        "answer",
+        {"evidence": {"source_packet": {"evidence_chunks": []}}},
+        {"seed": 0},
+    )
+    assert seen[0]["messages"][0]["content"] == adapters.LEGACY_SCORER_SYSTEM
+    assert result["dimensions"]["correctness"] == 1.0

@@ -333,6 +333,31 @@ class RerankerServiceState:
         query = payload.get("query")
         if not isinstance(query, str) or not query.strip():
             raise ValueError("judge requires a non-empty query")
+        # Bound the whole request before taking a slot or doing any forward.
+        for field, value in payload.items():
+            if isinstance(value, str) and len(value) > (
+                512 if field == "rubric_id" else 16_384
+            ):
+                raise ValueError(f"judge {field} is too long")
+        if kind == JUDGE_CERTIFICATE:
+            evidence_rows = payload.get("evidence")
+            if not isinstance(evidence_rows, list) or not 1 <= len(evidence_rows) <= 2:
+                raise ValueError("certificate requires 1..2 evidence spans")
+            seen_pages: set[str] = set()
+            for row in evidence_rows:
+                if not isinstance(row, dict) or set(row) != {"page_id", "span"}:
+                    raise ValueError("certificate evidence is invalid")
+                for field, limit in (("page_id", 512), ("span", 16_384)):
+                    value = row[field]
+                    if (
+                        not isinstance(value, str)
+                        or not value.strip()
+                        or len(value) > limit
+                    ):
+                        raise ValueError(f"certificate {field} is invalid")
+                if row["page_id"] in seen_pages:
+                    raise ValueError("certificate evidence is duplicated")
+                seen_pages.add(row["page_id"])
         route = self._judge_route(role)
         default_priority = (
             PRIORITY_RECALL if kind == JUDGE_CERTIFICATE else PRIORITY_SEARCH

@@ -86,8 +86,6 @@ UTILITY_ANSWER_CHARS = 800
 CERTIFICATE_PASS_P = 0.85
 CERTIFICATE_REJECT_P = 0.25
 UTILITY_DECISIVE_P = 0.75
-UTILITY_TIE_LOW_P = 0.45
-UTILITY_TIE_HIGH_P = 0.55
 _ANSWER_AXIS_STATE = (
     "Current question:\n{query}\n\n"
     "Candidate answer:\n{answer}\n\n"
@@ -122,7 +120,8 @@ def _canonical_sha256(value: object) -> str:
 
 
 JUDGE_POLICY: dict[str, Any] = {
-    "version": 1,
+    "version": 2,
+    "utility_both_no": "neutral",
     "roles": JUDGE_ROLE_BY_KIND,
     "questions": JUDGE_QUESTIONS,
     "templates": {
@@ -144,8 +143,6 @@ JUDGE_POLICY: dict[str, Any] = {
         "certificate_pass_p": CERTIFICATE_PASS_P,
         "certificate_reject_p": CERTIFICATE_REJECT_P,
         "utility_decisive_p": UTILITY_DECISIVE_P,
-        "utility_tie_low_p": UTILITY_TIE_LOW_P,
-        "utility_tie_high_p": UTILITY_TIE_HIGH_P,
     },
 }
 JUDGE_POLICY_SHA256 = _canonical_sha256(JUDGE_POLICY)
@@ -275,8 +272,6 @@ def utility_choice(logit: float) -> dict[str, Any]:
         choice, confidence = "a", probability
     elif probability <= 1.0 - UTILITY_DECISIVE_P:
         choice, confidence = "b", 1.0 - probability
-    elif UTILITY_TIE_LOW_P <= probability <= UTILITY_TIE_HIGH_P:
-        choice, confidence = "tie", max(probability, 1.0 - probability)
     else:
         choice, confidence = "uncertain", max(probability, 1.0 - probability)
     return {
@@ -284,6 +279,22 @@ def utility_choice(logit: float) -> dict[str, Any]:
         "confidence": round(confidence, 9),
         "rationale": f"startlux p={probability:.6f}",
     }
+
+
+def uses_decision_judge(role: str) -> bool:
+    """Select the decision path only for an explicitly configured decision role."""
+    from chronovisor.core.llm_config import LLMConfigError, load_llm_config
+
+    try:
+        config = load_llm_config()
+    except LLMConfigError:
+        return False
+    selected = config.roles.get(role)
+    return bool(
+        selected is not None
+        and selected.capability == "rerank"
+        and config.providers[selected.provider_id].kind == "local-decision-mlx"
+    )
 
 
 def decision_route(role: str) -> DecisionRoute:

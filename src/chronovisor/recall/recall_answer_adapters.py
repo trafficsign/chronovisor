@@ -17,6 +17,7 @@ from chronovisor.core.decision_mlx import (
     JUDGE_POLICY_SHA256,
     decision_fingerprint,
     decision_route,
+    uses_decision_judge,
 )
 from chronovisor.core.durable_state import canonical_sha256
 from chronovisor.core.model_execution import local_reasoning_settings
@@ -44,6 +45,11 @@ SCORER_SYSTEM = (
     "Deterministic StartLux decision readout for answer correctness, grounding, "
     "and citation against frozen reference evidence."
 )
+LEGACY_SCORER_SYSTEM = "Score whether the candidate answer is supported by the frozen independent reference evidence. Do not reward lexical similarity alone. Return the registered JSON object with correctness, grounding, and citation in [0,1]."
+LEGACY_SCORER_POLICY_SHA256 = canonical_sha256(
+    {"version": 1, "system": LEGACY_SCORER_SYSTEM, "schema": SCORER_SCHEMA}
+)
+_RUNTIME_ROLES = (RUNNER_RUNTIME_ROLE, SCORER_RUNTIME_ROLE)
 SCORER_TIMEOUT_MS = 10_000
 RUNNER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -94,9 +100,84 @@ def _sampler_identity(role: str) -> str:
     )
 
 
+def _generation_answer_adapter_identities(
+    *, rubric_sha256: str, evidence_manifest_sha256: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    routes = ollama.runtime_generation_routes(_RUNTIME_ROLES)
+    if (
+        tuple(route.role for route in routes) != _RUNTIME_ROLES
+        or not all(route.structured_output for route in routes)
+        or len({(route.provider, route.model, route.location) for route in routes}) != 2
+    ):
+        raise RuntimeError("independent answer runner/scorer models unavailable")
+    local_models = list(
+        dict.fromkeys(
+            route.model
+            for route in routes
+            if route.provider == "ollama" and route.location == "local"
+        )
+    )
+    digests = ollama.model_digests(local_models) if local_models else {}
+
+    def route_identity(route: ollama.RuntimeGenerationRoute) -> dict[str, Any]:
+        digest = (
+            str(digests.get(route.model) or "")
+            if route.provider == "ollama" and route.location == "local"
+            else None
+        )
+        if digest == "":
+            raise RuntimeError("independent answer runner/scorer models unavailable")
+        return {
+            "role": route.role,
+            "provider": route.provider,
+            "model": route.model,
+            "location": route.location,
+            "model_digest": digest,
+        }
+
+    runner_route = route_identity(routes[0])
+    scorer_route = route_identity(routes[1])
+    if runner_route["model_digest"] is not None and (
+        runner_route["model_digest"] == scorer_route["model_digest"]
+    ):
+        raise RuntimeError("independent answer runner/scorer models unavailable")
+    runner = {
+        "identity_schema": IDENTITY_SCHEMA,
+        "runner_id": "builtin-runtime-answer-runner-v2",
+        "route_identity": runner_route,
+        "model": runner_route["model"],
+        "model_digest": runner_route["model_digest"],
+        "system_sha256": canonical_sha256(RUNNER_SYSTEM),
+        "sampler_sha256": _sampler_identity(RUNNER_RUNTIME_ROLE),
+        "policy_sha256": RUNNER_POLICY_SHA256,
+    }
+    scorer = {
+        "identity_schema": IDENTITY_SCHEMA,
+        "scorer_id": "builtin-runtime-evidence-scorer-v2",
+        "version": "2",
+        "route_identity": scorer_route,
+        "model": scorer_route["model"],
+        "model_digest": scorer_route["model_digest"],
+        "system_sha256": canonical_sha256(LEGACY_SCORER_SYSTEM),
+        "sampler_sha256": _sampler_identity(SCORER_RUNTIME_ROLE),
+        "policy_sha256": LEGACY_SCORER_POLICY_SHA256,
+        "rubric_sha256": rubric_sha256,
+        "evidence_manifest_sha256": evidence_manifest_sha256,
+        "calibration_protocol_sha256": canonical_sha256(
+            {"version": 2, "kind": "machine-consensus-controls"}
+        ),
+    }
+    return runner, scorer
+
+
 def builtin_answer_adapter_identities(
     *, rubric_sha256: str, evidence_manifest_sha256: str
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not uses_decision_judge(SCORER_RUNTIME_ROLE):
+        return _generation_answer_adapter_identities(
+            rubric_sha256=rubric_sha256,
+            evidence_manifest_sha256=evidence_manifest_sha256,
+        )
     routes = ollama.runtime_generation_routes((RUNNER_RUNTIME_ROLE,))
     if (
         tuple(route.role for route in routes) != (RUNNER_RUNTIME_ROLE,)
@@ -289,8 +370,58 @@ def builtin_startlux_answer_scorer(
     }
 
 
-# Keep the old import name working until every caller is migrated.
-builtin_ollama_answer_scorer = builtin_startlux_answer_scorer
+def builtin_ollama_answer_scorer(
+    prompt: str,
+    answer: str,
+    gold: Mapping[str, Any],
+    scoring: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    if uses_decision_judge(SCORER_RUNTIME_ROLE):
+        return builtin_startlux_answer_scorer(prompt, answer, gold, scoring)
+    evidence = gold.get("evidence")
+    evidence_map = evidence if isinstance(evidence, Mapping) else {}
+    source_packet = evidence_map.get("source_packet")
+    source_map = source_packet if isinstance(source_packet, Mapping) else {}
+    chunks = source_map.get("evidence_chunks")
+    if not isinstance(chunks, list):
+        raise ValueError("scorer gold evidence is missing")
+    reference = "\n\n".join(
+        f"[PAGE {chunk.get('page_id')}]\n{chunk.get('excerpt')}"
+        for chunk in chunks
+        if isinstance(chunk, Mapping)
+    )
+    _runner, identity = builtin_answer_adapter_identities(
+        rubric_sha256=str(gold.get("rubric_sha256") or "0" * 64),
+        evidence_manifest_sha256=str(
+            scoring.get("evidence_manifest_sha256") or "0" * 64
+        ),
+    )
+    seed = int(scoring.get("seed") or 0)
+    dimensions = _chat_json(
+        runtime_role=SCORER_RUNTIME_ROLE,
+        messages=[
+            {"role": "system", "content": LEGACY_SCORER_SYSTEM},
+            {
+                "role": "user",
+                "content": (
+                    f"QUESTION:\n{prompt}\n\nCANDIDATE ANSWER:\n{answer}"
+                    f"\n\nFROZEN REFERENCE EVIDENCE:\n{reference}"
+                ),
+            },
+        ],
+        schema=SCORER_SCHEMA,
+        seed=seed,
+    )
+    return {
+        "identity": identity,
+        "evidence_sha256": gold.get("evidence_sha256"),
+        "reset_receipt": {
+            "seed": seed,
+            "base_state_sha256": scoring.get("base_state_sha256"),
+            "reset_protocol_sha256": identity["policy_sha256"],
+        },
+        "dimensions": dimensions,
+    }
 
 
 __all__ = [

@@ -245,6 +245,7 @@ def primary_decision_route() -> DecisionRoute:
 
 @pytest.fixture(autouse=True)
 def _primary_decision_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(recall_processor, "uses_decision_judge", lambda _role: True)
     monkeypatch.setattr(
         recall_processor, "decision_route", lambda _role: primary_decision_route()
     )
@@ -395,7 +396,13 @@ def test_selection_abstains_when_every_certificate_rejects(
     assert metadata["certificate_pass_count"] == 0
 
 
-def test_certificate_judge_resolves_only_two_ambiguous_pages(monkeypatch) -> None:
+@pytest.mark.parametrize("decision", [False, True])
+def test_certificate_judge_resolves_only_two_ambiguous_pages(
+    monkeypatch, decision
+) -> None:
+    monkeypatch.setattr(recall_processor, "uses_decision_judge", lambda _role: decision)
+    if not decision:
+        monkeypatch.setattr(recall_processor, "decision_route", lambda *_args: pytest.fail("legacy route reached decision judge"))
     certificates = [certificate(f"page-{index}") for index in range(3)]
     certificates = [
         item

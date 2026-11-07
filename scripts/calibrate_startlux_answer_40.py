@@ -14,11 +14,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.decision_mlx import decision_route
 from chronovisor.core.runtime_config import load_reranker_config
 from chronovisor.recall import recall_answer_eval
 from chronovisor.recall.recall_answer_adapters import (
     builtin_answer_adapter_identities,
-    builtin_ollama_answer_scorer,
+    builtin_startlux_answer_scorer,
 )
 
 
@@ -42,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args(argv)
 
+    decision_route("recall.answer.scorer")
     output_dir = args.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     controls = _controls(args.benchmark.expanduser().resolve())
@@ -66,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
             "base_state_sha256": "",
             "evidence_manifest_sha256": scorer_identity["evidence_manifest_sha256"],
         }
-        result = builtin_ollama_answer_scorer(
+        result = builtin_startlux_answer_scorer(
             control["source_packet"]["prompt"],
             control["answer"],
             gold,

@@ -14,6 +14,7 @@ from chronovisor.core.decision_mlx import (
     DecisionRoute,
     decision_fingerprint,
     decision_route,
+    uses_decision_judge,
 )
 from chronovisor.core.runtime_config import load_reranker_config
 from chronovisor.core.search_types import tokenize
@@ -399,58 +400,95 @@ def judge_ambiguous_certificates(
         max(200, int(getattr(policy, "processor_judge_timeout_ms", 900))),
         timeout_ms,
     )
-    primary_decision_route: DecisionRoute | None = None
-    try:
-        primary_decision_route = decision_route(PRIMARY_JUDGE_RUNTIME_ROLE)
-    except Exception:
-        pass
-    escalation_route: ollama.RuntimeGenerationRoute | None = None
-    try:
-        escalation_candidates = ollama.runtime_generation_routes(
-            (ESCALATION_JUDGE_RUNTIME_ROLE,)
-        )
-        escalation_route = next(
-            (
-                route
-                for route in escalation_candidates
-                if route.role == ESCALATION_JUDGE_RUNTIME_ROLE
-            ),
-            None,
-        )
-    except Exception:
-        pass
     verdicts: dict[str, dict[str, Any]]
     primary_status: str
     primary_route: dict[str, str | None] | None
-    if (
-        primary_decision_route is None
-        or escalation_route is None
-        or not escalation_route.structured_output
-        or (
-            primary_decision_route.provider,
-            primary_decision_route.model,
-            primary_decision_route.location,
-        )
-        == (
-            escalation_route.provider,
-            escalation_route.model,
-            escalation_route.location,
-        )
-    ):
-        verdicts, primary_status, primary_route = (
-            {},
-            "runtime_route_invalid",
-            None,
-        )
+    escalation_route: ollama.RuntimeGenerationRoute | None = None
+    if not uses_decision_judge(PRIMARY_JUDGE_RUNTIME_ROLE):
+        resolved_routes: tuple[ollama.RuntimeGenerationRoute, ...] = ()
+        try:
+            resolved_routes = ollama.runtime_generation_routes(
+                (PRIMARY_JUDGE_RUNTIME_ROLE, ESCALATION_JUDGE_RUNTIME_ROLE)
+            )
+        except Exception:
+            pass
+        if (
+            tuple(route.role for route in resolved_routes)
+            != (PRIMARY_JUDGE_RUNTIME_ROLE, ESCALATION_JUDGE_RUNTIME_ROLE)
+            or not all(route.structured_output for route in resolved_routes)
+            or len(
+                {
+                    (route.provider, route.model, route.location)
+                    for route in resolved_routes
+                }
+            )
+            != 2
+        ):
+            verdicts, primary_status, primary_route = (
+                {},
+                "runtime_route_invalid",
+                None,
+            )
+        else:
+            verdicts, primary_status, primary_route = _run_certificate_judge(
+                query,
+                ambiguous,
+                runtime_role=PRIMARY_JUDGE_RUNTIME_ROLE,
+                timeout_ms=primary_timeout,
+                keep_alive=str(getattr(policy, "judge_keep_alive", "24h")),
+                resolved_route=resolved_routes[0],
+            )
+        escalation_route = resolved_routes[1] if len(resolved_routes) == 2 else None
     else:
-        verdicts, primary_status, primary_route = _run_certificate_judge(
-            query,
-            ambiguous,
-            runtime_role=PRIMARY_JUDGE_RUNTIME_ROLE,
-            timeout_ms=primary_timeout,
-            keep_alive=str(getattr(policy, "judge_keep_alive", "24h")),
-            resolved_decision_route=primary_decision_route,
-        )
+        primary_decision_route: DecisionRoute | None = None
+        try:
+            primary_decision_route = decision_route(PRIMARY_JUDGE_RUNTIME_ROLE)
+        except Exception:
+            pass
+        escalation_route = None
+        try:
+            escalation_candidates = ollama.runtime_generation_routes(
+                (ESCALATION_JUDGE_RUNTIME_ROLE,)
+            )
+            escalation_route = next(
+                (
+                    route
+                    for route in escalation_candidates
+                    if route.role == ESCALATION_JUDGE_RUNTIME_ROLE
+                ),
+                None,
+            )
+        except Exception:
+            pass
+        if (
+            primary_decision_route is None
+            or escalation_route is None
+            or not escalation_route.structured_output
+            or (
+                primary_decision_route.provider,
+                primary_decision_route.model,
+                primary_decision_route.location,
+            )
+            == (
+                escalation_route.provider,
+                escalation_route.model,
+                escalation_route.location,
+            )
+        ):
+            verdicts, primary_status, primary_route = (
+                {},
+                "runtime_route_invalid",
+                None,
+            )
+        else:
+            verdicts, primary_status, primary_route = _run_certificate_judge(
+                query,
+                ambiguous,
+                runtime_role=PRIMARY_JUDGE_RUNTIME_ROLE,
+                timeout_ms=primary_timeout,
+                keep_alive=str(getattr(policy, "judge_keep_alive", "24h")),
+                resolved_decision_route=primary_decision_route,
+            )
     unresolved: list[EvidenceCertificate] = []
     replacements: dict[str, EvidenceCertificate] = {}
     escalation_route_identity: dict[str, str | None] | None = None
@@ -500,9 +538,7 @@ def judge_ambiguous_certificates(
             else:
                 unresolved.append(certificate)
 
-    escalation_status = (
-        "blocked_by_primary" if primary_status != "ok" else "not_needed"
-    )
+    escalation_status = "blocked_by_primary" if primary_status != "ok" else "not_needed"
     elapsed_ms = int(round((time.perf_counter() - started) * 1_000))
     remaining_ms = max(0, timeout_ms - elapsed_ms)
     if unresolved and remaining_ms >= 300:
@@ -541,9 +577,7 @@ def judge_ambiguous_certificates(
                 else 0.0
             )
             passed = (
-                escalation_status == "ok"
-                and decision == "pass"
-                and confidence >= 0.90
+                escalation_status == "ok" and decision == "pass" and confidence >= 0.90
             )
             replacements[certificate.page_id] = replace(
                 certificate,
@@ -597,9 +631,7 @@ def judge_ambiguous_certificates(
         else:
             resolved.append(certificate)
     return resolved, {
-        "status": (
-            "ok" if primary_status == "ok" else "primary_judge_fail_closed"
-        ),
+        "status": ("ok" if primary_status == "ok" else "primary_judge_fail_closed"),
         "primary_status": primary_status,
         "candidate_count": len(ambiguous),
         "primary_route_identity": primary_route,

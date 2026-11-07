@@ -1150,3 +1150,57 @@ def test_idle_server_publishes_bounded_heartbeat(monkeypatch):
     server.state._publish_status = unavailable_disk
     clock[0] += 5
     server.service_actions()  # Telemetry failure must not stop inference.
+
+
+@pytest.mark.parametrize(
+    "kind,field",
+    [
+        ("answer_axes", "query"),
+        ("answer_axes", "answer"),
+        ("answer_axes", "reference"),
+        ("certificate", "rubric"),
+        ("certificate", "rubric_id"),
+        ("certificate", "page_id"),
+        ("certificate", "span"),
+        ("utility", "context"),
+        ("utility", "answer_a"),
+        ("utility", "answer_b"),
+    ],
+)
+def test_judge_bounds_all_strings_before_any_forward(
+    tmp_path, monkeypatch, kind, field
+):
+    state, _, backend, _, controls = prepare_state(
+        tmp_path,
+        monkeypatch,
+        config(tmp_path / "reranker.sock"),
+        provider="local-decision",
+    )
+    backend.readout = lambda *_args: pytest.fail("invalid request reached model")
+    payload = {
+        "method": "judge",
+        "kind": kind,
+        "role": JUDGE_ROLE_BY_KIND[kind],
+        "query": "q",
+    }
+    payload.update(
+        {
+            "answer_axes": {"answer": "a", "reference": "r"},
+            "certificate": {
+                "rubric": "r",
+                "rubric_id": "id",
+                "evidence": [
+                    {"page_id": "first", "span": "valid"},
+                    {"page_id": "second", "span": "valid"},
+                ],
+            },
+            "utility": {"context": "", "answer_a": "a", "answer_b": "b"},
+        }[kind]
+    )
+    if field in {"page_id", "span"}:
+        payload["evidence"][1][field] = "x" * 16_385
+    else:
+        payload[field] = "x" * 16_385
+    with pytest.raises(ValueError):
+        state.handle(payload)
+    assert controls == {"lease": 0, "activity": 0}

@@ -281,7 +281,7 @@ def test_judge_policy_and_logit_mappings_are_frozen() -> None:
 
     assert utility_choice(2.5)["blind_choice"] == "a"
     assert utility_choice(-2.5)["blind_choice"] == "b"
-    assert utility_choice(0.0)["blind_choice"] == "tie"
+    assert utility_choice(0.0)["blind_choice"] == "uncertain"
     assert utility_choice(1.0)["blind_choice"] == "uncertain"
     assert "rationale" in utility_choice(2.5)
 
@@ -358,3 +358,34 @@ def test_decision_route_pins_revision_and_fingerprint(monkeypatch) -> None:
     )
     with pytest.raises(RuntimeError):
         decision_route(route.role)
+
+
+@pytest.mark.parametrize(
+    "capability,kind,expected",
+    [
+        ("generation", "mtplx", False),
+        ("rerank", "local-decision-mlx", True),
+        ("generation", "local-decision-mlx", False),
+        ("rerank", "omlx", False),
+    ],
+)
+def test_decision_judge_dispatch_uses_configured_role(
+    monkeypatch, capability, kind, expected
+):
+    from types import SimpleNamespace
+
+    from chronovisor.core import llm_config
+    from chronovisor.core.decision_mlx import uses_decision_judge
+
+    monkeypatch.setattr(
+        llm_config,
+        "load_llm_config",
+        lambda: SimpleNamespace(
+            roles={
+                "judge": SimpleNamespace(capability=capability, provider_id="local")
+            },
+            providers={"local": SimpleNamespace(kind=kind)},
+        ),
+    )
+    assert uses_decision_judge("judge") is expected
+    assert uses_decision_judge("missing") is False
