@@ -33,7 +33,7 @@ from chronovisor.core.runtime_config import (
     NegativeFeedbackConfig,
     load_negative_feedback_config,
 )
-from chronovisor.core.search_types import ScoredPage, tokenize
+from chronovisor.core.search_types import TOKENIZER_VERSION, ScoredPage, tokenize
 from chronovisor.core.store import CHRONOVISOR_ROOT
 
 # Test seams: when set, bypass the recall_runtime/golden default paths.
@@ -44,6 +44,8 @@ PERSISTENT_CACHE_FILE = (
     CHRONOVISOR_ROOT / "runtime" / "search" / "negative-feedback-cache.json"
 )
 PERSISTENT_CACHE_SCHEMA = 1
+GOLDEN_CACHE_FILE = CHRONOVISOR_ROOT / "runtime" / "search" / "golden-feedback-cache.json"
+GOLDEN_CACHE_SCHEMA = 1
 
 
 @dataclass(frozen=True)
@@ -195,7 +197,7 @@ def _write_persistent_entries(
     key: dict[str, object],
     entries: list[_FeedbackEntry],
 ) -> None:
-    if FEEDBACK_FILE_OVERRIDE is not None:
+    if FEEDBACK_FILE_OVERRIDE is not None or os.environ.get("CHRONOVISOR_READ_ONLY") == "1":
         return
     try:
         PERSISTENT_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -338,123 +340,181 @@ def _load_entries(config: NegativeFeedbackConfig) -> list[_FeedbackEntry]:
     return entries
 
 
-def _load_protections() -> list[_FeedbackEntry]:
-    """Reviewed positive labels veto auto-penalties for similar queries.
+def _golden_signature(path: Path) -> tuple[int, ...]:
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
-    ``injection_ignored`` only means "the assistant did not use the page",
-    not "the page is irrelevant".  When a reviewer has since confirmed the
-    page as relevant for a similar query, demoting it would reintroduce the
-    very recall miss the review fixed, so those pages are protected.
-    """
-    path = _golden_file()
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        return []
-    cache_key = (str(path), mtime)
-    with _CACHE_LOCK:
-        if _PROTECT_CACHE.key == cache_key:
-            return _PROTECT_CACHE.entries
 
-    entries: list[_FeedbackEntry] = []
-    try:
-        lines = path.read_text(encoding="utf-8").split("\n")
-    except OSError:
-        return []
-    for line in lines:
-        if not line.strip():
-            continue
+def _parse_golden_entries(text: str) -> list[dict[str, object]]:
+    """Project both train-label views in one pass, preserving their row order."""
+    entries: list[dict[str, object]] = []
+
+    def append(line: str, *, positive: bool, negative: bool) -> None:
         try:
             row = json.loads(line)
         except json.JSONDecodeError:
-            continue
-        if not isinstance(row, dict) or row.get("reviewed") is not True:
-            continue
-        if str(row.get("split") or "train") != "train":
-            continue
-        query = row.get("query")
-        pages = row.get("expected_pages")
-        if (
-            not isinstance(query, str)
-            or not query.strip()
-            or not isinstance(pages, list)
-        ):
-            continue
-        page_ids = tuple(p for p in pages if isinstance(p, str) and p)
-        if not page_ids:
-            continue
-        tokens = _tokenize(query)
-        if not tokens:
-            continue
-        entries.append(
-            _FeedbackEntry(
-                tokens=tokens,
-                pages=page_ids,
-                ts=_parse_ts(row.get("ts") or row.get("reviewed_at")),
-                kind="reviewed_positive",
-            )
-        )
-
-    with _CACHE_LOCK:
-        _PROTECT_CACHE.key = cache_key
-        _PROTECT_CACHE.entries = entries
-    return entries
-
-
-def _load_reviewed_train_negatives() -> list[_FeedbackEntry]:
-    """Load only reviewed train-split negatives; holdout/locked stay unseen."""
-
-    path = _golden_file()
-    try:
-        stat = path.stat()
-    except OSError:
-        return []
-    cache_key = (str(path), stat.st_mtime_ns, stat.st_size, "train-negatives")
-    with _CACHE_LOCK:
-        if _GOLD_NEGATIVE_CACHE.key == cache_key:
-            return _GOLD_NEGATIVE_CACHE.entries
-    entries: list[_FeedbackEntry] = []
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    for line in lines:
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+            return
         if (
             not isinstance(row, dict)
             or row.get("reviewed") is not True
             or str(row.get("split") or "train") != "train"
         ):
-            continue
+            return
         query = row.get("query")
-        pages = row.get("negative_pages")
-        if (
-            not isinstance(query, str)
-            or not query.strip()
-            or not isinstance(pages, list)
+        if not isinstance(query, str) or not query.strip():
+            return
+        tokens: list[str] | None = None
+        for enabled, field_name, kind in (
+            (positive, "expected_pages", "reviewed_positive"),
+            (negative, "negative_pages", "explicit_eval_negative"),
         ):
-            continue
-        page_ids = tuple(page for page in pages if isinstance(page, str) and page)
-        tokens = _tokenize(query)
-        if not page_ids or not tokens:
-            continue
-        entries.append(
-            _FeedbackEntry(
-                tokens=tokens,
-                pages=page_ids,
-                ts=_parse_ts(row.get("ts") or row.get("reviewed_at")),
-                kind="explicit_eval_negative",
-                frontier_confirmed=True,
-                label_quality="gold",
-            )
-        )
-    with _CACHE_LOCK:
-        _GOLD_NEGATIVE_CACHE.key = cache_key
-        _GOLD_NEGATIVE_CACHE.entries = entries
+            pages = row.get(field_name)
+            if not enabled or not isinstance(pages, list):
+                continue
+            page_ids = [page for page in pages if isinstance(page, str) and page]
+            if not page_ids:
+                continue
+            if tokens is None:
+                tokens = tokenize(query)
+            if not tokens:
+                continue
+            ts = _parse_ts(row.get("ts") or row.get("reviewed_at"))
+            entries.append({
+                # Preserve tokenizer insertion order, including duplicates:
+                # frozenset iteration can affect equal-weight centroid ties.
+                "tokens": tokens,
+                "pages": page_ids,
+                "ts": ts.isoformat() if ts is not None else None,
+                "kind": kind,
+            })
+
+    # read_text's universal newline behavior, before the two legacy split rules.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    for line in text.split("\n"):
+        fragments = line.splitlines()
+        append(line, positive=True, negative=fragments == [line])
+        if fragments != [line]:
+            # The negative view historically uses splitlines(), the positive
+            # view split("\n"). Preserve literal Unicode separator behavior.
+            for fragment in fragments:
+                append(fragment, positive=False, negative=True)
     return entries
+
+
+def _decode_golden_entries(
+    values: object,
+) -> tuple[list[_FeedbackEntry], list[_FeedbackEntry]]:
+    if not isinstance(values, list):
+        raise ValueError("invalid golden cache entries")
+    negatives: list[_FeedbackEntry] = []
+    protections: list[_FeedbackEntry] = []
+    for value in values:
+        if not isinstance(value, dict):
+            raise ValueError("invalid golden cache entry")
+        for name in ("tokens", "pages"):
+            items = value.get(name)
+            if not isinstance(items, list) or not items or not all(
+                isinstance(item, str) and item for item in items
+            ):
+                raise ValueError("invalid golden cache strings")
+        kind = value.get("kind")
+        ts = value.get("ts")
+        if kind not in {"reviewed_positive", "explicit_eval_negative"} or (
+            ts is not None and (not isinstance(ts, str) or _parse_ts(ts) is None)
+        ):
+            raise ValueError("invalid golden cache metadata")
+        negative = kind == "explicit_eval_negative"
+        entry = _FeedbackEntry(
+            tokens=frozenset(value["tokens"]),
+            pages=tuple(value["pages"]),
+            ts=_parse_ts(ts),
+            kind=kind,
+            frontier_confirmed=negative,
+            label_quality="gold" if negative else "",
+        )
+        (negatives if negative else protections).append(entry)
+    return negatives, protections
+
+
+def _load_golden_entries() -> tuple[list[_FeedbackEntry], list[_FeedbackEntry]]:
+    path = _golden_file()
+    cache_file = (
+        path.with_suffix(".tokens.json")
+        if GOLDEN_FILE_OVERRIDE is not None
+        else GOLDEN_CACHE_FILE
+    )
+    try:
+        signature = _golden_signature(path)
+        memory_key = (str(path), signature, GOLDEN_CACHE_SCHEMA, TOKENIZER_VERSION)
+        with _CACHE_LOCK:
+            if _GOLD_NEGATIVE_CACHE.key == _PROTECT_CACHE.key == memory_key:
+                return _GOLD_NEGATIVE_CACHE.entries, _PROTECT_CACHE.entries
+        source = path.read_bytes()
+        stable = signature == _golden_signature(path)
+    except OSError:
+        return [], []
+    key = {
+        "source_sha256": hashlib.sha256(source).hexdigest(),
+        "schema_version": GOLDEN_CACHE_SCHEMA,
+        "tokenizer_version": TOKENIZER_VERSION,
+    }
+    entries: tuple[list[_FeedbackEntry], list[_FeedbackEntry]] | None = None
+    if stable:
+        try:
+            cached = json.loads(cache_file.read_bytes())
+            if isinstance(cached, dict) and cached.get("source") == key:
+                payload = cached["entries_json"]
+                if (
+                    isinstance(payload, str)
+                    and hashlib.sha256(payload.encode()).hexdigest() == cached["entries_sha256"]
+                ):
+                    entries = _decode_golden_entries(json.loads(payload))
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+    try:
+        stable = stable and signature == _golden_signature(path)
+        if not stable:
+            # Never publish or reuse a result from a concurrent source update.
+            source = path.read_bytes()
+            entries = None
+    except OSError:
+        return [], []
+    if entries is None:
+        values = _parse_golden_entries(source.decode("utf-8"))
+        entries = _decode_golden_entries(values)
+        if stable and os.environ.get("CHRONOVISOR_READ_ONLY") != "1":
+            try:
+                if signature == _golden_signature(path):
+                    payload = json.dumps(values, ensure_ascii=False, separators=(",", ":"))
+                    cache_file.parent.mkdir(parents=True, exist_ok=True)
+                    atomic_write(cache_file, json.dumps({
+                        "source": key,
+                        "entries_json": payload,
+                        "entries_sha256": hashlib.sha256(payload.encode()).hexdigest(),
+                    }, ensure_ascii=False, separators=(",", ":")))
+                    os.chmod(cache_file, 0o600)
+            except OSError:
+                pass
+    try:
+        if stable and signature != _golden_signature(path):
+            return _decode_golden_entries(
+                _parse_golden_entries(path.read_bytes().decode("utf-8"))
+            )
+        if stable:
+            with _CACHE_LOCK:
+                _GOLD_NEGATIVE_CACHE.key = _PROTECT_CACHE.key = memory_key
+                _GOLD_NEGATIVE_CACHE.entries, _PROTECT_CACHE.entries = entries
+    except OSError:
+        pass
+    return entries
+
+
+def _load_protections() -> list[_FeedbackEntry]:
+    return _load_golden_entries()[1]
+
+
+def _load_reviewed_train_negatives() -> list[_FeedbackEntry]:
+    return _load_golden_entries()[0]
 
 
 def contextual_negative_trace(

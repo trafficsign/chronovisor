@@ -609,3 +609,141 @@ def test_load_config_defaults_when_missing(tmp_path) -> None:
     assert config.enabled is False
     assert config.similarity_threshold == pytest.approx(0.35)
     assert config.penalty == pytest.approx(0.85)
+
+
+def _reset_golden_memory(monkeypatch):
+    monkeypatch.setattr(negative_feedback, "_PROTECT_CACHE", negative_feedback._Cache())
+    monkeypatch.setattr(negative_feedback, "_GOLD_NEGATIVE_CACHE", negative_feedback._Cache())
+
+
+def test_golden_sidecar_parses_once_and_reuses_tokens(feedback_file, tmp_path, monkeypatch):
+    golden = tmp_path / "golden.jsonl"
+    write_feedback(golden, [
+        {"query": "alpha 日本語 alpha", "reviewed": True, "expected_pages": ["yes"], "negative_pages": ["no"]},
+        {"query": "holdout", "reviewed": True, "split": "holdout", "negative_pages": ["hidden"]},
+    ])
+    _reset_golden_memory(monkeypatch)
+    original = negative_feedback._parse_golden_entries
+    calls = []
+
+    def parse(text):
+        calls.append(text)
+        return original(text)
+
+    monkeypatch.setattr(negative_feedback, "_parse_golden_entries", parse)
+    negatives = negative_feedback._load_reviewed_train_negatives()
+    positives = negative_feedback._load_protections()
+    assert len(calls) == 1
+    assert [e.pages for e in negatives] == [("no",)]
+    assert [e.pages for e in positives] == [("yes",)]
+    sidecar = golden.with_suffix(".tokens.json")
+    assert sidecar.exists()
+    assert sidecar.stat().st_mode & 0o777 == 0o600
+    _reset_golden_memory(monkeypatch)
+    monkeypatch.setattr(negative_feedback, "tokenize", lambda _: pytest.fail("cache hit retokenized"))
+    assert negative_feedback._load_golden_entries() == (negatives, positives)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("corruption", ["truncated", "checksum", "invalid_entry", "schema", "tokenizer"])
+def test_golden_corrupt_or_versioned_cache_falls_back(feedback_file, tmp_path, monkeypatch, corruption):
+    golden = tmp_path / "golden.jsonl"
+    write_feedback(golden, [{"query": "alpha", "reviewed": True, "negative_pages": ["no"]}])
+    _reset_golden_memory(monkeypatch)
+    expected = negative_feedback._load_golden_entries()
+    sidecar = golden.with_suffix(".tokens.json")
+    data = json.loads(sidecar.read_text())
+    if corruption == "truncated":
+        sidecar.write_text("{")
+    else:
+        if corruption == "checksum":
+            data["entries_sha256"] = "0" * 64
+        elif corruption == "invalid_entry":
+            data["entries_json"] = '[{"tokens":[],"pages":["bad"],"kind":"explicit_eval_negative"}]'
+            data["entries_sha256"] = hashlib.sha256(data["entries_json"].encode()).hexdigest()
+        else:
+            data["source"]["schema_version" if corruption == "schema" else "tokenizer_version"] = -1
+        sidecar.write_text(json.dumps(data))
+    _reset_golden_memory(monkeypatch)
+    assert negative_feedback._load_golden_entries() == expected
+
+
+def test_golden_content_hash_invalidates_preserved_stat(feedback_file, tmp_path, monkeypatch):
+    import os
+
+    golden = tmp_path / "golden.jsonl"
+    write_feedback(golden, [{"query": "alpha", "reviewed": True, "negative_pages": ["no"]}])
+    _reset_golden_memory(monkeypatch)
+    assert negative_feedback._load_reviewed_train_negatives()[0].tokens == {"alpha"}
+    stat = golden.stat()
+    golden.write_text(golden.read_text().replace("alpha", "gamma"))
+    os.utime(golden, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    _reset_golden_memory(monkeypatch)
+    assert negative_feedback._load_reviewed_train_negatives()[0].tokens == {"gamma"}
+
+
+def test_golden_concurrent_update_discards_cache(feedback_file, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    golden = tmp_path / "golden.jsonl"
+    write_feedback(golden, [{"query": "alpha", "reviewed": True, "negative_pages": ["no"]}])
+    _reset_golden_memory(monkeypatch)
+    original = Path.read_bytes
+    changed = False
+
+    def read(path):
+        nonlocal changed
+        content = original(path)
+        if path == golden and not changed:
+            changed = True
+            path.write_bytes(content.replace(b"alpha", b"gamma"))
+        return content
+
+    monkeypatch.setattr(Path, "read_bytes", read)
+    assert negative_feedback._load_reviewed_train_negatives()[0].tokens == {"gamma"}
+    assert not golden.with_suffix(".tokens.json").exists()
+    assert negative_feedback._GOLD_NEGATIVE_CACHE.key is None
+
+
+def test_read_only_never_writes_feedback_sidecars(feedback_file, tmp_path, monkeypatch):
+    golden = tmp_path / "golden.jsonl"
+    write_feedback(golden, [{"query": "alpha", "reviewed": True, "negative_pages": ["no"]}])
+    _reset_golden_memory(monkeypatch)
+    monkeypatch.setenv("CHRONOVISOR_READ_ONLY", "1")
+    assert negative_feedback._load_reviewed_train_negatives()
+    assert not golden.with_suffix(".tokens.json").exists()
+    cache = tmp_path / "missing" / "feedback-cache.json"
+    monkeypatch.setattr(negative_feedback, "FEEDBACK_FILE_OVERRIDE", None)
+    monkeypatch.setattr(negative_feedback, "PERSISTENT_CACHE_FILE", cache)
+    negative_feedback._write_persistent_entries({}, [])
+    assert not cache.parent.exists()
+
+
+def test_golden_unicode_separator_preserves_legacy_views(feedback_file, tmp_path, monkeypatch):
+    golden = tmp_path / "golden.jsonl"
+    write_feedback(golden, [{"query": "alpha\u2028beta", "reviewed": True, "negative_pages": ["no"], "expected_pages": ["yes"]}])
+    _reset_golden_memory(monkeypatch)
+    negatives, positives = negative_feedback._load_golden_entries()
+    assert negatives == []
+    assert len(positives) == 1
+
+
+def test_golden_update_during_parse_is_not_published(feedback_file, tmp_path, monkeypatch):
+    golden = tmp_path / "golden.jsonl"
+    write_feedback(golden, [{"query": "alpha", "reviewed": True, "negative_pages": ["no"]}])
+    _reset_golden_memory(monkeypatch)
+    original = negative_feedback._parse_golden_entries
+    changed = False
+
+    def parse(text):
+        nonlocal changed
+        values = original(text)
+        if not changed:
+            changed = True
+            golden.write_text(golden.read_text().replace("alpha", "gamma"))
+        return values
+
+    monkeypatch.setattr(negative_feedback, "_parse_golden_entries", parse)
+    assert negative_feedback._load_reviewed_train_negatives()[0].tokens == {"gamma"}
+    assert not golden.with_suffix(".tokens.json").exists()
+    assert negative_feedback._GOLD_NEGATIVE_CACHE.key is None
