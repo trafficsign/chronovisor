@@ -150,7 +150,7 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 
 <section class="blockers" data-section="ブロッカー">
 <h2>ブロッカー（発生時のみ）</h2>
-<ul><li>70862b49 / shadow は反映済み、検索3回・有限filter・semanticの受入済み。ユーザー指定により次メッセージで実行される Codex UserPromptSubmit hook の受入確認待ち（errorなし、evidence_features.recall_filter.status=observed、latency_ms ≤ 4,800）。再承認待ちではない。実際の受入失敗時だけロールバック。</li></ul>
+<ul><li>70862b49 / shadow は反映済み。fresh hook 19:35:47 は degraded / recall search budget exhausted / 3,157 ms、候補0件のためfilter未実行。observed・有限scores・dropped_page_ids・filter latencyの実ターン受入は未達。BGE時の同じ上流エラー（3,258 / 3,161 ms）を照合済みで、判定モデルの実障害とは認定せず本番を維持。候補を持つ実Recallターンの観測待ち。</li></ul>
 </section>
 
 <section data-section="受け渡しメモ">
@@ -193,6 +193,7 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 <li><time>2026-11-07 19:34</time><span>新しい受入基準に全3回合格。同じ harness・Chronovisor Recall・depth=0・1新規MCPプロセスで、total / rerank / non-rerank (ms): 1回目 7,639.37 / 2,313 / 5,326.37、2回目 3,755.71 / 1,331 / 2,424.71、3回目 3,903.57 / 1,327 / 2,576.57。すべて hybrid+rerank / applied / 10 hits。</span></li>
 <li><time>2026-11-07 19:34</time><span>filter 2 scores は有限（1.6696546 / -7.1703377）、338.66 ms。semantic ready。unpinned hook の通常 import が新SHAを解決し、local-decision-mlx 設定を正常に読めることを確認。設定後の新hookログはまだ0件なので、実hookの無エラー・observed確認は未完了。旧MCP 5 PIDは触れず保持。保守leaseを解放し、次のユーザーメッセージで実hookを検証する。</span></li>
 <li><time>2026-11-07 19:34</time><span>rollback と全測定証跡: ~/.chronovisor/runtime/rollback/decision-reranker-redeploy-20261107-191609。次担当は pending-recall-acceptance.json の offset 以後で host=codex / session_id=01a1b4c6-1632-7193-9bae-aa760ef6aa85 / event=UserPromptSubmit の新規行を確認し、errorなし・filter observed・latency_ms ≤ 4,800 を照合する。検索3回は再実行不要。失敗時は manifest と退避config/制約を使い全復旧する。</span></li>
+<li><time>2026-11-07 19:37</time><span>実ターン確認: decision_id=20261107T193543-fba10f57（今回のプロンプト一致）、status=degraded、error=recall search budget exhausted、総3157 ms ≤ 4800、context_items=0、filter記録なし。_apply_recall_filter は context_items 空なら記録前に return（recall_runtime.py:2182）。再デプロイ前の同session BGEも同じ上流エラー（19:12 3258 ms / 19:15 3161 ms）。実filter失敗ではないためrollbackせず、observed受入は未完了のまま。19:35以降の他host最新は Claude 19:35:04、system notificationによる skipped / 16 ms / error空 / filterなし。証跡 fresh-recall-check.json に保存。追加実装・設定変更・再起動なし。</span></li>
 </ol>
 </section>
 
