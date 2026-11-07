@@ -225,10 +225,13 @@ def decision_judge(
     role: str,
     config: RerankerConfig,
     timeout_ms: int | None = None,
+    priority: int | None = None,
 ) -> dict[str, Any]:
     """Call one fixed decision-judge contract on the resident service."""
 
     if JUDGE_ROLE_BY_KIND.get(kind) != role:
+        raise RerankerServiceUnavailable("request_invalid")
+    if priority is not None and (isinstance(priority, bool) or priority not in {0, 1}):
         raise RerankerServiceUnavailable("request_invalid")
     try:
         expected = decision_route(role)
@@ -241,11 +244,10 @@ def decision_judge(
         "location": expected.location,
     }
     expected_fingerprint = decision_fingerprint(expected)
-    response = request(
-        {"method": "judge", "kind": kind, "role": role, **dict(fields)},
-        config,
-        timeout_ms=timeout_ms,
-    )
+    payload = {"method": "judge", "kind": kind, "role": role, **dict(fields)}
+    if priority is not None:
+        payload["priority"] = priority
+    response = request(payload, config, timeout_ms=timeout_ms)
     if response.get("route") != expected_route:
         raise RerankerServiceUnavailable("backend_contract_error")
     if response.get("decision_fingerprint") != expected_fingerprint:

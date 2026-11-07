@@ -663,6 +663,21 @@ def test_judge_certificate_uses_recall_priority_and_maps_verdicts(
     assert priorities == [reranker_service.PRIORITY_RECALL]
     assert controls == {"lease": 1, "activity": 1}
 
+    priorities.clear()
+    payload = state.handle(
+        {
+            "method": "judge",
+            "kind": JUDGE_CERTIFICATE,
+            "role": JUDGE_ROLE_BY_KIND[JUDGE_CERTIFICATE],
+            "query": "question",
+            "rubric": "Pass only answer-bearing evidence.",
+            "evidence": [{"page_id": "page-1", "span": "supporting span"}],
+            "priority": reranker_service.PRIORITY_SEARCH,
+        }
+    )
+    assert payload["priority"] == reranker_service.PRIORITY_SEARCH
+    assert priorities == [reranker_service.PRIORITY_SEARCH]
+
 
 def test_judge_rejects_non_decision_routes_and_bad_fields(
     tmp_path, monkeypatch
@@ -735,6 +750,7 @@ def test_decision_judge_client_checks_route_and_fingerprint(
         role=route.role,
         config=cfg,
         timeout_ms=250,
+        priority=1,
     )
 
     assert result["scores"]["correctness"] == 0.9
@@ -746,6 +762,7 @@ def test_decision_judge_client_checks_route_and_fingerprint(
         "query": "q",
         "answer": "a",
         "reference": "r",
+        "priority": 1,
     }
 
     def drifted_request(payload, config, *, timeout_ms=None):

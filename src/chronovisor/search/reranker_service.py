@@ -327,13 +327,27 @@ class RerankerServiceState:
             },
         }[kind]
         allowed = expected | ({"rubric_id"} if kind == JUDGE_CERTIFICATE else set())
+        allowed = allowed | {"priority"}
         if set(payload) - allowed or not expected <= set(payload):
             raise ValueError("judge request has invalid fields")
         query = payload.get("query")
         if not isinstance(query, str) or not query.strip():
             raise ValueError("judge requires a non-empty query")
         route = self._judge_route(role)
-        priority = PRIORITY_RECALL if kind == JUDGE_CERTIFICATE else PRIORITY_SEARCH
+        default_priority = (
+            PRIORITY_RECALL if kind == JUDGE_CERTIFICATE else PRIORITY_SEARCH
+        )
+        priority_value = payload.get("priority")
+        if priority_value is None:
+            priority = default_priority
+        elif (
+            isinstance(priority_value, int)
+            and not isinstance(priority_value, bool)
+            and priority_value in {PRIORITY_RECALL, PRIORITY_SEARCH}
+        ):
+            priority = priority_value
+        else:
+            raise ValueError("judge priority is invalid")
         if not self._slots.acquire(blocking=False):
             raise ServiceBusy("reranker queue is full")
         started = time.perf_counter()
@@ -441,6 +455,7 @@ class RerankerServiceState:
             "method": "judge",
             "kind": kind,
             "role": role,
+            "priority": priority,
             "route": route,
             "decision_fingerprint": self._decision_fingerprint,
             "latency_ms": int(round(elapsed_ms)),
