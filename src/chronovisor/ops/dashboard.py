@@ -928,6 +928,7 @@ def _is_local_model_route(route: Any) -> bool:
             "semantic-service",
             "local-reranker",
             "local-transformers",
+            "local-decision",
         }
         and getattr(location, "value", location) == "local"
     )
@@ -1139,6 +1140,7 @@ def _external_configured_model(name: str, roles: set[str]) -> bool:
                 "semantic-service",
                 "local-reranker",
                 "local-transformers",
+                "local-decision-mlx",
                 "ollama",
                 "omlx",
             }:
@@ -1163,6 +1165,7 @@ def _configured_runtime_backend(provider: Any) -> tuple[str, str] | None:
         "omlx": ("omlx", "local"),
         "mtplx": ("mtplx", "local"),
         "local-transformers": ("local-reranker", "local"),
+        "local-decision-mlx": ("local-decision", "local"),
         "nemotron": ("nemotron", "local"),
     }.get(kind)
 

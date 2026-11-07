@@ -313,6 +313,11 @@ class RerankRequest:
     source: SourceDataClassification
     timeout_ms: int | None = None
     candidate_sources: tuple[SourceDataClassification, ...] | None = None
+    # Decision-model backends phrase the question by purpose ("search" or
+    # "recall_gate"); context is the preceding user turn for the recall gate.
+    # Cross-encoder backends ignore both.
+    purpose: str = "search"
+    context: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True)
