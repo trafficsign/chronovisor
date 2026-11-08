@@ -49,14 +49,38 @@ def _find_page_with_alias(
 
     registry = PageRegistry(CHRONOVISOR_ROOT)
     if registry.path.exists():
-        try:
+        state = registry.load()
+        normalized_key = str(page_id or "").strip().removesuffix(".md").casefold()
+        known_key = (
+            normalized_key in state["keys"] or normalized_key in state["ambiguous_keys"]
+        )
+        if not known_key:
+            known_key = any(
+                normalized_key
+                in {
+                    str(uid).casefold(),
+                    str(row.get("uid") or "").casefold(),
+                    str(row.get("page_id") or "")
+                    .strip()
+                    .removesuffix(".md")
+                    .casefold(),
+                }
+                for uid, row in state["pages"].items()
+                if isinstance(row, dict)
+            ) or normalized_key in {str(uid).casefold() for uid in state["redirects"]}
+        if known_key:
+            try:
+                registry.resolve_from_state(state, page_id)
+            except PageRegistryError as exc:
+                if str(exc).startswith("ambiguous page key "):
+                    return None
+                raise
             return registry.path_for(page_id, require_stable=require_stable)
-        except PageRegistryError:
-            return None
     path = canonical_document_path_for_id(
         page_id,
         pages_dir=CHRONOVISOR_ROOT / "pages",
         system_dir=CHRONOVISOR_ROOT / "system",
+        require_stable=require_stable,
     )
     if path is not None:
         return path
@@ -75,7 +99,7 @@ def _find_page_with_alias(
         CHRONOVISOR_ROOT / "pages",
         namespace="pages",
         reserved_filenames=PAGE_RESERVED_FILENAMES,
-        require_stable=True,
+        require_stable=require_stable,
     )
 
 
@@ -296,7 +320,10 @@ def chronovisor_read(
     store = get_store()
     store.refresh()
 
-    path = _find_page_with_alias(page, require_stable=False)
+    try:
+        path = _find_page_with_alias(page, require_stable=False)
+    except PageRegistryError, ValueError:
+        return json.dumps({"error": "Page registry unavailable"})
     if path is None:
         return json.dumps({"error": f"Page '{page}' not found"})
 

@@ -131,6 +131,7 @@ def test_chronovisor_read_confines_pages_and_system(
     for page_id, expected in (
         ("normal", normal_content),
         ("system-normal", system_content),
+        ("draft", draft.read_text(encoding="utf-8")),
     ):
         payload = json.loads(read(page_id))
         assert payload["page_id"] == page_id
@@ -144,7 +145,6 @@ def test_chronovisor_read_confines_pages_and_system(
         "norm*",
         "norm?l",
         "[n]ormal",
-        "draft",
         "page-link",
         "system-link",
     ):
