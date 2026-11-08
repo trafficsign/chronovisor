@@ -78,20 +78,18 @@ def test_codex_missing_cwd_does_not_fall_back_to_newest(tmp_path: Path) -> None:
         codex_transcript.find_session_file(cwd="/tmp/missing", sessions_root=root)
 
 
-def test_codex_conflicting_identity_inputs_do_not_select_either_session(
-    tmp_path: Path,
-) -> None:
+def test_codex_session_id_wins_over_a_stale_cwd(tmp_path: Path) -> None:
     root = tmp_path / "sessions"
     root.mkdir()
     _write_codex_session(root / "first.jsonl", session_id="first", cwd="/tmp/first")
     _write_codex_session(root / "second.jsonl", session_id="second", cwd="/tmp/second")
 
-    with pytest.raises(CodexSaveError, match="session_id.*cwd|cwd.*session_id"):
-        codex_transcript.find_session_file(
-            session_id="first",
-            cwd="/tmp/second",
-            sessions_root=root,
-        )
+    found = codex_transcript.find_session_file(
+        session_id="first",
+        cwd="/tmp/second",
+        sessions_root=root,
+    )
+    assert found.name == "first.jsonl"
 
 
 def test_codex_session_id_does_not_fall_through_to_implicit_pwd(
@@ -207,3 +205,15 @@ def test_claude_empty_session_id_is_still_an_explicit_identity(
         claude_code_record._transaction_spec().resolve_session_file(
             SimpleNamespace(session_id="", session_file=None), {}
         )
+
+
+def test_claude_transcript_named_after_session_matches_despite_copied_lines(
+    tmp_path: Path,
+) -> None:
+    transcript = tmp_path / "new-session.jsonl"
+    _write_claude_session(transcript, session_id="old-session")
+
+    found = claude_code_transcript.find_session_file(
+        session_id="new-session", transcript_path=str(transcript)
+    )
+    assert found == transcript

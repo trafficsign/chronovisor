@@ -45,6 +45,10 @@ def claude_code_projects_root() -> Path:
 
 
 def _session_id_matches(path: Path, session_id: str) -> bool:
+    # Claude Code names a transcript after its session; resumed files may start
+    # with lines copied from the earlier session, so the name is checked first.
+    if path.stem == session_id:
+        return True
     for _, item in iter_jsonl(path):
         candidate_id = item.get("sessionId")
         if isinstance(candidate_id, str):

@@ -310,8 +310,6 @@ def resolve_session_file(args: argparse.Namespace, hints: dict[str, str]) -> Pat
         meta = read_session_meta(session_file)
         if session_id is not None and meta.get("id") != session_id:
             raise CodexSaveError("Codex session file does not match session_id")
-        if cwd is not None and meta.get("cwd") != cwd:
-            raise CodexSaveError("Codex session file does not match cwd")
         return session_file
 
     if session_id is None and cwd is None:

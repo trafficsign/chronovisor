@@ -152,25 +152,17 @@ def find_session_file(
     if not candidates:
         raise CodexSaveError(f"No Codex session logs found under: {root}")
 
-    if session_id is not None or cwd is not None:
-        for candidate in candidates:
-            meta = read_session_meta(candidate)
-            if session_id is not None and meta.get("id") != session_id:
-                continue
-            if cwd is not None and meta.get("cwd") != cwd:
-                continue
+    # session_id is the identity; cwd only selects when no session_id was given.
+    if session_id is not None:
+        key, value, selector = "id", session_id, "session_id"
+    elif cwd is not None:
+        key, value, selector = "cwd", cwd, "cwd"
+    else:
+        return candidates[0]
+    for candidate in candidates:
+        if read_session_meta(candidate).get(key) == value:
             return candidate
-
-        selectors = []
-        if session_id is not None:
-            selectors.append("session_id")
-        if cwd is not None:
-            selectors.append("cwd")
-        raise CodexSaveError(
-            f"No Codex session log matches {' and '.join(selectors)} under: {root}"
-        )
-
-    return candidates[0]
+    raise CodexSaveError(f"No Codex session log matches {selector} under: {root}")
 
 
 def extract_transcript_slice(path: Path, *, after_line: int = 0) -> TranscriptSlice:
