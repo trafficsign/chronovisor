@@ -154,6 +154,9 @@ def test_capture_golden_replay(
     job_dir = capture_root / "runtime" / "background-jobs"
     input_path.parent.mkdir(parents=True)
     capture_root.mkdir(parents=True)
+    # The replay is config-driven; the suite-wide isolation override would
+    # otherwise reach the capture child and select the legacy layout.
+    monkeypatch.delenv("CHRONOVISOR_RAW_LAYOUT", raising=False)
     (capture_root / "config.toml").write_text(
         '[raw]\nlayout = "v2"\n', encoding="utf-8"
     )
