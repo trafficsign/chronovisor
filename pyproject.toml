@@ -93,15 +93,13 @@ show_error_codes = true
 warn_unused_configs = true
 
 [[tool.importlinter.contracts]]
-name = "Common cannot depend on pipeline layers"
-type = "forbidden"
-source_modules = ["chronovisor.common"]
-forbidden_modules = [
-    "chronovisor.raw",
-    "chronovisor.capture",
-    "chronovisor.pages",
-    "chronovisor.index",
+name = "Pipeline layers"
+type = "layers"
+layers = [
+    "chronovisor.surface | chronovisor.hosts",
     "chronovisor.search",
-    "chronovisor.surface",
-    "chronovisor.hosts",
+    "chronovisor.index",
+    "chronovisor.pages | chronovisor.capture",
+    "chronovisor.raw",
+    "chronovisor.common",
 ]
