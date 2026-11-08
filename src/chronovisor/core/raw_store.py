@@ -14,7 +14,6 @@ import os
 import re
 import stat
 import threading
-import tomllib
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
@@ -31,6 +30,7 @@ from chronovisor.core.raw_segment import (
     read_open_range,
     read_sealed_range,
 )
+from chronovisor.core.runtime_config import load_toml_file
 from chronovisor.core.sealed_artifact_decoder import schema_matches
 
 RawLayoutMode = Literal["legacy", "shadow", "v2"]
@@ -105,10 +105,7 @@ def raw_layout_mode(
         and chronovisor_root
     ):
         config_path = chronovisor_root.expanduser() / "config.toml"
-        try:
-            payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
-        except OSError, tomllib.TOMLDecodeError:
-            payload = {}
+        payload = load_toml_file(config_path)
         raw_config = payload.get("raw") if isinstance(payload, dict) else None
         if isinstance(raw_config, dict):
             configured = raw_config.get("layout")

@@ -34,6 +34,16 @@ _LAUNCHD_PREFIX_RE = re.compile(
 _LAUNCHD_SERVICE_RE = re.compile(r"[a-z0-9][a-z0-9-]*\Z")
 
 
+class RuntimeConfigError(RuntimeError):
+    """Raised when the present runtime config cannot be read safely."""
+
+    category = "config_error"
+    permanent = True
+
+    def __init__(self) -> None:
+        super().__init__("config.toml is unreadable or invalid")
+
+
 @dataclass(frozen=True)
 class RuntimeSettings:
     source: str = DEFAULT_RUNTIME_SOURCE
@@ -292,6 +302,11 @@ def load_toml_file(
         # reopening the path while parsing can mix generations when an
         # external operator atomically replaces the runtime configuration.
         snapshot = resolved.read_bytes()
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        raise RuntimeConfigError() from None
+    try:
         data = tomllib.loads(snapshot.decode("utf-8"))
         if not isinstance(data, dict):
             return {}
@@ -309,8 +324,8 @@ def load_toml_file(
             "launchd_label_prefix": settings.launchd_label_prefix,
         }
         return normalized
-    except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError:
-        return {}
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        raise RuntimeConfigError() from None
 
 
 def env_flag(name: str) -> bool | None:
