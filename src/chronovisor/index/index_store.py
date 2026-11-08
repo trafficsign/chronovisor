@@ -1,0 +1,1465 @@
+"""Persistent canonical-page metadata and link index.
+
+Keeps derived state in ``~/.chronovisor/.index/`` and refreshes incrementally
+based on ``(mtime_ns, size, path, is_system)`` per file.
+
+Backlinks are rebuilt in full on every refresh from the canonical
+`pages.outlinks` data, both to keep them consistent with the source of
+truth and to preserve scan-order parity with the legacy implementation.
+
+The store is a process-wide singleton accessed via :func:`get_store`.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+import time
+from collections.abc import Iterable, Mapping
+from contextlib import nullcontext
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+from chronovisor.common.canonical_document import (
+    CanonicalDocumentError,
+    Namespace,
+    resolve_internal_markdown_links,
+    validate_canonical_document,
+)
+from chronovisor.common.durable_state import atomic_write
+from chronovisor.common.paths import CHRONOVISOR_ROOT, PAGES_DIR, SYSTEM_DIR
+from chronovisor.pages.store import (
+    PAGE_RESERVED_FILENAMES,
+    SYSTEM_RESERVED_FILENAMES,
+    _read_bytes_stable,
+    canonical_document_path,
+    contained_file,
+)
+
+SCHEMA_VERSION = 12  # canonical YAML, exact link identities, and lifecycle eligibility
+INDEX_DIR = CHRONOVISOR_ROOT / ".index"
+PAGES_INDEX_FILE = INDEX_DIR / "pages.json"
+BACKLINKS_INDEX_FILE = INDEX_DIR / "backlinks.json"
+VALID_LIFECYCLE_STATUSES = frozenset({"draft", "stable", "deprecated"})
+VALID_PAGE_TYPES = {
+    "knowledge",
+    "reference",
+    "episodic",
+    "semantic",
+    "procedural",
+    "state",
+    "lesson",
+    "decision",
+}
+VALID_SENSITIVITY_TIERS = {"normal", "high"}
+
+
+def _normalize_lifecycle_status(value: object) -> str:
+    if not isinstance(value, str) or value not in VALID_LIFECYCLE_STATUSES:
+        raise ValueError("invalid canonical lifecycle status")
+    return value
+
+
+def _normalize_page_type(value: object, *, path: Path | None = None) -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in VALID_PAGE_TYPES:
+            return normalized
+    if path is not None:
+        try:
+            if path.parent == SYSTEM_DIR:
+                if path.stem == "current-state":
+                    return "state"
+                if path.stem == "lessons-learned":
+                    return "lesson"
+            if path.parent.name == "car-spec":
+                return "reference"
+        except OSError:
+            pass
+    return "knowledge"
+
+
+def _normalize_sensitivity(value: object, *, path: Path | None = None) -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in VALID_SENSITIVITY_TIERS:
+            return normalized
+    if path is not None:
+        try:
+            if path.parent.name == "career":
+                return "high"
+        except OSError:
+            pass
+    return "normal"
+
+
+def canonical_document_bytes(path: Path, root: Path) -> bytes | None:
+    """Read one contained file image with the canonical scanner's drift checks."""
+
+    resolved = contained_file(path, root)
+    if resolved is None:
+        return None
+    return _read_bytes_stable(resolved, root)
+
+
+def stable_indexed_document_path(
+    metadata: Mapping[str, Any] | None,
+    *,
+    pages_dir: Path = PAGES_DIR,
+    system_dir: Path = SYSTEM_DIR,
+) -> Path | None:
+    """Revalidate one indexed identity against its exact stable namespace path."""
+
+    if (
+        not isinstance(metadata, Mapping)
+        or metadata.get("status") != "stable"
+        or not isinstance(metadata.get("path"), str)
+        or not isinstance(metadata.get("relative_path"), str)
+    ):
+        return None
+    is_system = metadata.get("is_system") is True
+    namespace: Namespace = "system" if is_system else "pages"
+    root = system_dir if is_system else pages_dir
+    resolved = canonical_document_path(
+        root / str(metadata["relative_path"]),
+        root,
+        namespace=namespace,
+        reserved_filenames=(
+            SYSTEM_RESERVED_FILENAMES if is_system else PAGE_RESERVED_FILENAMES
+        ),
+        require_stable=True,
+    )
+    return (
+        resolved
+        if resolved is not None and resolved == Path(metadata["path"])
+        else None
+    )
+
+
+def canonical_document_path_for_id(
+    page_id: str,
+    *,
+    pages_dir: Path = PAGES_DIR,
+    system_dir: Path = SYSTEM_DIR,
+    require_stable: bool = True,
+) -> Path | None:
+    """Resolve a canonical page only when its global stem is unique."""
+
+    if (
+        not page_id
+        or page_id in {".", ".."}
+        or any(char in page_id for char in "/\\\0*?[]")
+    ):
+        return None
+    try:
+        page_candidates = list(pages_dir.rglob(f"{page_id}.md"))
+    except OSError, RuntimeError:
+        page_candidates = []
+    candidates: list[tuple[Path, Path, Namespace, frozenset[str]]] = [
+        *(
+            (path, pages_dir, "pages", PAGE_RESERVED_FILENAMES)
+            for path in page_candidates
+        ),
+        (
+            system_dir / f"{page_id}.md",
+            system_dir,
+            "system",
+            SYSTEM_RESERVED_FILENAMES,
+        ),
+    ]
+    matches = {
+        resolved
+        for path, root, namespace, reserved in candidates
+        if (
+            resolved := canonical_document_path(
+                path,
+                root,
+                namespace=namespace,
+                reserved_filenames=reserved,
+                require_stable=require_stable,
+            )
+        )
+        is not None
+    }
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
+@dataclass
+class PageEntry:
+    page_id: str
+    path: str  # absolute path string for stable comparison
+    is_system: bool
+    mtime_ns: int
+    size: int
+    title: str
+    updated: str
+    relative_path: str = ""
+    uid: str = ""
+    classification_primary: str = ""
+    classification_notation: str = ""
+    classification_status: str = "unclassified"
+    outlinks: list[str] = field(
+        default_factory=list
+    )  # raw, preserves duplicates + order
+    raw_keywords: list[str] = field(default_factory=list)
+    """Frontmatter ``raw_keywords`` lifted from disk. Internal-only — not
+    surfaced via ``meta()`` / ``all_pages_meta()`` yet (that decision is
+    deferred to a separate change so the public API stays stable through
+    Phase 5). The field is kept here so future readers (search, lint,
+    distribution reports) can use it without an extra disk read."""
+    tags: list[str] = field(default_factory=list)
+    """Frontmatter ``tags`` (Tag Taxonomy v0.1: ``d/`` ``t/`` ``s/`` axes).
+    Surfaced via the dedicated ``IndexStore.tags(page_id)`` accessor and
+    via ``all_tags()`` for the dedup candidate pool. Stored as the raw
+    list from frontmatter; per-tag form validation is the responsibility
+    of ``chronovisor_check`` lint, not the index."""
+    description: str = ""
+    recall_questions: list[str] = field(default_factory=list)
+    status: str = "stable"
+    superseded_by: str = ""
+    page_type: str = "knowledge"
+    entities: list[str] = field(default_factory=list)
+    sensitivity: str = "normal"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "page_id": self.page_id,
+            "path": self.path,
+            "is_system": self.is_system,
+            "mtime_ns": self.mtime_ns,
+            "size": self.size,
+            "title": self.title,
+            "updated": self.updated,
+            "relative_path": self.relative_path,
+            "uid": self.uid,
+            "classification_primary": self.classification_primary,
+            "classification_notation": self.classification_notation,
+            "classification_status": self.classification_status,
+            "outlinks": list(self.outlinks),
+            "raw_keywords": list(self.raw_keywords),
+            "tags": list(self.tags),
+            "description": self.description,
+            "recall_questions": list(self.recall_questions),
+            "status": self.status,
+            "superseded_by": self.superseded_by,
+            "page_type": self.page_type,
+            "entities": list(self.entities),
+            "sensitivity": self.sensitivity,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> PageEntry:
+        # Defensively coerce list-of-string fields: a manually edited
+        # cache file or a future-format mismatch shouldn't crash the
+        # singleton at startup.
+        def _coerce_str_list(value: object) -> list[str]:
+            if isinstance(value, list) and all(isinstance(v, str) for v in value):
+                return list(value)
+            return []
+
+        return cls(
+            page_id=d["page_id"],
+            path=d["path"],
+            is_system=bool(d.get("is_system", False)),
+            mtime_ns=int(d["mtime_ns"]),
+            size=int(d["size"]),
+            title=d.get("title", d["page_id"]),
+            updated=d.get("updated", "unknown"),
+            relative_path=d.get("relative_path", ""),
+            uid=d.get("uid", "") if isinstance(d.get("uid", ""), str) else "",
+            classification_primary=(
+                d.get("classification_primary", "")
+                if isinstance(d.get("classification_primary", ""), str)
+                else ""
+            ),
+            classification_notation=(
+                d.get("classification_notation", "")
+                if isinstance(d.get("classification_notation", ""), str)
+                else ""
+            ),
+            classification_status=(
+                d.get("classification_status", "unclassified")
+                if isinstance(d.get("classification_status", "unclassified"), str)
+                else "unclassified"
+            ),
+            outlinks=list(d.get("outlinks", [])),
+            raw_keywords=_coerce_str_list(d.get("raw_keywords")),
+            tags=_coerce_str_list(d.get("tags")),
+            description=d.get("description", "")
+            if isinstance(d.get("description", ""), str)
+            else "",
+            recall_questions=_coerce_str_list(d.get("recall_questions")),
+            status=_normalize_lifecycle_status(d.get("status")),
+            superseded_by=d.get("superseded_by", "")
+            if isinstance(d.get("superseded_by", ""), str)
+            else "",
+            page_type=_normalize_page_type(d.get("page_type")),
+            entities=_coerce_str_list(d.get("entities")),
+            sensitivity=_normalize_sensitivity(d.get("sensitivity")),
+        )
+
+
+def _derived_indexes_changed(
+    previous: PageEntry | None,
+    current: PageEntry | None,
+) -> bool:
+    """Return whether a changed entry requires rebuilding derived indexes."""
+
+    if previous is None or current is None:
+        return True
+    return (
+        previous.page_id != current.page_id
+        or previous.is_system != current.is_system
+        or previous.relative_path != current.relative_path
+        or previous.status != current.status
+        or previous.outlinks != current.outlinks
+        or previous.tags != current.tags
+        or previous.entities != current.entities
+    )
+
+
+def _canonical_page_key(entry: PageEntry) -> str:
+    namespace = "system" if entry.is_system else "pages"
+    relative_path = PurePosixPath(entry.relative_path).with_suffix("").as_posix()
+    return f"{namespace}/{relative_path}"
+
+
+class DuplicatePageIdError(RuntimeError):
+    """Raised when two files claim the same page_id stem.
+
+    Current code keys by stem everywhere (`page_id_from_path`), so silent
+    aliasing would corrupt every lookup. We fail closed instead.
+    """
+
+
+class IndexStore:
+    """Persistent page metadata + backlinks index.
+
+    Thread-safe via an internal RLock. All public methods that read
+    derived state perform an internal lock acquisition; callers don't
+    need to hold a lock externally.
+    """
+
+    def __init__(
+        self,
+        root: Path | None = None,
+        *,
+        _index_dir: Path | None = None,
+    ) -> None:
+        if root is None:
+            if _index_dir is not None:
+                raise ValueError("custom index directory requires an explicit root")
+            self._root = CHRONOVISOR_ROOT
+            self._pages_dir = PAGES_DIR
+            self._system_dir = SYSTEM_DIR
+            self._index_dir = INDEX_DIR
+            self._pages_index_file = PAGES_INDEX_FILE
+            self._backlinks_index_file = BACKLINKS_INDEX_FILE
+        else:
+            self._root = Path(root)
+            self._pages_dir = self._root / "pages"
+            self._system_dir = self._root / "system"
+            self._index_dir = Path(_index_dir) if _index_dir else self._root / ".index"
+            self._pages_index_file = self._index_dir / "pages.json"
+            self._backlinks_index_file = self._index_dir / "backlinks.json"
+        self._lock = threading.RLock()
+        self._entries: dict[str, PageEntry] = {}
+        self._canonical_entries: dict[str, PageEntry] = {}
+        self._page_order: list[str] = []  # rglob scan order, preserved for parity
+        self._backlinks: dict[str, list[str]] = {}
+        self._tag_pages: dict[str, list[str]] = {}
+        self._entity_pages: dict[str, list[str]] = {}
+        self._loaded = False
+        self._persistence_dirty = False
+        self._last_refresh_monotonic = 0.0
+        self._cache_signature: tuple[int, int, int, int] | None = None
+        self._snapshot_generation: int | None = None
+        self._snapshot_available = False
+        self._snapshot_error: str | None = None
+
+    # -- persistence ------------------------------------------------------
+
+    def _cache_files_signature(self) -> tuple[int, int, int, int] | None:
+        try:
+            pages_stat = self._pages_index_file.stat()
+            backlinks_stat = self._backlinks_index_file.stat()
+        except OSError:
+            return None
+        return (
+            pages_stat.st_mtime_ns,
+            pages_stat.st_size,
+            backlinks_stat.st_mtime_ns,
+            backlinks_stat.st_size,
+        )
+
+    @staticmethod
+    def _valid_generation(value: object) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            return None
+        return value
+
+    def _load_from_disk(self) -> bool:
+        signature = self._cache_files_signature()
+        if signature is None:
+            return False
+        try:
+            # ``json.loads`` accepts bytes and avoids a separate Python-level
+            # UTF-8 decode for these multi-megabyte snapshots.
+            pages_doc = json.loads(self._pages_index_file.read_bytes())
+            backlinks_doc = json.loads(self._backlinks_index_file.read_bytes())
+        except OSError, UnicodeError, json.JSONDecodeError:
+            return False
+        if not isinstance(pages_doc, dict) or not isinstance(backlinks_doc, dict):
+            return False
+        if pages_doc.get("schema_version") != SCHEMA_VERSION:
+            return False
+        if backlinks_doc.get("schema_version") != SCHEMA_VERSION:
+            return False
+        # Cross-file integrity: matching generation IDs.
+        # Mismatch => one file is stale; rebuild from scratch on next refresh.
+        generation = self._valid_generation(pages_doc.get("generation"))
+        if generation is None or generation != self._valid_generation(
+            backlinks_doc.get("generation")
+        ):
+            return False
+        try:
+            raw_entries = pages_doc.get("entries")
+            raw_order = pages_doc.get("page_order")
+            raw_edges = backlinks_doc.get("edges")
+            if not isinstance(raw_entries, dict):
+                return False
+            if not isinstance(raw_order, list) or not all(
+                isinstance(pid, str) for pid in raw_order
+            ):
+                return False
+            if not isinstance(raw_edges, dict):
+                return False
+            if len(raw_order) != len(set(raw_order)):
+                return False
+            # Resolve each namespace root once.  Per-entry ``Path.resolve``
+            # made the read-only bootstrap perform thousands of filesystem
+            # lookups; canonical writers already emit normalized paths.
+            namespace_roots: dict[bool, Path] = {}
+            for is_system, root in (
+                (False, self._pages_dir),
+                (True, self._system_dir),
+            ):
+                try:
+                    if root.is_symlink():
+                        return False
+                    root_resolved = root.resolve(strict=False)
+                except OSError:
+                    return False
+                namespace_roots[is_system] = root_resolved
+            entries: dict[str, PageEntry] = {}
+            for pid, raw_entry in raw_entries.items():
+                if not isinstance(pid, str) or not isinstance(raw_entry, dict):
+                    return False
+                if not isinstance(raw_entry.get("is_system"), bool):
+                    return False
+                for field in ("mtime_ns", "size"):
+                    value = raw_entry.get(field)
+                    if (
+                        isinstance(value, bool)
+                        or not isinstance(value, int)
+                        or value < 0
+                    ):
+                        return False
+                for field in (
+                    "page_id",
+                    "path",
+                    "title",
+                    "updated",
+                    "relative_path",
+                    "uid",
+                    "classification_primary",
+                    "classification_notation",
+                    "classification_status",
+                    "status",
+                    "superseded_by",
+                    "page_type",
+                    "sensitivity",
+                ):
+                    if field in raw_entry and not isinstance(raw_entry[field], str):
+                        return False
+                for field in (
+                    "outlinks",
+                    "raw_keywords",
+                    "tags",
+                    "recall_questions",
+                    "entities",
+                ):
+                    value = raw_entry.get(field, [])
+                    if not isinstance(value, list) or not all(
+                        isinstance(item, str) for item in value
+                    ):
+                        return False
+                entry = PageEntry.from_dict(raw_entry)
+                relative_text = entry.relative_path
+                relative_parts = relative_text.split("/")
+                if (
+                    not pid
+                    or entry.page_id != pid
+                    or not entry.path.startswith("/")
+                    or not relative_text
+                    or relative_text.startswith("/")
+                    or any(part in {"", ".", ".."} for part in relative_parts)
+                    or not relative_text.endswith(".md")
+                    or relative_parts[-1][:-3] != pid
+                ):
+                    return False
+                root_resolved = namespace_roots[entry.is_system]
+                # Compare canonical strings directly; the namespace root was
+                # resolved once above and no per-entry filesystem lookup is
+                # needed for this metadata-only identity check.
+                expected_path = f"{root_resolved}/{relative_text}"
+                if entry.path != expected_path:
+                    return False
+                entries[pid] = entry
+            order = list(raw_order)
+            if set(order) != set(entries):
+                return False
+            backlinks: dict[str, list[str]] = {}
+            for target, refs in raw_edges.items():
+                if not isinstance(target, str) or not isinstance(refs, list):
+                    return False
+                if not all(isinstance(source, str) for source in refs):
+                    return False
+                if len(refs) != len(set(refs)):
+                    return False
+                if any(
+                    source not in entries or entries[source].status != "stable"
+                    for source in refs
+                ):
+                    return False
+                backlinks[target] = list(refs)
+        except KeyError, TypeError, ValueError, AttributeError:
+            return False
+        self._entries = entries
+        self._rebuild_canonical_entries()
+        self._page_order = [pid for pid in order if pid in entries]
+        self._backlinks = backlinks
+        self._rebuild_associations()
+        self._cache_signature = signature
+        self._snapshot_generation = generation
+        self._snapshot_available = True
+        self._snapshot_error = None
+        return True
+
+    def _mark_snapshot_unavailable(self, reason: str) -> None:
+        """Drop stale in-memory data so read-only callers fail closed."""
+
+        # Treat the in-memory state as unbootstrapped as well.  A later normal
+        # writer call can therefore recover by scanning and persisting a new
+        # snapshot, while read-only callers continue to receive unavailable.
+        self._loaded = False
+        self._persistence_dirty = True
+        self._entries = {}
+        self._canonical_entries = {}
+        self._page_order = []
+        self._backlinks = {}
+        self._tag_pages = {}
+        self._entity_pages = {}
+        self._cache_signature = None
+        self._snapshot_generation = None
+        self._snapshot_available = False
+        self._snapshot_error = reason
+
+    def load_existing(self) -> bool:
+        """Load a coherent writer snapshot without scanning or rebuilding.
+
+        This is the read-only bootstrap used by latency-sensitive callers.
+        A missing, malformed, or cross-file-inconsistent snapshot is an
+        explicit unavailable result; :meth:`refresh` remains the writer and
+        recovery path that performs a full reconcile.
+        """
+
+        with self._lock:
+            signature = self._cache_files_signature()
+            if (
+                self._loaded
+                and self._snapshot_available
+                and signature is not None
+                and signature == self._cache_signature
+            ):
+                return True
+            if self._load_from_disk():
+                self._loaded = True
+                self._last_refresh_monotonic = time.monotonic()
+                return True
+            self._loaded = True
+            self._mark_snapshot_unavailable("snapshot_missing_or_invalid")
+            self._last_refresh_monotonic = time.monotonic()
+            return False
+
+    @property
+    def snapshot_generation(self) -> int | None:
+        """Generation of the currently loaded writer snapshot, if any."""
+
+        with self._lock:
+            return self._snapshot_generation
+
+    @property
+    def snapshot_available(self) -> bool:
+        """Whether read-only callers may use the loaded metadata snapshot."""
+
+        with self._lock:
+            return self._snapshot_available
+
+    @property
+    def snapshot_error(self) -> str | None:
+        """Stable, non-content error class for an unavailable snapshot."""
+
+        with self._lock:
+            return self._snapshot_error
+
+    def _persist(self, generation: int) -> None:
+        self._index_dir.mkdir(parents=True, exist_ok=True)
+        pages_doc = {
+            "schema_version": SCHEMA_VERSION,
+            "generation": generation,
+            "page_order": list(self._page_order),
+            "entries": {pid: e.to_dict() for pid, e in self._entries.items()},
+        }
+        backlinks_doc = {
+            "schema_version": SCHEMA_VERSION,
+            "generation": generation,
+            "edges": {pid: list(refs) for pid, refs in self._backlinks.items()},
+        }
+        # atomic_write each file. Cross-file consistency is guarded by the
+        # shared `generation` field — readers that see mismatched generations
+        # discard both and rebuild.
+        atomic_write(
+            self._pages_index_file,
+            json.dumps(pages_doc, ensure_ascii=False),
+        )
+        atomic_write(
+            self._backlinks_index_file,
+            json.dumps(backlinks_doc, ensure_ascii=False),
+        )
+        self._cache_signature = self._cache_files_signature()
+        self._snapshot_generation = generation
+        self._snapshot_available = True
+        self._snapshot_error = None
+
+        # Publishing metadata also advances the reader's required generation.
+        # Keep an existing lexical projection in step at this shared writer
+        # boundary; Recall must never rebuild it on the synchronous read path.
+        lexical_path = self._index_dir / "lexical.sqlite"
+        if self._index_dir == self._root / ".index" and lexical_path.is_file():
+            from chronovisor.index.lexical_index import LexicalIndex
+
+            lexical = LexicalIndex(
+                path=lexical_path,
+                pages=lambda: sorted(
+                    Path(entry.path)
+                    for entry in self._entries.values()
+                    if entry.status == "stable"
+                ),
+                refresh_interval_seconds=0,
+            )
+            try:
+                lexical.build()
+            finally:
+                lexical.close()
+
+    # -- refresh ----------------------------------------------------------
+
+    def _scan_disk(self) -> list[tuple[str, Path, bool, int, int]]:
+        """Walk pages/ and system/ in deterministic order.
+
+        Returns list of (page_id, path, is_system, mtime_ns, size).
+        Pages directory comes first to mirror legacy scan order in
+        `_find_backlinks` (pages/ then system/).
+        """
+        out: list[tuple[str, Path, bool, int, int]] = []
+        for root, is_system in (
+            (self._pages_dir, False),
+            (self._system_dir, True),
+        ):
+            if not root.is_dir():
+                continue
+            for path in sorted(root.rglob("*.md")):
+                reserved = (
+                    SYSTEM_RESERVED_FILENAMES if is_system else PAGE_RESERVED_FILENAMES
+                )
+                if path.name in reserved:
+                    continue
+                resolved = contained_file(path, root)
+                if resolved is None:
+                    continue
+                try:
+                    st = resolved.stat()
+                except OSError:
+                    continue
+                out.append(
+                    (resolved.stem, resolved, is_system, st.st_mtime_ns, st.st_size)
+                )
+        return out
+
+    def refresh(self) -> None:
+        """Sync the in-memory index with disk.
+
+        Cheap when nothing changed (one stat per page, no parsing).
+        Persists only when entries or backlinks actually changed.
+        """
+        self._refresh_locked()
+
+    def _refresh_locked(self) -> None:
+        from chronovisor.common.durable_state import reentrant_exclusive_lock
+
+        publication_lock = (
+            nullcontext()
+            if os.environ.get("CHRONOVISOR_READ_ONLY") == "1"
+            else reentrant_exclusive_lock(self._index_dir / "writer.lock")
+        )
+        with publication_lock, self._lock:
+            if not self._loaded:
+                loaded_from_disk = self._load_from_disk()
+                self._loaded = True
+                if not loaded_from_disk and (
+                    self._pages_index_file.exists()
+                    or self._backlinks_index_file.exists()
+                ):
+                    # A writer refresh repairs a malformed/partial pair even
+                    # when the canonical corpus is currently empty.
+                    self._persistence_dirty = True
+
+            current = self._scan_disk()
+            seen_ids: dict[str, tuple[Path, bool, int, int]] = {}
+            duplicates: list[str] = []
+            for pid, path, is_system, mtime_ns, size in current:
+                if pid in seen_ids:
+                    duplicates.append(pid)
+                    continue
+                seen_ids[pid] = (path, is_system, mtime_ns, size)
+
+            if duplicates:
+                # Fail closed: stem collisions break every lookup keyed by
+                # stem (the existing convention). Surface the issue rather
+                # than silently dropping one of the files.
+                raise DuplicatePageIdError(
+                    f"Duplicate page_id stems detected: {sorted(set(duplicates))}"
+                )
+
+            # Diff entries.
+            old_ids = set(self._entries.keys())
+            new_ids = set(seen_ids.keys())
+            removed = old_ids - new_ids
+
+            changed = False
+            derived_changed = False
+            metadata_updates: list[PageEntry] = []
+            for pid in removed:
+                del self._entries[pid]
+                changed = True
+                derived_changed = True
+
+            for pid, (path, is_system, mtime_ns, size) in seen_ids.items():
+                existing = self._entries.get(pid)
+                path_str = str(path)
+                if existing is None:
+                    entry = self._build_entry(
+                        pid,
+                        path,
+                        is_system,
+                        mtime_ns,
+                        size,
+                        pages_dir=self._pages_dir,
+                        system_dir=self._system_dir,
+                    )
+                    if entry is not None:
+                        self._entries[pid] = entry
+                        changed = True
+                        derived_changed = True
+                    continue
+                # Re-parse if any of (mtime_ns, size, path, is_system) differs.
+                if (
+                    existing.mtime_ns != mtime_ns
+                    or existing.size != size
+                    or existing.path != path_str
+                    or existing.is_system != is_system
+                ):
+                    entry = self._build_entry(
+                        pid,
+                        path,
+                        is_system,
+                        mtime_ns,
+                        size,
+                        pages_dir=self._pages_dir,
+                        system_dir=self._system_dir,
+                    )
+                    if entry is not None:
+                        self._entries[pid] = entry
+                        changed = True
+                        if _derived_indexes_changed(existing, entry):
+                            derived_changed = True
+                        else:
+                            metadata_updates.append(entry)
+                    else:
+                        del self._entries[pid]
+                        changed = True
+                        derived_changed = True
+
+            new_order = [pid for pid, *_ in current if pid in self._entries]
+            if self._page_order != new_order:
+                self._page_order = new_order
+                changed = True
+                derived_changed = True
+
+            if changed:
+                if derived_changed:
+                    self._rebuild_canonical_entries()
+                    self._rebuild_backlinks()
+                    self._rebuild_associations()
+                elif metadata_updates:
+                    self._canonical_entries = self._canonical_entries.copy()
+                    for entry in metadata_updates:
+                        self._canonical_entries[_canonical_page_key(entry)] = entry
+                self._persistence_dirty = True
+            if (
+                self._persistence_dirty
+                and os.environ.get("CHRONOVISOR_READ_ONLY") != "1"
+            ):
+                generation = self._next_generation()
+                try:
+                    self._persist(generation)
+                except OSError:
+                    # Persistence failure is non-fatal; in-memory index is
+                    # still consistent and the next refresh retries the same
+                    # snapshot even if disk content has not changed again.
+                    pass
+                else:
+                    self._persistence_dirty = False
+            # Explicit refresh is also the supported recovery path when no
+            # persisted snapshot exists (for example the first writer run).
+            self._snapshot_available = True
+            self._snapshot_error = None
+            self._last_refresh_monotonic = time.monotonic()
+
+    def refresh_if_stale(self, max_age_seconds: float = 2.0) -> None:
+        """Reload a newer writer snapshot without walking the page corpus.
+
+        A recall request consults metadata through several independent
+        retrieval channels. They must share one coherent snapshot instead of
+        each walking every page on disk. Explicit ``refresh()`` remains the
+        bootstrap, recovery, and administrative full-reconcile operation.
+        """
+
+        with self._lock:
+            if not self._loaded:
+                if os.environ.get("CHRONOVISOR_READ_ONLY") == "1":
+                    # Read-only bootstrap: never turn an unavailable snapshot
+                    # into a corpus-wide synchronous rebuild.
+                    self.load_existing()
+                    return
+                needs_bootstrap = True
+            elif not self._snapshot_available:
+                if os.environ.get("CHRONOVISOR_READ_ONLY") == "1":
+                    if self._load_from_disk():
+                        self._last_refresh_monotonic = time.monotonic()
+                        return
+                    self._mark_snapshot_unavailable("snapshot_missing_or_invalid")
+                    self._last_refresh_monotonic = time.monotonic()
+                    return
+                needs_bootstrap = True
+            elif (
+                self._last_refresh_monotonic
+                and time.monotonic() - self._last_refresh_monotonic
+                < max(0.0, max_age_seconds)
+            ):
+                return
+            else:
+                signature = self._cache_files_signature()
+                needs_bootstrap = False
+                if signature is None:
+                    needs_bootstrap = True
+                elif signature != self._cache_signature:
+                    needs_bootstrap = not self._load_from_disk()
+                if needs_bootstrap and os.environ.get("CHRONOVISOR_READ_ONLY") == "1":
+                    self._mark_snapshot_unavailable("snapshot_missing_or_invalid")
+                    self._last_refresh_monotonic = time.monotonic()
+                    return
+                if not needs_bootstrap:
+                    self._last_refresh_monotonic = time.monotonic()
+                    return
+                self._mark_snapshot_unavailable("snapshot_missing_or_invalid")
+        if needs_bootstrap:
+            self.refresh()
+        return
+
+    def ensure_loaded(self) -> None:
+        """Build the corpus snapshot once, then reuse it until a writer updates it."""
+
+        with self._lock:
+            if self._loaded:
+                return
+        self.refresh()
+
+    def apply_changes(
+        self,
+        upsert_paths: Iterable[Path],
+        *,
+        removed_page_ids: Iterable[str] = (),
+    ) -> None:
+        """Apply an exact writer receipt without walking the whole corpus."""
+
+        paths = tuple(dict.fromkeys(Path(path) for path in upsert_paths))
+        removed = {page_id for page_id in removed_page_ids if page_id}
+        self.ensure_loaded()
+
+        updates: dict[str, PageEntry] = {}
+        for path in paths:
+            entry: PageEntry | None = None
+            for root, is_system, reserved in (
+                (self._pages_dir, False, PAGE_RESERVED_FILENAMES),
+                (self._system_dir, True, SYSTEM_RESERVED_FILENAMES),
+            ):
+                resolved = contained_file(path, root)
+                if resolved is None:
+                    continue
+                if resolved.name in reserved:
+                    break
+                stat = resolved.stat()
+                entry = self._build_entry(
+                    resolved.stem,
+                    resolved,
+                    is_system,
+                    stat.st_mtime_ns,
+                    stat.st_size,
+                    pages_dir=self._pages_dir,
+                    system_dir=self._system_dir,
+                )
+                break
+            if entry is None:
+                raise CanonicalDocumentError(
+                    f"changed page is not a canonical document: {path}"
+                )
+            previous = updates.get(entry.page_id)
+            if previous is not None and previous.path != entry.path:
+                raise DuplicatePageIdError(
+                    f"Duplicate page_id stems detected: {[entry.page_id]}"
+                )
+            updates[entry.page_id] = entry
+
+        overlap = removed & updates.keys()
+        if overlap:
+            raise ValueError(
+                f"page ids cannot be removed and upserted together: {sorted(overlap)}"
+            )
+
+        from chronovisor.common.durable_state import reentrant_exclusive_lock
+
+        publication_lock = (
+            nullcontext()
+            if os.environ.get("CHRONOVISOR_READ_ONLY") == "1"
+            else reentrant_exclusive_lock(self._index_dir / "writer.lock")
+        )
+        with publication_lock, self._lock:
+            # Another writer may have published since ensure_loaded(). Merge
+            # this receipt into that snapshot rather than dropping its changes.
+            if self._cache_files_signature() != self._cache_signature:
+                if self._persistence_dirty:
+                    # Recover unpublished canonical changes as well as the
+                    # other writer's changes after a failed publication.
+                    self._refresh_locked()
+                elif not self._load_from_disk():
+                    raise OSError("cannot load the latest metadata writer snapshot")
+            for page_id, entry in updates.items():
+                existing = self._entries.get(page_id)
+                if (
+                    existing is not None
+                    and existing.path != entry.path
+                    and Path(existing.path).exists()
+                ):
+                    raise DuplicatePageIdError(
+                        f"Duplicate page_id stems detected: {[page_id]}"
+                    )
+            previous_state = (
+                self._entries,
+                self._canonical_entries,
+                self._page_order,
+                self._backlinks,
+                self._tag_pages,
+                self._entity_pages,
+                self._persistence_dirty,
+                self._cache_signature,
+                self._last_refresh_monotonic,
+                self._snapshot_generation,
+                self._snapshot_available,
+                self._snapshot_error,
+            )
+            next_entries = dict(self._entries)
+            changed = False
+            derived_changed = False
+            metadata_updates: list[PageEntry] = []
+            for page_id in removed:
+                previous = next_entries.pop(page_id, None)
+                if previous is not None:
+                    changed = True
+                    derived_changed = True
+            for page_id, entry in updates.items():
+                existing = next_entries.get(page_id)
+                if existing != entry:
+                    next_entries[page_id] = entry
+                    changed = True
+                    if _derived_indexes_changed(existing, entry):
+                        derived_changed = True
+                    elif existing is not None:
+                        metadata_updates.append(entry)
+
+            try:
+                if changed:
+                    self._entries = next_entries
+                    ordered = sorted(
+                        self._entries.values(),
+                        key=lambda entry: (entry.is_system, entry.path),
+                    )
+                    new_order = [entry.page_id for entry in ordered]
+                    if self._page_order != new_order:
+                        self._page_order = new_order
+                        derived_changed = True
+                    if derived_changed:
+                        self._rebuild_canonical_entries()
+                        self._rebuild_backlinks()
+                        self._rebuild_associations()
+                    elif metadata_updates:
+                        self._canonical_entries = self._canonical_entries.copy()
+                        for updated_entry in metadata_updates:
+                            self._canonical_entries[
+                                _canonical_page_key(updated_entry)
+                            ] = updated_entry
+                    self._persistence_dirty = True
+                if (
+                    self._persistence_dirty
+                    and os.environ.get("CHRONOVISOR_READ_ONLY") != "1"
+                ):
+                    self._persist(self._next_generation())
+                    self._persistence_dirty = False
+                self._last_refresh_monotonic = time.monotonic()
+            except Exception:
+                (
+                    self._entries,
+                    self._canonical_entries,
+                    self._page_order,
+                    self._backlinks,
+                    self._tag_pages,
+                    self._entity_pages,
+                    self._persistence_dirty,
+                    self._cache_signature,
+                    self._last_refresh_monotonic,
+                    self._snapshot_generation,
+                    self._snapshot_available,
+                    self._snapshot_error,
+                ) = previous_state
+                raise
+
+    @staticmethod
+    def _build_entry(
+        pid: str,
+        path: Path,
+        is_system: bool,
+        mtime_ns: int,
+        size: int,
+        *,
+        pages_dir: Path | None = None,
+        system_dir: Path | None = None,
+    ) -> PageEntry | None:
+        root = (system_dir or SYSTEM_DIR) if is_system else (pages_dir or PAGES_DIR)
+        resolved = contained_file(path, root)
+        if resolved is None:
+            return None
+        data = _read_bytes_stable(resolved, root)
+        if data is None:
+            return None
+        try:
+            namespace: Namespace = "system" if is_system else "pages"
+            relative_path = resolved.relative_to(root.resolve(strict=True)).as_posix()
+            document = validate_canonical_document(
+                data,
+                namespace=namespace,
+                path=relative_path,
+            )
+            status = _normalize_lifecycle_status(document.metadata.get("status"))
+            resolved_links = resolve_internal_markdown_links(
+                document.body,
+                source_namespace=namespace,
+                source_path=relative_path,
+            )
+        except CanonicalDocumentError, OSError, RuntimeError, ValueError:
+            return None
+        fm = document.metadata
+        title_value = fm.get("title")
+        title = title_value if isinstance(title_value, str) else resolved.stem
+        updated = str(fm.get("updated") or "unknown")
+        outlinks = [
+            f"{link.namespace}/{PurePosixPath(link.path).with_suffix('').as_posix()}"
+            for link in resolved_links
+            if PurePosixPath(link.path).name
+            not in (
+                SYSTEM_RESERVED_FILENAMES
+                if link.namespace == "system"
+                else PAGE_RESERVED_FILENAMES
+            )
+        ]
+
+        # raw_keywords / tags: trust the frontmatter only when it's an
+        # actual ``list[str]``. Anything else (scalar string, missing,
+        # broken cache from a manual edit) collapses to an empty list so
+        # the rest of the system can rely on the type without
+        # re-validating.
+        def _coerce_str_list(value: object) -> list[str]:
+            if isinstance(value, list) and all(isinstance(v, str) for v in value):
+                return list(value)
+            return []
+
+        return PageEntry(
+            page_id=pid,
+            path=str(resolved),
+            is_system=is_system,
+            mtime_ns=mtime_ns,
+            size=size,
+            title=title,
+            updated=updated,
+            relative_path=relative_path,
+            uid=fm.get("uid", "") if isinstance(fm.get("uid", ""), str) else "",
+            classification_primary=(
+                fm.get("classification_primary", "")
+                if isinstance(fm.get("classification_primary", ""), str)
+                else ""
+            ),
+            classification_notation=(
+                fm.get("classification_notation", "")
+                if isinstance(fm.get("classification_notation", ""), str)
+                else ""
+            ),
+            classification_status=(
+                fm.get("classification_status", "unclassified")
+                if isinstance(fm.get("classification_status", "unclassified"), str)
+                else "unclassified"
+            ),
+            outlinks=outlinks,
+            raw_keywords=_coerce_str_list(fm.get("raw_keywords")),
+            tags=_coerce_str_list(fm.get("tags")),
+            description=fm.get("description", "")
+            if isinstance(fm.get("description", ""), str)
+            else "",
+            recall_questions=_coerce_str_list(fm.get("recall_questions")),
+            status=status,
+            superseded_by=fm.get("superseded_by", "")
+            if isinstance(fm.get("superseded_by", ""), str)
+            else "",
+            page_type=_normalize_page_type(fm.get("type"), path=path),
+            entities=_coerce_str_list(fm.get("entities")),
+            sensitivity=_normalize_sensitivity(fm.get("sensitivity"), path=path),
+        )
+
+    def _rebuild_backlinks(self) -> None:
+        """Rebuild `_backlinks` in scan order.
+
+        Iterates `self._page_order` (rglob order, pages/ then system/) and
+        appends each source page_id once per target. Sources within a
+        target's list are deduplicated (a single page that links to the
+        same target twice contributes one backlink edge), matching the
+        existing `_find_backlinks` semantics.
+
+        Edges are recorded for *all* targets present in any outlinks list,
+        whether or not the target page exists today. This matches the
+        current behaviour and lets a freshly-created page see its
+        pre-existing inbound references immediately.
+        """
+        backlinks: dict[str, list[str]] = {}
+        seen: dict[str, set[str]] = {}
+        for source_pid in self._page_order:
+            entry = self._entries.get(source_pid)
+            if entry is None or entry.status != "stable":
+                continue
+            for target in entry.outlinks:
+                target_entry = self._canonical_entries.get(target)
+                if target_entry is not None and target_entry.page_id == source_pid:
+                    continue
+                if target_entry is not None and target_entry.status != "stable":
+                    continue
+                target_pid = (
+                    target_entry.page_id if target_entry is not None else target
+                )
+                src_set = seen.setdefault(target_pid, set())
+                if source_pid in src_set:
+                    continue
+                src_set.add(source_pid)
+                backlinks.setdefault(target_pid, []).append(source_pid)
+        self._backlinks = backlinks
+
+    def _rebuild_canonical_entries(self) -> None:
+        self._canonical_entries = {
+            (
+                f"{'system' if entry.is_system else 'pages'}/"
+                f"{PurePosixPath(entry.relative_path).with_suffix('').as_posix()}"
+            ): entry
+            for entry in self._entries.values()
+        }
+
+    def _rebuild_associations(self) -> None:
+        tag_pages: dict[str, list[str]] = {}
+        entity_pages: dict[str, list[str]] = {}
+        for page_id in self._page_order:
+            entry = self._entries.get(page_id)
+            if entry is None or entry.status != "stable":
+                continue
+            for tag in dict.fromkeys(entry.tags):
+                tag_pages.setdefault(tag, []).append(page_id)
+            for entity in dict.fromkeys(entry.entities):
+                entity_pages.setdefault(entity.casefold(), []).append(page_id)
+        self._tag_pages = tag_pages
+        self._entity_pages = entity_pages
+
+    def _next_generation(self) -> int:
+        # Use mtime-of-process-clock surrogate via a monotonically increasing
+        # counter tied to the wall clock. We don't actually need wall time;
+        # any value that increases with every persist is fine.
+        import time
+
+        return time.time_ns()
+
+    # -- public read API --------------------------------------------------
+
+    def meta(self, page_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            entry = self._entries.get(page_id)
+            if entry is None:
+                return None
+            return {
+                "page_id": entry.page_id,
+                "title": entry.title,
+                "updated": entry.updated,
+                "uid": entry.uid,
+                "classification_primary": entry.classification_primary,
+                "classification_notation": entry.classification_notation,
+                "classification_status": entry.classification_status,
+                "path": entry.path,
+                "relative_path": entry.relative_path,
+                "mtime_ns": entry.mtime_ns,
+                "is_system": entry.is_system,
+                "namespace": "system" if entry.is_system else "pages",
+                "description": entry.description,
+                # Compatibility projection while downstream consumers move to OKF
+                # ``description``; canonical input never reads legacy ``summary``.
+                "summary": entry.description,
+                "recall_questions": list(entry.recall_questions),
+                "status": entry.status,
+                "superseded_by": entry.superseded_by,
+                "page_type": entry.page_type,
+                "entities": list(entry.entities),
+                "sensitivity": entry.sensitivity,
+            }
+
+    def outlinks(self, page_id: str) -> list[str]:
+        """Return exact-source links to stable or not-yet-indexed targets."""
+        with self._lock:
+            entry = self._entries.get(page_id)
+            if entry is None:
+                return []
+            projected: list[str] = []
+            for target in entry.outlinks:
+                target_entry = self._canonical_entries.get(target)
+                if target_entry is not None and target_entry.status != "stable":
+                    continue
+                projected.append(
+                    target_entry.page_id if target_entry is not None else target
+                )
+            return projected
+
+    def canonical_outlinks(self, page_id: str) -> list[str]:
+        """Return exact ``namespace/path`` identities for canonical links."""
+
+        with self._lock:
+            entry = self._entries.get(page_id)
+            if entry is None:
+                return []
+            return list(entry.outlinks)
+
+    def all_canonical_page_keys(self, include_system: bool = False) -> set[str]:
+        """Return exact ``namespace/path`` identities for stable documents."""
+
+        with self._lock:
+            return {
+                (
+                    f"{'system' if entry.is_system else 'pages'}/"
+                    f"{PurePosixPath(entry.relative_path).with_suffix('').as_posix()}"
+                )
+                for entry in self._entries.values()
+                if entry.status == "stable" and (include_system or not entry.is_system)
+            }
+
+    def raw_keywords(self, page_id: str) -> list[str]:
+        """Return the page's frontmatter ``raw_keywords`` list.
+
+        Empty list if the page has no field, the value isn't a clean
+        ``list[str]``, or the page is unknown — callers don't need to
+        distinguish "absent" from "empty" because both mean "no
+        keyword-driven signal to use here". Surfaced as a dedicated
+        method (rather than a key on ``meta()``) so the public meta
+        contract stays stable; downstream features that need keywords
+        (search expansion, distribution reports, link suggestions)
+        can opt in by calling this directly.
+        """
+        with self._lock:
+            entry = self._entries.get(page_id)
+            return list(entry.raw_keywords) if entry else []
+
+    def tags(self, page_id: str) -> list[str]:
+        """Return the page's frontmatter ``tags`` list."""
+        with self._lock:
+            entry = self._entries.get(page_id)
+            return list(entry.tags) if entry else []
+
+    def all_tags(self, include_system: bool = False) -> list[str]:
+        """Return every distinct tag across the corpus, sorted.
+
+        Used by ingest's ``dedupe_with_existing`` step (existing-tag
+        preference at >= 0.80 cosine similarity) and by
+        ``chronovisor_search``'s tag filter to surface the available filter
+        values.
+        """
+        with self._lock:
+            seen: set[str] = set()
+            for entry in self._entries.values():
+                if entry.status != "stable" or (not include_system and entry.is_system):
+                    continue
+                seen.update(entry.tags)
+            return sorted(seen)
+
+    def backlinks(self, page_id: str) -> list[str]:
+        """Return source page_ids that link to `page_id`, in scan order."""
+        with self._lock:
+            return list(self._backlinks.get(page_id, []))
+
+    def pages_for_tag(self, tag: str) -> list[str]:
+        with self._lock:
+            return list(self._tag_pages.get(tag, []))
+
+    def pages_for_entity(self, entity: str) -> list[str]:
+        with self._lock:
+            return list(self._entity_pages.get(entity.casefold(), []))
+
+    def all_page_ids(self, include_system: bool = False) -> set[str]:
+        with self._lock:
+            return {
+                pid
+                for pid, entry in self._entries.items()
+                if entry.status == "stable" and (include_system or not entry.is_system)
+            }
+
+    def all_pages_meta(self, include_system: bool = False) -> list[dict[str, Any]]:
+        """Return meta dicts for every page, in mtime-descending order.
+
+        Mirrors `chronovisor_index`'s sort: `path.stat().st_mtime` desc. We sort
+        by `mtime_ns` desc — equivalent ordering modulo nanosecond ties,
+        which Python's stable sort resolves identically to legacy
+        behaviour for any practical case.
+        """
+        with self._lock:
+            items = [
+                entry
+                for entry in self._entries.values()
+                if entry.status == "stable" and (include_system or not entry.is_system)
+            ]
+            items.sort(key=lambda e: e.mtime_ns, reverse=True)
+            return [
+                {
+                    "page_id": e.page_id,
+                    "title": e.title,
+                    "updated": e.updated,
+                    "uid": e.uid,
+                    "classification_primary": e.classification_primary,
+                    "classification_notation": e.classification_notation,
+                    "classification_status": e.classification_status,
+                    "description": e.description,
+                    "status": e.status,
+                    "superseded_by": e.superseded_by,
+                    "page_type": e.page_type,
+                    "entities": list(e.entities),
+                    "sensitivity": e.sensitivity,
+                }
+                for e in items
+            ]
+
+    def page_type(self, page_id: str) -> str:
+        with self._lock:
+            entry = self._entries.get(page_id)
+            return entry.page_type if entry else "knowledge"
+
+    def sensitivity(self, page_id: str) -> str:
+        with self._lock:
+            entry = self._entries.get(page_id)
+            return entry.sensitivity if entry else "normal"
+
+    def orphans(self, include_system: bool = False) -> list[str]:
+        """Page IDs with no inbound backlinks (excluding self-links)."""
+        with self._lock:
+            out: list[str] = []
+            for pid in self._page_order:
+                entry = self._entries.get(pid)
+                if entry is None or entry.status != "stable":
+                    continue
+                if entry.is_system and not include_system:
+                    continue
+                if not self._backlinks.get(pid):
+                    out.append(pid)
+            return out
+
+    def page_count(self, include_system: bool = False) -> int:
+        with self._lock:
+            if include_system:
+                return sum(
+                    1 for entry in self._entries.values() if entry.status == "stable"
+                )
+            return sum(
+                1
+                for entry in self._entries.values()
+                if entry.status == "stable" and not entry.is_system
+            )
+
+    def corpus_version(self) -> str:
+        """Stable fingerprint of the current corpus state.
+
+        Hash inputs are `(page_id, mtime_ns, is_system)` for every entry,
+        sorted by page_id. Two refreshes that produced identical entries
+        return identical fingerprints; any add / remove / mtime change /
+        pages⇄system move flips the hash. Suitable as a memoization key
+        for derived results that depend solely on the corpus (e.g. lint).
+
+        Note: callers whose results also depend on external state (clock,
+        config) must mix that into their own key on top of this one.
+        """
+        import hashlib
+
+        with self._lock:
+            items = sorted(
+                (pid, e.mtime_ns, int(e.is_system)) for pid, e in self._entries.items()
+            )
+        h = hashlib.sha256()
+        for pid, mt, sysflag in items:
+            h.update(pid.encode("utf-8"))
+            h.update(b"\x00")
+            h.update(str(mt).encode("ascii"))
+            h.update(b"\x00")
+            h.update(b"1" if sysflag else b"0")
+            h.update(b"\x01")
+        return h.hexdigest()
+
+
+_store_lock = threading.Lock()
+_store: IndexStore | None = None
+
+
+def get_store() -> IndexStore:
+    """Return the process-wide IndexStore singleton."""
+    global _store
+    if _store is None:
+        with _store_lock:
+            if _store is None:
+                _store = IndexStore()
+    return _store

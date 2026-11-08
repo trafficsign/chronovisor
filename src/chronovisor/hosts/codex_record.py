@@ -1,10 +1,10 @@
-"""Compatibility alias for the raw Codex record module."""
+"""Persisted job module name (background-jobs state.json, hook_dispatcher). Do not move or delete."""
 
 from __future__ import annotations
 
 import sys
 
-from chronovisor.raw import codex_record as _codex_record
+from chronovisor.capture import codex_record as _codex_record
 
 
 def main(argv: list[str] | None = None) -> int:

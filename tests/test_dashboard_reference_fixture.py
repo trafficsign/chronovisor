@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.ops import dashboard
+from chronovisor.surface import dashboard
 
 
 def _chrome() -> str:

@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.core.index_store import IndexStore
-from chronovisor.core.lexical_index import LexicalIndex
+from chronovisor.index.index_store import IndexStore
+from chronovisor.index.lexical_index import LexicalIndex
 
 
 def test_inverted_bm25_and_anchor_channels_find_japanese_and_metadata(

@@ -14,8 +14,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.core import background_jobs
-from chronovisor.hosts import hook_dispatcher, server
+from chronovisor.capture import background_jobs
+from chronovisor.surface import hook_dispatcher
+from chronovisor.surface import mcp_server as server
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -326,7 +327,7 @@ def test_sweeper_recovers_both_hosts_and_appends_byte_exact_tails(tmp_path):
             [
                 sys.executable,
                 "-m",
-                "chronovisor.ops.session_sweeper",
+                "chronovisor.capture.session_sweeper",
                 "--limit",
                 "8",
                 "--idle-seconds",
@@ -391,7 +392,7 @@ def test_capture_wrapper_runs_one_entrypoint(tmp_path):
 
 
 def test_capture_init_does_not_chmod_a_raw_symlink(tmp_path):
-    from chronovisor.core.paths import RuntimeContext, init_chronovisor
+    from chronovisor.common.paths import RuntimeContext, init_chronovisor
 
     outside = tmp_path / "outside"
     outside.mkdir(mode=0o755)
@@ -404,7 +405,7 @@ def test_capture_init_does_not_chmod_a_raw_symlink(tmp_path):
 
 
 def test_read_links_and_search_expansion_keep_read_only_indexes(tmp_path, monkeypatch):
-    from chronovisor.core.index_store import IndexStore
+    from chronovisor.index.index_store import IndexStore
 
     pages = tmp_path / "pages"
     pages.mkdir()
@@ -446,7 +447,7 @@ def test_read_links_and_search_expansion_keep_read_only_indexes(tmp_path, monkey
 def test_existing_page_registry_redirects_remain_read_only_and_contained(
     tmp_path, monkeypatch
 ):
-    from chronovisor.core.page_registry import PageRegistry
+    from chronovisor.index.page_registry import PageRegistry
 
     uid = "019f0000-0000-7000-8000-000000000001"
     retired_uid = "019f0000-0000-7000-8000-000000000002"

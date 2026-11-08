@@ -6,9 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.core import background_jobs
-from chronovisor.core.transcript import ClaudeCodeSaveError, CodexSaveError
-from chronovisor.raw import claude_code_record, codex_record
+from chronovisor.capture import background_jobs, claude_code_record, codex_record
+from chronovisor.capture.transcript import ClaudeCodeSaveError, CodexSaveError
 
 
 def _configure_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

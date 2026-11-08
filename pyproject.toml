@@ -10,15 +10,15 @@ dependencies = [
 ]
 
 [project.scripts]
-chronovisor-dashboard = "chronovisor.ops.dashboard:main"
-chronovisor-mcp = "chronovisor.hosts.server:main"
-chronovisor-hook = "chronovisor.hosts.hook_dispatcher:main"
+chronovisor-dashboard = "chronovisor.surface.dashboard:main"
+chronovisor-mcp = "chronovisor.surface.mcp_server:main"
+chronovisor-hook = "chronovisor.surface.hook_dispatcher:main"
 chronovisor-codex-record = "chronovisor.hosts.codex_record:main"
 chronovisor-claude-code-record = "chronovisor.hosts.claude_code_record:main"
-chronovisor-session-sweeper = "chronovisor.ops.session_sweeper:main"
-chronovisor-capture = "chronovisor.ops.capture:main"
-chronovisor-search-eval = "chronovisor.ops.search_eval:main"
-chronovisor-background-jobs = "chronovisor.ops.background_jobs:main"
+chronovisor-session-sweeper = "chronovisor.capture.session_sweeper:main"
+chronovisor-capture = "chronovisor.capture.cycle:main"
+chronovisor-search-eval = "chronovisor.surface.search_eval:main"
+chronovisor-background-jobs = "chronovisor.capture.background_jobs:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -53,20 +53,55 @@ ignore = ["UP042", "SIM105", "SIM115", "SIM117"]
 
 [tool.ruff.lint.per-file-ignores]
 # TYPE_CHECKING-only names must stay strings for runtime signature inspection.
-"src/chronovisor/core/store.py" = ["UP037"]
+"src/chronovisor/pages/store.py" = ["UP037"]
 
 [tool.mypy]
-files = ["src/chronovisor/core"]
+files = [
+    "src/chronovisor/common/__init__.py",
+    "src/chronovisor/common/canonical_json.py",
+    "src/chronovisor/common/canonical_document.py",
+    "src/chronovisor/common/durable_state.py",
+    "src/chronovisor/common/hashutil.py",
+    "src/chronovisor/common/timeutil.py",
+    "src/chronovisor/common/config.py",
+    "src/chronovisor/common/paths.py",
+    "src/chronovisor/raw/raw_segment.py",
+    "src/chronovisor/raw/raw_store.py",
+    "src/chronovisor/raw/legacy_archive.py",
+    "src/chronovisor/raw/legacy_frontmatter.py",
+    "src/chronovisor/raw/sealed_artifact_decoder.py",
+    "src/chronovisor/raw/save_transaction.py",
+    "src/chronovisor/capture/transcript.py",
+    "src/chronovisor/capture/claude_code_transcript.py",
+    "src/chronovisor/capture/codex_transcript.py",
+    "src/chronovisor/capture/background_jobs.py",
+    "src/chronovisor/capture/capture_status.py",
+    "src/chronovisor/pages/page_identity.py",
+    "src/chronovisor/pages/frontmatter.py",
+    "src/chronovisor/pages/markdown_sections.py",
+    "src/chronovisor/pages/link_fix.py",
+    "src/chronovisor/pages/store.py",
+    "src/chronovisor/index/index_store.py",
+    "src/chronovisor/index/lexical_index.py",
+    "src/chronovisor/index/page_registry.py",
+    "src/chronovisor/index/alias_store.py",
+    "src/chronovisor/index/search_types.py",
+    "src/chronovisor/search/search.py",
+]
 strict = true
 show_error_codes = true
 warn_unused_configs = true
 
 [[tool.importlinter.contracts]]
-name = "Core cannot depend on domain or outer layers"
+name = "Common cannot depend on pipeline layers"
 type = "forbidden"
-source_modules = ["chronovisor.core"]
+source_modules = ["chronovisor.common"]
 forbidden_modules = [
     "chronovisor.raw",
-    "chronovisor.ops",
+    "chronovisor.capture",
+    "chronovisor.pages",
+    "chronovisor.index",
+    "chronovisor.search",
+    "chronovisor.surface",
     "chronovisor.hosts",
 ]

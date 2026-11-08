@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from chronovisor.core.raw_segment import (
+from chronovisor.raw.raw_segment import (
     RawSegmentCorrupt,
     append_capture,
     copy_source_interval,
@@ -342,7 +342,7 @@ def test_append_never_reopens_part_with_published_seal_manifest(
 def test_commit_serialization_retains_exact_fields_hash_and_copy_semantics(tmp_path: Path) -> None:
     from dataclasses import asdict, replace
 
-    from chronovisor.core.canonical_json import canonical_json_sha256_strict
+    from chronovisor.common.canonical_json import canonical_json_sha256_strict
 
     source = tmp_path / "source.jsonl"
     commit = _append(tmp_path / "raw", source, _source(source)).commit

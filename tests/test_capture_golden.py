@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.core import background_jobs
+from chronovisor.capture import background_jobs
 
 
 @dataclass(frozen=True)

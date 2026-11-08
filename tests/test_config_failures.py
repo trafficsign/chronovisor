@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.core import runtime_config
-from chronovisor.core.raw_store import raw_layout_mode
-from chronovisor.core.runtime_config import RuntimeConfigError
+from chronovisor.common import config as runtime_config
+from chronovisor.common.config import RuntimeConfigError
+from chronovisor.raw.raw_store import raw_layout_mode
 
 
 def _assert_safe_config_error(exc: BaseException) -> None:

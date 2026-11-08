@@ -15,7 +15,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from chronovisor.ops import dashboard
+from chronovisor.surface import dashboard
 
 
 def test_dashboard_private_client_scope_rejects_public_addresses() -> None:
@@ -754,7 +754,7 @@ def test_capture_snapshot_filters_retired_jobs_and_never_exposes_input(
 
 
 def test_last_capture_uses_the_current_job_producer_schema(tmp_path, monkeypatch):
-    from chronovisor.core import background_jobs
+    from chronovisor.capture import background_jobs
 
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
     job_dir = tmp_path / "runtime/background-jobs"
@@ -790,7 +790,7 @@ def test_last_capture_uses_the_current_job_producer_schema(tmp_path, monkeypatch
 def test_save_history_only_counts_raw_captures_without_materializing(
     tmp_path, monkeypatch
 ):
-    from chronovisor.core.raw_segment import append_capture
+    from chronovisor.raw.raw_segment import append_capture
 
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
     raw = tmp_path / "raw"
@@ -901,7 +901,7 @@ def test_retired_dashboard_routes_are_absent_and_errors_do_not_disclose(
 def test_capture_snapshot_reads_capture_status_instead_of_job_timestamps(
     tmp_path, monkeypatch
 ):
-    from chronovisor.core import capture_status
+    from chronovisor.capture import capture_status
 
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
     state = tmp_path / "runtime/background-jobs/state.json"

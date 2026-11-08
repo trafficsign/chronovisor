@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from chronovisor.core.raw_segment import RawSegmentCorrupt
-from chronovisor.core.save_transaction import find_published_save_transaction
+from chronovisor.raw.raw_segment import RawSegmentCorrupt
+from chronovisor.raw.save_transaction import find_published_save_transaction
 
 
 def test_corrupt_journal_stops_recovery_without_leaking_or_replacing_bytes(tmp_path):

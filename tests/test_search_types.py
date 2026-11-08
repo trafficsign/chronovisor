@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from chronovisor.core.search_types import tokenize
+from chronovisor.index.search_types import tokenize
 
 
 def test_tokenize_treats_malformed_leading_frontmatter_as_query_text() -> None:

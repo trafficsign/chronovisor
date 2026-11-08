@@ -10,10 +10,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.durable_state import fsync_directory
-from chronovisor.core.legacy_frontmatter import patch as patch_frontmatter
-from chronovisor.core.paths import RAW_DIR
-from chronovisor.core.save_transaction import parse_save_transaction_receipt
+from chronovisor.common.durable_state import fsync_directory
+from chronovisor.common.paths import RAW_DIR
+from chronovisor.raw.legacy_frontmatter import patch as patch_frontmatter
+from chronovisor.raw.save_transaction import parse_save_transaction_receipt
 
 RAW_PREFIX_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 RAW_SLUG_TOKEN_RE = re.compile(r"[a-zA-Z0-9]+")
@@ -139,8 +139,8 @@ def raw_readable_component(prefix: str, topic_slug: str) -> str:
 
 
 def raw_candidate_path(prefix: str = "", topic_slug: str = "") -> Path:
-    from chronovisor.core.raw_segment import capture_date
-    from chronovisor.core.raw_store import raw_layout_mode
+    from chronovisor.raw.raw_segment import capture_date
+    from chronovisor.raw.raw_store import raw_layout_mode
 
     readable = raw_readable_component(prefix, topic_slug)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")

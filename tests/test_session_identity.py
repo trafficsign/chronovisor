@@ -8,9 +8,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.core import claude_code_transcript, codex_transcript
-from chronovisor.core.transcript import ClaudeCodeSaveError, CodexSaveError
-from chronovisor.raw import claude_code_record, codex_record
+from chronovisor.capture import (
+    claude_code_record,
+    claude_code_transcript,
+    codex_record,
+    codex_transcript,
+)
+from chronovisor.capture.transcript import ClaudeCodeSaveError, CodexSaveError
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:

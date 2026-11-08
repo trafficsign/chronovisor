@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chronovisor.core.raw_segment import RawSegmentReceipt, append_capture
-from chronovisor.ops import cortex
-from chronovisor.ops.cortex_stream import websocket_accept, websocket_text_frame
+from chronovisor.raw.raw_segment import RawSegmentReceipt, append_capture
+from chronovisor.surface import cortex
+from chronovisor.surface.cortex_stream import websocket_accept, websocket_text_frame
 
 
 def _write_page(

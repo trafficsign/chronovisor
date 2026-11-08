@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.core import background_jobs as jobs
+from chronovisor.capture import background_jobs as jobs
 
 
 @pytest.fixture

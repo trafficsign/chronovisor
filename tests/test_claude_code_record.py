@@ -12,11 +12,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.core import claude_code_transcript
-from chronovisor.core.paths import RuntimeContext, init_chronovisor
-from chronovisor.core.transcript import ClaudeCodeSaveError
+from chronovisor.capture import (
+    claude_code_capture_delta,
+    claude_code_transcript,
+    record_transaction,
+)
+from chronovisor.capture.transcript import ClaudeCodeSaveError
+from chronovisor.common.paths import RuntimeContext, init_chronovisor
 from chronovisor.hosts import claude_code_record
-from chronovisor.raw import claude_code_capture_delta, record_transaction
 
 
 def test_transcript_api_is_reexported_from_raw_modules() -> None:

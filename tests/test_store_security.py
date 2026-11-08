@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.core import paths, store
-from chronovisor.hosts import server
+from chronovisor.common import paths
+from chronovisor.pages import store
+from chronovisor.surface import mcp_server as server
 
 
 def test_all_pages_returns_only_stable_nonreserved_canonical_documents(

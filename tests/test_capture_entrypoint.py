@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.core import capture_status
-from chronovisor.core.runtime_config import RuntimeConfigError
-from chronovisor.ops import capture
+from chronovisor.capture import capture_status
+from chronovisor.capture import cycle as capture
+from chronovisor.common.config import RuntimeConfigError
 
 ROOT = Path(__file__).resolve().parents[1]
 DEADMAN = ROOT / "scripts" / "chronovisor-deadman"
@@ -272,7 +272,7 @@ def test_capture_launchd_template_runs_the_canonical_wrapper() -> None:
 def test_chronovisor_status_reports_capture_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from chronovisor.hosts import server
+    from chronovisor.surface import mcp_server as server
 
     monkeypatch.setattr(server, "CHRONOVISOR_ROOT", tmp_path)
     now = _now()
@@ -316,4 +316,4 @@ def test_project_declares_capture_entry_point() -> None:
     scripts = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
         "project"
     ]["scripts"]
-    assert scripts["chronovisor-capture"] == "chronovisor.ops.capture:main"
+    assert scripts["chronovisor-capture"] == "chronovisor.capture.cycle:main"

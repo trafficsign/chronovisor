@@ -7,10 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.core import background_jobs as core_background_jobs
+from chronovisor.capture import background_jobs, session_sweeper
+from chronovisor.capture import background_jobs as core_background_jobs
+from chronovisor.capture.agent_save_base import should_process
 from chronovisor.hosts import codex_record
-from chronovisor.ops import background_jobs, session_sweeper
-from chronovisor.raw.agent_save_base import should_process
 
 
 def test_ops_background_jobs_is_core_module_alias() -> None:

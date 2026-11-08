@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.core import page_registry
-from chronovisor.core.index_store import IndexStore
-from chronovisor.hosts import server
+from chronovisor.index import page_registry
+from chronovisor.index.index_store import IndexStore
+from chronovisor.surface import mcp_server as server
 
 
 def _page(root: Path, name: str, *, status: str = "stable") -> Path:

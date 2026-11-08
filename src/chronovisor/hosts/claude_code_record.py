@@ -1,10 +1,10 @@
-"""Compatibility alias for the raw Claude Code record module."""
+"""Persisted job module name (background-jobs state.json, hook_dispatcher). Do not move or delete."""
 
 from __future__ import annotations
 
 import sys
 
-from chronovisor.raw import claude_code_record as _claude_code_record
+from chronovisor.capture import claude_code_record as _claude_code_record
 
 
 def main(argv: list[str] | None = None) -> int:

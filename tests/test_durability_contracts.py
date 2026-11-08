@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from chronovisor.core.durable_state import (
+from chronovisor.common.durable_state import (
     exclusive_text_file_lock,
     sidecar_exclusive_lock,
 )

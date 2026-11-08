@@ -9,14 +9,14 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from chronovisor.core import raw_store as raw_store_module
-from chronovisor.core.raw_segment import (
+from chronovisor.raw import raw_store as raw_store_module
+from chronovisor.raw.raw_segment import (
     RawSegmentCorrupt,
     _raw_id_prefix,
     append_capture,
     seal_segment,
 )
-from chronovisor.core.raw_store import RawStore, raw_layout_mode
+from chronovisor.raw.raw_store import RawStore, raw_layout_mode
 
 
 @pytest.fixture(autouse=True)

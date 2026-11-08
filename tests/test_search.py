@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from chronovisor.core import index_store as index_store_mod
-from chronovisor.core import search
-from chronovisor.core.search import ScoredPage, apply_filters
+from chronovisor.index import index_store as index_store_mod
+from chronovisor.search import search
+from chronovisor.search.search import ScoredPage, apply_filters
 
 
 def test_bm25_read_only_refresh_persists_dirty_cache_on_next_normal_build(

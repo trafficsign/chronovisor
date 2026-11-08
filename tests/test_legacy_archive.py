@@ -11,13 +11,13 @@ from pathlib import Path
 import pytest
 import zstandard
 
-from chronovisor.core.legacy_archive import (
+from chronovisor.raw.legacy_archive import (
     iter_legacy_members,
     read_legacy_member,
     verify_legacy_manifest,
 )
-from chronovisor.core.raw_segment import RawSegmentCorrupt
-from chronovisor.core.raw_store import RawStore
+from chronovisor.raw.raw_segment import RawSegmentCorrupt
+from chronovisor.raw.raw_store import RawStore
 
 
 def archive_fixture(raw_dir: Path) -> tuple[Path, Path, dict[str, bytes]]:

@@ -12,15 +12,15 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.core.canonical_document import CanonicalDocumentError
-from chronovisor.core.frontmatter import (
+from chronovisor.common.canonical_document import CanonicalDocumentError
+from chronovisor.pages.frontmatter import (
     canonicalize,
     parse,
     patch,
     propose_nested_resolution,
     review_value,
 )
-from chronovisor.core.legacy_frontmatter import parse as parse_legacy
+from chronovisor.raw.legacy_frontmatter import parse as parse_legacy
 
 # ---------------------------------------------------------------------------
 # parse() — empty / no frontmatter
@@ -439,9 +439,9 @@ def test_yaml_set_serialization_and_review_receipt_ignore_hash_seed() -> None:
     )
     script = (
         "import json\n"
-        "from chronovisor.core.canonical_json import "
+        "from chronovisor.common.canonical_json import "
         "canonical_json_sha256_stringifying_strict\n"
-        "from chronovisor.core.frontmatter import canonicalize, "
+        "from chronovisor.pages.frontmatter import canonicalize, "
         "propose_nested_resolution\n"
         f"source = {source!r}\n"
         f"nested = {nested!r}\n"
@@ -493,7 +493,7 @@ def test_yaml_set_serialization_and_review_receipt_ignore_hash_seed() -> None:
 def test_legacy_frontmatter_imports_are_limited_to_raw_and_offline_migration():
     source_root = Path(__file__).parents[1] / "src"
     allowed = {
-        "chronovisor/core/raw_store.py",
+        "chronovisor/raw/raw_store.py",
         "chronovisor/raw/record_raw.py",
     }
     importers: set[str] = set()
@@ -503,9 +503,9 @@ def test_legacy_frontmatter_imports_are_limited_to_raw_and_offline_migration():
             (
                 isinstance(node, ast.ImportFrom)
                 and (
-                    node.module == "chronovisor.core.legacy_frontmatter"
+                    node.module == "chronovisor.raw.legacy_frontmatter"
                     or (
-                        node.module == "chronovisor.core"
+                        node.module == "chronovisor.raw"
                         and any(
                             alias.name == "legacy_frontmatter" for alias in node.names
                         )
@@ -515,7 +515,7 @@ def test_legacy_frontmatter_imports_are_limited_to_raw_and_offline_migration():
             or (
                 isinstance(node, ast.Import)
                 and any(
-                    alias.name == "chronovisor.core.legacy_frontmatter"
+                    alias.name == "chronovisor.raw.legacy_frontmatter"
                     for alias in node.names
                 )
             )

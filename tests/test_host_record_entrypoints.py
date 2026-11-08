@@ -51,14 +51,14 @@ def test_host_record_module_entrypoints_show_help(module: str, tmp_path: Path) -
 
 
 @pytest.mark.parametrize("host_name", HOST_RECORD_MODULES)
-def test_host_record_imports_preserve_raw_module_identity(host_name: str) -> None:
-    raw_name = host_name.replace("chronovisor.hosts.", "chronovisor.raw.")
+def test_host_record_imports_preserve_capture_module_identity(host_name: str) -> None:
+    capture_name = host_name.replace("chronovisor.hosts.", "chronovisor.capture.")
 
     host = importlib.import_module(host_name)
-    raw = importlib.import_module(raw_name)
+    capture = importlib.import_module(capture_name)
 
-    assert host is raw
-    assert sys.modules[host_name] is raw
+    assert host is capture
+    assert sys.modules[host_name] is capture
 
 
 def test_codex_host_entrypoint_saves_hook_in_isolated_root(tmp_path: Path) -> None:

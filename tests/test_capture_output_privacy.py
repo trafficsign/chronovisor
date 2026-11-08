@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.core import background_jobs as jobs
+from chronovisor.capture import background_jobs as jobs
 
 
 @pytest.mark.parametrize("command", ["run", "retry", "status"])

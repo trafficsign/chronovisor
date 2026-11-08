@@ -1,7 +1,7 @@
 import tomllib
 from pathlib import Path
 
-from chronovisor.ops.search_eval import compare, rank_of, summarize
+from chronovisor.surface.search_eval import compare, rank_of, summarize
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,4 +26,4 @@ def test_search_eval_entry_point_is_declared() -> None:
     scripts = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
         "project"
     ]["scripts"]
-    assert scripts["chronovisor-search-eval"] == "chronovisor.ops.search_eval:main"
+    assert scripts["chronovisor-search-eval"] == "chronovisor.surface.search_eval:main"
