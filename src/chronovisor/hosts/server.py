@@ -1,4 +1,4 @@
-"""Read-only MCP access to captured knowledge pages."""
+"""MCP page search and explicit raw memory capture."""
 
 import contextlib
 import json
@@ -22,13 +22,16 @@ from chronovisor.core.index_store import (
 from chronovisor.core.markdown_sections import markdown_sections
 from chronovisor.core.page_registry import PageRegistry, PageRegistryError
 from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.raw.record_raw import record_raw
 
 mcp = FastMCP(
     "chronovisor",
     instructions=(
         "Chronovisor searches existing knowledge pages. Use chronovisor_init at session "
         "start, chronovisor_search during conversation, and chronovisor_read for full "
-        "pages with backlinks. chronovisor_status reports indexes, services and capture jobs."
+        "pages with backlinks. chronovisor_status reports indexes, services and capture jobs. "
+        "Use chronovisor_record for explicit 'remember this' requests; it saves raw "
+        "content without generating pages."
     ),
 )
 READ_MAX_CHARS = 40_000
@@ -503,6 +506,41 @@ def chronovisor_status() -> str:
         },
         ensure_ascii=False,
     )
+
+
+@mcp.tool()
+def chronovisor_record(
+    content: str,
+    session_id: str | None = None,
+    keywords: list[str] | None = None,
+    idempotency_key: str | None = None,
+) -> str:
+    """Save an explicit memory to raw/ and return only publication metadata.
+
+    Keywords are stored as raw_keywords in frontmatter. Empty keywords and
+    keywords containing inline-list delimiters or control characters are
+    excluded. Repeating the same content and idempotency key reuses the first
+    atomically published raw.
+    """
+    result = record_raw(
+        content,
+        session_id=session_id,
+        keywords=keywords,
+        idempotency_key=idempotency_key,
+    )
+    metadata = {"saved": result["saved"]}
+    try:
+        metadata["path"] = (
+            Path(result["path"])
+            .resolve(strict=False)
+            .relative_to(CHRONOVISOR_ROOT.resolve())
+            .as_posix()
+        )
+    except OSError, ValueError:
+        pass
+    if "deduplicated" in result:
+        metadata["deduplicated"] = result["deduplicated"]
+    return json.dumps(metadata, ensure_ascii=False)
 
 
 def main() -> None:

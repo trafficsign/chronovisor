@@ -7,8 +7,10 @@ Local transcript capture and search over existing knowledge pages.
 - Raw layout v2 and existing save-state files remain compatible.
 - Search combines BM25 and semantic retrieval, StartLux reranking, and wikilinks.
   Existing lexical, page metadata and semantic indexes remain readable.
-- MCP exposes `chronovisor_search`, `chronovisor_read`, `chronovisor_init`, and
-  `chronovisor_status`. Initialization reads `user-profile` and `lessons-learned`.
+- MCP exposes `chronovisor_search`, `chronovisor_read`, `chronovisor_init`,
+  `chronovisor_status`, and `chronovisor_record`. Initialization reads
+  `user-profile` and `lessons-learned`; explicit "remember this" requests save
+  raw content through `chronovisor_record`.
 - Pages are frozen: there is no ingestion, generation, recall injection,
   learning, research, decision workflow, or dashboard.
 

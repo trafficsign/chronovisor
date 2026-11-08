@@ -139,13 +139,14 @@ def test_stop_hook_enqueues_one_save_only(host, monkeypatch, capsys):
     assert "on_success" not in tasks[0]
 
 
-def test_mcp_exposes_exactly_four_tools_and_retained_search_parameters():
+def test_mcp_exposes_exactly_five_tools_and_retained_parameters():
     tools = {tool.name: tool for tool in asyncio.run(server.mcp.list_tools())}
     assert set(tools) == {
         "chronovisor_search",
         "chronovisor_read",
         "chronovisor_init",
         "chronovisor_status",
+        "chronovisor_record",
     }
     assert set(tools["chronovisor_search"].inputSchema["properties"]) == {
         "query",
@@ -160,6 +161,92 @@ def test_mcp_exposes_exactly_four_tools_and_retained_search_parameters():
     }
     instructions = server.mcp.instructions.lower()
     assert "recall_used" not in instructions and "ollama" not in instructions
+    assert "chronovisor_record" in instructions
+    assert set(tools["chronovisor_record"].inputSchema["properties"]) == {
+        "content",
+        "session_id",
+        "keywords",
+        "idempotency_key",
+    }
+
+
+@pytest.mark.parametrize("layout", ["legacy", "v2"])
+def test_record_publishes_raw_with_only_valid_keywords(tmp_path, monkeypatch, layout):
+    from chronovisor.raw import record_raw
+
+    monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", layout)
+    monkeypatch.setattr(server, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(record_raw, "RAW_DIR", tmp_path / "raw")
+    content = "---\ntitle: Remember\n---\n覚えて: explicit memory\n"
+    rejected = ["", "  ", *[f"bad{char}word" for char in ",[]:#{}\n\r\x00\t"]]
+    result = json.loads(
+        server.chronovisor_record(
+            content,
+            session_id="memory-writer",
+            keywords=["local-memory", "日本語", *rejected],
+        )
+    )
+    path = tmp_path / result["path"]
+    assert (
+        path.read_bytes()
+        == (
+            "---\ntitle: Remember\nraw_keywords: [local-memory, 日本語]\n"
+            "---\n覚えて: explicit memory\n"
+        ).encode()
+    )
+    assert path.is_relative_to(tmp_path / "raw")
+    assert result == {"saved": path.name, "path": path.relative_to(tmp_path).as_posix()}
+    assert list(tmp_path.iterdir()) == [tmp_path / "raw"]
+    assert list((tmp_path / "raw").rglob("*.md")) == [path]
+
+
+@pytest.mark.parametrize("layout", ["legacy", "v2"])
+def test_record_idempotency_reuses_first_raw_without_overwriting(
+    tmp_path, monkeypatch, layout
+):
+    from chronovisor.raw import record_raw
+
+    monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", layout)
+    monkeypatch.setattr(server, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(record_raw, "RAW_DIR", tmp_path / "raw")
+    args = {
+        "content": "first memory\n",
+        "keywords": ["memory"],
+        "idempotency_key": "remember-test",
+    }
+    first = json.loads(server.chronovisor_record(**args))
+    path = tmp_path / first["path"]
+    original = path.read_bytes(), path.stat().st_mtime_ns
+    repeated = json.loads(server.chronovisor_record(**args))
+    assert first == {
+        "saved": "save-remember-test.md",
+        "path": "raw/save-remember-test.md",
+        "deduplicated": False,
+    }
+    assert repeated == {**first, "deduplicated": True}
+    with pytest.raises(RuntimeError, match="idempotency key collision"):
+        server.chronovisor_record(**{**args, "content": "different memory\n"})
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == original
+    assert list((tmp_path / "raw").iterdir()) == [path]
+
+
+def test_record_metadata_omits_paths_outside_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "CHRONOVISOR_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(
+        server,
+        "record_raw",
+        lambda *a, **k: {
+            "saved": "memory.md",
+            "path": str(tmp_path / "outside.md"),
+            "content": "private body",
+            "accepted_keywords": ["private"],
+            "rejected_keywords": ["private:invalid"],
+            "raw_slug": "private",
+        },
+    )
+    assert json.loads(server.chronovisor_record("private body")) == {
+        "saved": "memory.md"
+    }
 
 
 def test_init_reads_only_two_pages_and_capture_count(monkeypatch):
