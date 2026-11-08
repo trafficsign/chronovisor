@@ -299,16 +299,24 @@ def build_raw_content(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_session_file(
+    args: argparse.Namespace, hints: dict[str, str]
+) -> Path:
+    return find_session_file(
+        session_id=(
+            args.session_id if args.session_id is not None else hints.get("session_id")
+        ),
+        transcript_path=args.session_file or hints.get("transcript_path"),
+    )
+
+
 def _transaction_spec() -> RecordTransactionSpec:
     return RecordTransactionSpec(
         host="claude-code",
         hook_enable_env=HOOK_ENABLE_ENV,
         keywords=("Claude Code", "transcript-delta"),
         error_type=ClaudeCodeSaveError,
-        resolve_session_file=lambda args, hints: find_session_file(
-            session_id=args.session_id or hints.get("session_id"),
-            transcript_path=args.session_file or hints.get("transcript_path"),
-        ),
+        resolve_session_file=_resolve_session_file,
         resolve_state_file=_resolve_state_file,
         hook_hints=hook_hints,
         extract_transcript_slice=extract_transcript_slice,

@@ -292,13 +292,29 @@ def build_raw_content(
 
 
 def resolve_session_file(args: argparse.Namespace, hints: dict[str, str]) -> Path:
-    if args.session_file:
-        return Path(args.session_file).expanduser()
-    if hints.get("session_file"):
-        return Path(hints["session_file"]).expanduser()
+    session_id = (
+        args.session_id if args.session_id is not None else hints.get("session_id")
+    )
+    cwd = args.cwd if args.cwd is not None else hints.get("cwd")
 
-    session_id = args.session_id or hints.get("session_id")
-    cwd = args.cwd or hints.get("cwd") or os.environ.get("PWD")
+    explicit_path = (
+        args.session_file
+        if args.session_file is not None
+        else hints.get("session_file")
+    )
+    if explicit_path:
+        session_file = Path(explicit_path).expanduser()
+        if not session_file.is_file():
+            raise CodexSaveError(f"Codex session file does not exist: {session_file}")
+        meta = read_session_meta(session_file)
+        if session_id is not None and meta.get("id") != session_id:
+            raise CodexSaveError("Codex session file does not match session_id")
+        if cwd is not None and meta.get("cwd") != cwd:
+            raise CodexSaveError("Codex session file does not match cwd")
+        return session_file
+
+    if session_id is None and cwd is None:
+        cwd = os.environ.get("PWD")
     return find_session_file(
         session_id=session_id,
         cwd=cwd,

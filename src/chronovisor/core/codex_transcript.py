@@ -152,13 +152,23 @@ def find_session_file(
     if not candidates:
         raise CodexSaveError(f"No Codex session logs found under: {root}")
 
-    if session_id or cwd:
+    if session_id is not None or cwd is not None:
         for candidate in candidates:
             meta = read_session_meta(candidate)
-            if session_id and meta.get("id") == session_id:
-                return candidate
-            if cwd and meta.get("cwd") == cwd:
-                return candidate
+            if session_id is not None and meta.get("id") != session_id:
+                continue
+            if cwd is not None and meta.get("cwd") != cwd:
+                continue
+            return candidate
+
+        selectors = []
+        if session_id is not None:
+            selectors.append("session_id")
+        if cwd is not None:
+            selectors.append("cwd")
+        raise CodexSaveError(
+            f"No Codex session log matches {' and '.join(selectors)} under: {root}"
+        )
 
     return candidates[0]
 

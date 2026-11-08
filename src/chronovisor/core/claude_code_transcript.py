@@ -44,6 +44,14 @@ def claude_code_projects_root() -> Path:
     return Path.home() / ".claude" / "projects"
 
 
+def _session_id_matches(path: Path, session_id: str) -> bool:
+    for _, item in iter_jsonl(path):
+        candidate_id = item.get("sessionId")
+        if isinstance(candidate_id, str):
+            return candidate_id == session_id
+    return False
+
+
 def find_session_file(
     *,
     session_id: str | None = None,
@@ -51,8 +59,15 @@ def find_session_file(
 ) -> Path:
     if transcript_path:
         p = Path(transcript_path).expanduser()
-        if p.exists():
-            return p
+        if not p.is_file():
+            raise ClaudeCodeSaveError(
+                f"Claude Code transcript_path does not exist: {p}"
+            )
+        if session_id is not None and not _session_id_matches(p, session_id):
+            raise ClaudeCodeSaveError(
+                "Claude Code transcript_path does not match session_id"
+            )
+        return p
 
     root = claude_code_projects_root()
     if not root.exists():
@@ -62,10 +77,14 @@ def find_session_file(
     if not candidates:
         raise ClaudeCodeSaveError(f"No Claude Code session logs found under: {root}")
 
-    if session_id:
+    if session_id is not None:
         for candidate in candidates:
-            if session_id in candidate.name:
+            if _session_id_matches(candidate, session_id):
                 return candidate
+
+        raise ClaudeCodeSaveError(
+            f"No Claude Code session log matches session_id under: {root}"
+        )
 
     return candidates[0]
 
