@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.durable_state import exclusive_text_file_lock
+from chronovisor.core.durable_state import exclusive_text_file_lock, fsync_directory
 from chronovisor.core.llm_security import build_child_process_env
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import utc_now as _now
@@ -110,14 +110,30 @@ def _lock() -> contextlib.AbstractContextManager[Any]:
     return exclusive_text_file_lock(LOCK_FILE)
 
 
-def _load() -> dict[str, Any]:
+class CaptureJobStateError(RuntimeError):
+    """The capture ledger needs repair before work can resume."""
+
+
+def _load(*, quarantine: bool = True) -> dict[str, Any]:
     try:
         value = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except OSError, json.JSONDecodeError:
-        value = {}
-    if not isinstance(value, dict) or not isinstance(value.get("jobs"), dict):
-        return {"schema_version": 1, "jobs": {}}
-    return value
+        if isinstance(value, dict) and isinstance(value.get("jobs"), dict):
+            return value
+    except FileNotFoundError:
+        if not STATE_FILE.is_symlink() and not any(
+            STATE_FILE.parent.glob(f"{STATE_FILE.name}.corrupt-*")
+        ):
+            return {"schema_version": 1, "jobs": {}}
+    except OSError, UnicodeError, json.JSONDecodeError:
+        pass
+    if quarantine:
+        suffix = _now().strftime("%Y%m%dT%H%M%S%fZ")
+        try:
+            STATE_FILE.rename(STATE_FILE.with_name(f"{STATE_FILE.name}.corrupt-{suffix}"))
+            fsync_directory(STATE_FILE.parent)
+        except OSError:
+            pass  # An unmovable ledger is still preserved and blocks all writers.
+    raise CaptureJobStateError("capture job state is corrupt or unreadable; repair required")
 
 
 def _save(state: dict[str, Any]) -> None:
@@ -498,9 +514,17 @@ def retry_due(*, limit: int = 8) -> dict[str, Any]:
 
 def snapshot() -> dict[str, Any]:
     """Read capture job status without taking a writer lock or repairing state."""
+    try:
+        state = _load(quarantine=False)
+    except CaptureJobStateError:
+        return {
+            "status": "unavailable",
+            "error": "capture_job_state_corrupt",
+            "by_status": {},
+        }
     jobs = {
         key: job
-        for key, job in _load()["jobs"].items()
+        for key, job in state["jobs"].items()
         if isinstance(job, dict) and job.get("module") in CAPTURE_MODULES
     }
     counts: dict[str, int] = {}
