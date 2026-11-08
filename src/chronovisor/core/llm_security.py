@@ -8,6 +8,8 @@ from collections.abc import Mapping
 MAX_REQUEST_TIMEOUT_MS = 900_000
 _CHILD_ENV_NAMES = frozenset(
     {
+        "CHRONOVISOR_RAW_LAYOUT",
+        "CODEX_HOME",
         "COMSPEC",
         "CURL_CA_BUNDLE",
         "DBUS_SESSION_BUS_ADDRESS",
@@ -31,6 +33,7 @@ _CHILD_ENV_NAMES = frozenset(
         "PATHEXT",
         "PYTHONIOENCODING",
         "PYTHONUTF8",
+        "PWD",
         "REQUESTS_CA_BUNDLE",
         "SSL_CERT_DIR",
         "SSL_CERT_FILE",

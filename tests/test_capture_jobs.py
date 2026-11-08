@@ -419,3 +419,36 @@ def test_background_job_terminal_history_is_pruned(tmp_path: Path, monkeypatch) 
     stored = json.loads((tmp_path / "state.json").read_text())
     assert len(stored["jobs"]) == 2
     assert stored["pruned_terminal_total"] == 2
+
+
+def test_background_job_child_env_keeps_record_path_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(background_jobs, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(background_jobs, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(background_jobs, "LOCK_FILE", tmp_path / "state.lock")
+    codex_home = str(tmp_path / "codex-home")
+    monkeypatch.setenv("CODEX_HOME", codex_home)
+    monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", "v2")
+    monkeypatch.setenv("PWD", "/tmp/record-project")
+    seen: dict[str, str] = {}
+
+    def succeed(_command: list[str], **kwargs) -> SimpleNamespace:
+        seen.update(kwargs["env"])
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(background_jobs.subprocess, "run", succeed)
+    job = background_jobs.enqueue_job(
+        name="codex-save",
+        module="chronovisor.hosts.codex_record",
+        args=["--hook", "--save"],
+        env={},
+        stdin_text="{}",
+    )
+
+    background_jobs.run_job(job["job_id"])
+
+    assert seen["CODEX_HOME"] == codex_home
+    assert seen["CHRONOVISOR_RAW_LAYOUT"] == "v2"
+    assert seen["PWD"] == "/tmp/record-project"
