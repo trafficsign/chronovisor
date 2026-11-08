@@ -9,7 +9,7 @@ RUN=$ROOT/runtime
 STATUS=$RUN/capture-status.json
 STATE=$RUN/deadman-state
 MAX_AGE=900   # seconds without a completed capture run
-REPEAT=3600   # re-alert the same condition at most hourly
+REPEAT=3600   # re-alert a stopped capture hourly; failures only when their count grows
 
 now=$(date -u +%s)
 field() { plutil -extract "$1" raw -o - "$STATUS" 2>/dev/null; }
@@ -37,19 +37,24 @@ fi
 
 last_condition=healthy
 last_alert=0
-[ -f "$STATE" ] && [ ! -L "$STATE" ] && read -r last_condition last_alert <"$STATE"
+last_failed=0
+[ -f "$STATE" ] && [ ! -L "$STATE" ] && read -r last_condition last_alert last_failed <"$STATE"
 case $last_alert in '' | *[!0-9]*) last_alert=0 ;; esac
+case $last_failed in '' | *[!0-9]*) last_failed=0 ;; esac
+[ "$condition" = failed ] || failed=0
 
 alerted=false
 if [ "$condition" = healthy ]; then
 	last_alert=0
-elif [ "$condition" != "$last_condition" ] || [ $((now - last_alert)) -ge $REPEAT ]; then
+elif [ "$condition" != "$last_condition" ] ||
+	{ [ "$condition" = failed ] && [ "$failed" -gt "$last_failed" ]; } ||
+	{ [ "$condition" != failed ] && [ $((now - last_alert)) -ge $REPEAT ]; }; then
 	osascript -e "display notification \"Capture is $condition.\" with title \"Chronovisor\"" >/dev/null 2>&1 || true
 	alerted=true
 	last_alert=$now
 fi
 
 write() { printf '%s\n' "$2" >"$1.tmp" && mv -f "$1.tmp" "$1"; }
-write "$STATE" "$condition $last_alert"
+write "$STATE" "$condition $last_alert $failed"
 [ "$condition" = healthy ] && status=healthy || status=alert
 write "$RUN/deadman-status.json" "{\"version\": 1, \"status\": \"$status\", \"condition\": \"$condition\", \"observed_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\", \"alerted\": $alerted}"

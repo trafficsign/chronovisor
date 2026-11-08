@@ -174,6 +174,15 @@ def test_repeated_condition_is_throttled_and_recovery_resets(monitor) -> None:
     assert len(_calls(calls)) == 2
 
 
+def test_failed_realerts_only_when_the_count_grows(monitor) -> None:
+    ok = _timestamp()
+    calls, _ = _run(monitor, status=_status(last_success_at=ok, failed=1))
+    calls, _ = _run(monitor, status=_status(last_success_at=ok, failed=1))
+    assert len(_calls(calls)) == 1
+    calls, _ = _run(monitor, status=_status(last_success_at=ok, failed=2))
+    assert len(_calls(calls)) == 2
+
+
 def test_invalid_status_alert_is_privacy_safe(monitor) -> None:
     root, stub_bin, calls = monitor
     runtime = root / "runtime"
