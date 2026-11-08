@@ -26,12 +26,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from chronovisor.core import capture_status, index_store
+from chronovisor.core import capture_status, store
 from chronovisor.core.background_jobs import CAPTURE_MODULES
+from chronovisor.core.paths import CHRONOVISOR_ROOT
 from chronovisor.core.raw_segment import CAPTURE_TIMEZONE
 from chronovisor.core.raw_store import RawStore
 from chronovisor.core.runtime_config import load_toml_file
-from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.ops.cortex import CortexEventCursor, build_cortex_graph
 from chronovisor.ops.cortex_stream import websocket_accept, websocket_text_frame
 from chronovisor.ops.dashboard_http import (
@@ -125,7 +125,7 @@ def _knowledge_mix_snapshot() -> dict[str, Any]:
     pages_dir = CHRONOVISOR_ROOT / "pages"
     categories: dict[str, dict[str, Any]] = {}
     if pages_dir.exists():
-        for resolved in index_store.canonical_document_paths(
+        for resolved in store.canonical_document_paths(
             pages_dir, require_stable=True
         ):
             try:

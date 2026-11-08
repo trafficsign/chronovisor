@@ -26,9 +26,10 @@ from chronovisor.core.canonical_document import (
     Namespace,
     validate_canonical_document,
 )
-from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.durable_state import atomic_write
+from chronovisor.core.paths import PAGES_DIR, SYSTEM_DIR
 from chronovisor.core.search_types import ScoredPage, tokenize
-from chronovisor.core.store import PAGES_DIR, SYSTEM_DIR, page_id_from_path
+from chronovisor.core.store import page_id_from_path
 
 SCHEMA_VERSION = 8
 VALID_PAGE_TYPES = {
@@ -324,7 +325,7 @@ class LexicalIndex:
             return True, None, None
         try:
             from chronovisor.core.index_store import IndexStore, get_store
-            from chronovisor.core.store import CHRONOVISOR_ROOT
+            from chronovisor.core.paths import CHRONOVISOR_ROOT
 
             if index_dir == Path(CHRONOVISOR_ROOT) / ".index":
                 # Search normally refreshes the process-wide store first;

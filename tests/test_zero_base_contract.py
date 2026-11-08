@@ -391,7 +391,7 @@ def test_capture_wrapper_runs_one_entrypoint(tmp_path):
 
 
 def test_capture_init_does_not_chmod_a_raw_symlink(tmp_path):
-    from chronovisor.core.store import RuntimeContext, init_chronovisor
+    from chronovisor.core.paths import RuntimeContext, init_chronovisor
 
     outside = tmp_path / "outside"
     outside.mkdir(mode=0o755)

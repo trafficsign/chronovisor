@@ -28,11 +28,14 @@ from chronovisor.core.canonical_document import (
     resolve_internal_markdown_links,
     validate_canonical_document,
 )
-from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.durable_state import atomic_write
+from chronovisor.core.paths import CHRONOVISOR_ROOT, PAGES_DIR, SYSTEM_DIR
 from chronovisor.core.store import (
-    CHRONOVISOR_ROOT,
-    PAGES_DIR,
-    SYSTEM_DIR,
+    PAGE_RESERVED_FILENAMES,
+    SYSTEM_RESERVED_FILENAMES,
+    _read_bytes_stable,
+    canonical_document_path,
+    contained_file,
 )
 
 SCHEMA_VERSION = 12  # canonical YAML, exact link identities, and lifecycle eligibility
@@ -40,8 +43,6 @@ INDEX_DIR = CHRONOVISOR_ROOT / ".index"
 PAGES_INDEX_FILE = INDEX_DIR / "pages.json"
 BACKLINKS_INDEX_FILE = INDEX_DIR / "backlinks.json"
 VALID_LIFECYCLE_STATUSES = frozenset({"draft", "stable", "deprecated"})
-PAGE_RESERVED_FILENAMES = frozenset({"index.md", "log.md", "schema.md"})
-SYSTEM_RESERVED_FILENAMES = frozenset({"index.md", "log.md"})
 VALID_PAGE_TYPES = {
     "knowledge",
     "reference",
@@ -94,83 +95,6 @@ def _normalize_sensitivity(value: object, *, path: Path | None = None) -> str:
     return "normal"
 
 
-def contained_file(path: Path, root: Path) -> Path | None:
-    """Return a regular file only when its real path stays in its namespace."""
-
-    if root.is_symlink():
-        return None
-    try:
-        relative = path.relative_to(root)
-        root_resolved = root.resolve(strict=True)
-        resolved = path.resolve(strict=True)
-        resolved.relative_to(root_resolved)
-    except OSError, RuntimeError, ValueError:
-        return None
-    # The final layout is direct: reject leaf and descendant symlinks, including
-    # links that currently happen to resolve back inside the namespace.
-    if resolved != root_resolved / relative or not resolved.is_file():
-        return None
-    return resolved
-
-
-def _read_bytes_stable(path: Path, root: Path, retries: int = 1) -> bytes | None:
-    """Read a file and verify (mtime_ns, size) didn't change mid-read.
-
-    Guards against picking up a half-written page (ingest doesn't use
-    atomic_write today). On retry exhaustion, returns the last best-effort
-    read; callers should treat None as "skip this file".
-    """
-    last: bytes | None = None
-    for _ in range(retries + 1):
-        resolved = contained_file(path, root)
-        if resolved is None:
-            return None
-        try:
-            st_before = resolved.stat()
-            data = resolved.read_bytes()
-            st_after = resolved.stat()
-        except OSError:
-            return None
-        if (st_before.st_mtime_ns, st_before.st_size) == (
-            st_after.st_mtime_ns,
-            st_after.st_size,
-        ) and contained_file(path, root) == resolved:
-            return data
-        last = data
-    return last
-
-
-def canonical_document_path(
-    path: Path,
-    root: Path,
-    *,
-    namespace: Namespace,
-    reserved_filenames: frozenset[str],
-    require_stable: bool = False,
-) -> Path | None:
-    """Return one contained, non-reserved canonical document."""
-
-    if path.name in reserved_filenames:
-        return None
-    resolved = contained_file(path, root)
-    if resolved is None:
-        return None
-    data = _read_bytes_stable(resolved, root)
-    if data is None:
-        return None
-    try:
-        relative_path = resolved.relative_to(root.resolve(strict=True)).as_posix()
-        validate_canonical_document(
-            data,
-            namespace=namespace,
-            path=relative_path,
-            require_stable=require_stable,
-        )
-    except CanonicalDocumentError, OSError, RuntimeError, ValueError:
-        return None
-    return resolved
-
-
 def canonical_document_bytes(path: Path, root: Path) -> bytes | None:
     """Read one contained file image with the canonical scanner's drift checks."""
 
@@ -178,51 +102,6 @@ def canonical_document_bytes(path: Path, root: Path) -> bytes | None:
     if resolved is None:
         return None
     return _read_bytes_stable(resolved, root)
-
-
-def canonical_document_paths(
-    pages_dir: Path,
-    *,
-    system_dir: Path | None = None,
-    require_stable: bool = False,
-    strict: bool = False,
-) -> list[Path]:
-    """Enumerate canonical, non-reserved documents in exact namespaces."""
-
-    namespaces: list[tuple[Path, Namespace, frozenset[str], bool]] = [
-        (pages_dir, "pages", PAGE_RESERVED_FILENAMES, True)
-    ]
-    if system_dir is not None:
-        namespaces.append((system_dir, "system", SYSTEM_RESERVED_FILENAMES, False))
-    paths: list[Path] = []
-    for directory, namespace, reserved, recursive in namespaces:
-        if not directory.is_dir():
-            continue
-        try:
-            candidates = (
-                directory.rglob("*.md") if recursive else directory.glob("*.md")
-            )
-            for path in sorted(candidates):
-                if path.name in reserved:
-                    continue
-                resolved = canonical_document_path(
-                    path,
-                    directory,
-                    namespace=namespace,
-                    reserved_filenames=reserved,
-                    require_stable=require_stable,
-                )
-                if resolved is not None:
-                    paths.append(resolved)
-                elif strict:
-                    raise CanonicalDocumentError(f"invalid canonical document: {path}")
-        except (OSError, RuntimeError) as exc:
-            if strict:
-                raise CanonicalDocumentError(
-                    f"cannot enumerate canonical namespace: {directory}"
-                ) from exc
-            continue
-    return paths
 
 
 def stable_indexed_document_path(

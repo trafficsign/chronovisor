@@ -18,8 +18,8 @@ from chronovisor.core.canonical_document import (
     parse_document,
     resolve_internal_markdown_links,
 )
-from chronovisor.core.index_store import canonical_document_paths
 from chronovisor.core.raw_segment import RawSegmentCommit, RawSegmentCorrupt
+from chronovisor.core.store import canonical_document_paths
 
 _GRAPH_CACHE_LOCK = threading.Lock()
 _GRAPH_CACHE: dict[str, dict[str, Any]] = {}

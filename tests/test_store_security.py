@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from chronovisor.core import store
+from chronovisor.core import paths, store
 from chronovisor.hosts import server
 
 
@@ -37,12 +37,12 @@ def test_all_pages_returns_only_stable_nonreserved_canonical_documents(
 
 def test_capture_init_corrects_private_raw_directory_mode(tmp_path: Path) -> None:
     root = tmp_path / "wiki"
-    context = store.RuntimeContext(root)
+    context = paths.RuntimeContext(root)
     for directory in (root, context.raw_dir, context.pages_dir, context.system_dir):
         directory.mkdir(parents=True, exist_ok=True)
         directory.chmod(0o755)
 
-    store.init_chronovisor(context)
+    paths.init_chronovisor(context)
 
     assert all(
         stat.S_IMODE(directory.stat().st_mode) == 0o700
@@ -122,7 +122,7 @@ def test_chronovisor_read_confines_pages_and_system(
         def backlinks(self, _page_id: str) -> list[str]:
             return []
 
-    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(paths, "CHRONOVISOR_ROOT", root)
     monkeypatch.setattr(store, "PAGES_DIR", pages)
     monkeypatch.setattr(server, "CHRONOVISOR_ROOT", root)
     monkeypatch.setattr(server, "get_store", FakeStore)

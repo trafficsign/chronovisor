@@ -14,15 +14,14 @@ from chronovisor.core import capture_status
 from chronovisor.core.background_jobs import snapshot
 from chronovisor.core.frontmatter import parse as _frontmatter_parse
 from chronovisor.core.index_store import (
-    PAGE_RESERVED_FILENAMES,
-    canonical_document_path,
     canonical_document_path_for_id,
     get_store,
     stable_indexed_document_path,
 )
 from chronovisor.core.markdown_sections import markdown_sections
 from chronovisor.core.page_registry import PageRegistry, PageRegistryError
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.paths import CHRONOVISOR_ROOT
+from chronovisor.core.store import PAGE_RESERVED_FILENAMES, canonical_document_path
 from chronovisor.raw.record_raw import record_raw
 
 mcp = FastMCP(

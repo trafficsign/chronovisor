@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import canonical_document, index_store
+from chronovisor.core import canonical_document, index_store, store
 from chronovisor.core.page_identity import normalize_page_uid
 
 REGISTRY_SCHEMA = "chronovisor.page-registry.v1"
@@ -107,14 +107,14 @@ class PageRegistry:
         if raw_path.startswith("pages/"):
             directory = self.root / "pages"
             namespace: canonical_document.Namespace = "pages"
-            reserved = index_store.PAGE_RESERVED_FILENAMES
+            reserved = store.PAGE_RESERVED_FILENAMES
         elif raw_path.startswith("system/"):
             directory = self.root / "system"
             namespace = "system"
-            reserved = index_store.SYSTEM_RESERVED_FILENAMES
+            reserved = store.SYSTEM_RESERVED_FILENAMES
         else:
             return None
-        path = index_store.canonical_document_path(
+        path = store.canonical_document_path(
             self.root / raw_path,
             directory,
             namespace=namespace,

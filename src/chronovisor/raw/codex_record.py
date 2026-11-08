@@ -19,6 +19,10 @@ from typing import Any
 
 from chronovisor.core import codex_transcript as _codex_transcript
 from chronovisor.core.background_jobs import PERMANENT_EXIT_CODE
+from chronovisor.core.paths import (
+    DEFAULT_CONTEXT,
+    RuntimeContext,
+)
 from chronovisor.core.save_transaction import (
     SaveTransaction,
     attach_save_transaction_marker,
@@ -26,10 +30,6 @@ from chronovisor.core.save_transaction import (
     publish_oversized_shadow,
     save_transaction_lock,
     validate_published_save_receipt,
-)
-from chronovisor.core.store import (
-    DEFAULT_CONTEXT,
-    RuntimeContext,
 )
 from chronovisor.raw.agent_save_base import (
     load_state,  # noqa: F401 - re-exported for session sweeper callers

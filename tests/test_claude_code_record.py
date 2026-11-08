@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from chronovisor.core import claude_code_transcript
-from chronovisor.core.store import RuntimeContext, init_chronovisor
+from chronovisor.core.paths import RuntimeContext, init_chronovisor
 from chronovisor.core.transcript import ClaudeCodeSaveError
 from chronovisor.hosts import claude_code_record
 from chronovisor.raw import claude_code_capture_delta, record_transaction

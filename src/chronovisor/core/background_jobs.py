@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.durable_state import exclusive_text_file_lock, fsync_directory
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.paths import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import utc_now as _now
 
 _CHILD_ENV_NAMES = frozenset(

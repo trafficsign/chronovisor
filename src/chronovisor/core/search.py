@@ -6,11 +6,11 @@ from pathlib import Path
 from typing import Any, cast
 
 from chronovisor.core.lexical_index import LexicalIndex
-from chronovisor.core.search_types import ScoredPage
-from chronovisor.core.store import (
+from chronovisor.core.paths import (
     CHRONOVISOR_ROOT,
     PAGES_DIR,
 )
+from chronovisor.core.search_types import ScoredPage
 
 
 def searchable_pages() -> list[Path]:

@@ -374,3 +374,35 @@ def reentrant_exclusive_lock(lock_path: Path) -> Iterator[bool]:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         finally:
             handle.close()
+
+
+def atomic_write(path: Path, content: str) -> None:
+    """tempfile + os.replace による atomic write。
+
+    同一ディレクトリに dot-prefix の一時ファイルを作り、fsync 後に rename で置換。
+    書き込み失敗時は tempfile をクリーンアップする。
+    """
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=str(path.parent),
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    )
+    tmp_path = tmp.name
+    try:
+        tmp.write(content)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp.close()
+        os.replace(tmp_path, path)
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except Exception:
+        with suppress(OSError):
+            os.unlink(tmp_path)
+        raise

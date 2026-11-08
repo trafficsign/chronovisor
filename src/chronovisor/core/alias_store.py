@@ -6,11 +6,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core import store as chronovisor_store
+from chronovisor.core import paths as chronovisor_paths
 
 
 def _alias_file() -> Path:
-    return chronovisor_store.CHRONOVISOR_ROOT / "runtime" / "page-aliases.json"
+    return chronovisor_paths.CHRONOVISOR_ROOT / "runtime" / "page-aliases.json"
 
 
 def _normalize_page_id(value: str) -> str:
@@ -57,15 +57,15 @@ def resolve_target_path(target: str) -> Path | None:
         return None
     if ref.endswith(".md"):
         ref = ref[:-3]
-    from chronovisor.core.index_store import (
+    from chronovisor.core.store import (
         PAGE_RESERVED_FILENAMES,
         canonical_document_path,
     )
 
     if "/" in ref:
         return canonical_document_path(
-            chronovisor_store.PAGES_DIR / f"{ref}.md",
-            chronovisor_store.PAGES_DIR,
+            chronovisor_paths.PAGES_DIR / f"{ref}.md",
+            chronovisor_paths.PAGES_DIR,
             namespace="pages",
             reserved_filenames=PAGE_RESERVED_FILENAMES,
             require_stable=True,
@@ -73,11 +73,11 @@ def resolve_target_path(target: str) -> Path | None:
 
     matches = [
         resolved
-        for path in chronovisor_store.PAGES_DIR.rglob(f"{ref}.md")
+        for path in chronovisor_paths.PAGES_DIR.rglob(f"{ref}.md")
         if (
             resolved := canonical_document_path(
                 path,
-                chronovisor_store.PAGES_DIR,
+                chronovisor_paths.PAGES_DIR,
                 namespace="pages",
                 reserved_filenames=PAGE_RESERVED_FILENAMES,
                 require_stable=True,

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from chronovisor.core.link_fix import atomic_write
+from chronovisor.core.durable_state import atomic_write
 from chronovisor.raw.record_raw import record_raw
 
 

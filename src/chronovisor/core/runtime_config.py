@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import chronovisor
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.paths import CHRONOVISOR_ROOT
 
 CONFIG_FILE = CHRONOVISOR_ROOT / "config.toml"
 

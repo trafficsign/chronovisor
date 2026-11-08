@@ -8,8 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.link_fix import atomic_write
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.durable_state import atomic_write
+from chronovisor.core.paths import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import utc_now
 
 STATUS_VERSION = 1

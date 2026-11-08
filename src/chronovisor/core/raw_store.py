@@ -641,7 +641,7 @@ class RawStore:
         output.parent.mkdir(parents=True, exist_ok=True)
         if output.exists():
             raise FileExistsError(output)
-        from chronovisor.core.link_fix import atomic_write
+        from chronovisor.core.durable_state import atomic_write
 
         try:
             text = value.decode("utf-8")

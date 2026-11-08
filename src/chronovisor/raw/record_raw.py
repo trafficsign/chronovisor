@@ -12,8 +12,8 @@ from typing import Any
 
 from chronovisor.core.durable_state import fsync_directory
 from chronovisor.core.legacy_frontmatter import patch as patch_frontmatter
+from chronovisor.core.paths import RAW_DIR
 from chronovisor.core.save_transaction import parse_save_transaction_receipt
-from chronovisor.core.store import RAW_DIR
 
 RAW_PREFIX_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 RAW_SLUG_TOKEN_RE = re.compile(r"[a-zA-Z0-9]+")

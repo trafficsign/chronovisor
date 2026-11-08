@@ -3,11 +3,7 @@
 Canonical documents and capture state share these helpers.
 """
 
-import contextlib
-import os
 import re
-import tempfile
-from pathlib import Path
 
 from chronovisor.core.frontmatter import parse as parse_frontmatter
 
@@ -78,35 +74,3 @@ def extract_wiki_links(text: str, strip: bool = True) -> list[str]:
     """
     body = strip_fences_and_frontmatter(text) if strip else text
     return WIKI_LINK_RE.findall(body)
-
-
-def atomic_write(path: Path, content: str) -> None:
-    """tempfile + os.replace による atomic write。
-
-    同一ディレクトリに dot-prefix の一時ファイルを作り、fsync 後に rename で置換。
-    書き込み失敗時は tempfile をクリーンアップする。
-    """
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=str(path.parent),
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    )
-    tmp_path = tmp.name
-    try:
-        tmp.write(content)
-        tmp.flush()
-        os.fsync(tmp.fileno())
-        tmp.close()
-        os.replace(tmp_path, path)
-        dir_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-    except Exception:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_path)
-        raise

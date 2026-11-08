@@ -10,8 +10,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.link_fix import atomic_write
-from chronovisor.core.store import CHRONOVISOR_ROOT
+from chronovisor.core.durable_state import atomic_write
+from chronovisor.core.paths import CHRONOVISOR_ROOT
 
 STATUS_FILE = CHRONOVISOR_ROOT / "runtime" / "session-sweeper-latest.json"
 STATE_FILE = CHRONOVISOR_ROOT / "runtime" / "session-sweeper-state.json"
