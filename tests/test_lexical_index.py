@@ -81,6 +81,21 @@ def test_inverted_bm25_refresh_removes_deleted_pages(tmp_path: Path) -> None:
     assert index.query("retired") == []
 
 
+def test_query_surfaces_sqlite_errors_instead_of_empty_hits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = LexicalIndex(path=tmp_path / "lexical.sqlite", pages=lambda: [])
+
+    class BrokenConnection:
+        def execute(self, *_args: object, **_kwargs: object) -> object:
+            raise sqlite3.OperationalError("synthetic sqlite failure")
+
+    monkeypatch.setattr(index, "_open", lambda: BrokenConnection())
+
+    with pytest.raises(sqlite3.DatabaseError, match="^lexical query unavailable$"):
+        index.query("token")
+
+
 def test_query_existing_reads_only_valid_built_projection(tmp_path: Path) -> None:
     page = tmp_path / "page.md"
     page.write_text(
@@ -147,16 +162,26 @@ def test_anchor_query_existing_reads_only_valid_built_projection(tmp_path: Path)
     assert path.stat().st_mtime_ns == before
 
 
-def test_query_existing_fails_empty_for_invalid_projection(tmp_path: Path) -> None:
+def test_anchor_query_existing_surfaces_invalid_projection(tmp_path: Path) -> None:
     path = tmp_path / "lexical.sqlite"
     path.write_text("not sqlite", encoding="utf-8")
     index = LexicalIndex(path=path, pages=lambda: [])
 
-    assert index.query_existing("query") == []
+    with pytest.raises(sqlite3.DatabaseError, match="lexical index unavailable"):
+        index.anchor_query_existing("anchor")
+
+
+def test_query_existing_surfaces_invalid_projection(tmp_path: Path) -> None:
+    path = tmp_path / "lexical.sqlite"
+    path.write_text("not sqlite", encoding="utf-8")
+    index = LexicalIndex(path=path, pages=lambda: [])
+
+    with pytest.raises(sqlite3.DatabaseError, match="lexical index unavailable"):
+        index.query_existing("query")
     assert path.read_text(encoding="utf-8") == "not sqlite"
 
 
-def test_query_existing_fails_empty_for_schema_mismatch(tmp_path: Path) -> None:
+def test_query_existing_surfaces_schema_mismatch(tmp_path: Path) -> None:
     page = tmp_path / "page.md"
     page.write_text(
         "---\ntitle: Page\nstatus: stable\ntype: knowledge\n---\nexistingtoken\n",
@@ -168,7 +193,8 @@ def test_query_existing_fails_empty_for_schema_mismatch(tmp_path: Path) -> None:
     with sqlite3.connect(path) as connection:
         connection.execute("PRAGMA user_version = 999")
 
-    assert index.query_existing("existingtoken") == []
+    with pytest.raises(sqlite3.DatabaseError, match="lexical index unavailable"):
+        index.query_existing("existingtoken")
 
 
 def test_writer_rebuilds_unversioned_legacy_projection(tmp_path: Path) -> None:

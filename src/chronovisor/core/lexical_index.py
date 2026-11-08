@@ -1008,6 +1008,11 @@ class LexicalIndex:
         """Query only an already-built valid projection without mutating it."""
 
         if not self.load_existing(expected_generation=expected_generation):
+            if (
+                self.path.is_file()
+                and self.snapshot_error != "snapshot_generation_mismatch"
+            ):
+                raise sqlite3.DatabaseError("lexical index unavailable")
             return []
         with self._lock:
             validated_signature = self._snapshot_signature
@@ -1022,7 +1027,7 @@ class LexicalIndex:
                     int(connection.execute("PRAGMA user_version").fetchone()[0])
                     != SCHEMA_VERSION
                 ):
-                    return []
+                    raise sqlite3.DatabaseError("lexical index unavailable")
                 rows = self._query_connection(
                     connection,
                     query_text,
@@ -1030,7 +1035,7 @@ class LexicalIndex:
                     include_reference=include_reference,
                 )
         except OSError, sqlite3.DatabaseError:
-            return []
+            raise sqlite3.DatabaseError("lexical index unavailable") from None
         # A writer may publish a new metadata generation between the
         # validation above and this short-lived SQLite read.  Do not return
         # rows whose projection no longer belongs to the validated snapshot.
@@ -1070,8 +1075,8 @@ class LexicalIndex:
                 """,
                 terms,
             ).fetchall()
-        except sqlite3.OperationalError:
-            return []
+        except sqlite3.DatabaseError:
+            raise sqlite3.DatabaseError("lexical query unavailable") from None
         scores: dict[str, float] = {}
         page_rows: dict[str, tuple[object, ...]] = {}
         page_ordinals: dict[str, int] = {}
@@ -1150,6 +1155,11 @@ class LexicalIndex:
         """
 
         if not self.load_existing(expected_generation=expected_generation):
+            if (
+                self.path.is_file()
+                and self.snapshot_error != "snapshot_generation_mismatch"
+            ):
+                raise sqlite3.DatabaseError("lexical index unavailable")
             return []
         with self._lock:
             validated_signature = self._snapshot_signature
@@ -1173,7 +1183,7 @@ class LexicalIndex:
                     int(connection.execute("PRAGMA user_version").fetchone()[0])
                     != SCHEMA_VERSION
                 ):
-                    return []
+                    raise sqlite3.DatabaseError("lexical index unavailable")
                 rows = connection.execute(
                     f"""
                     SELECT p.page_id, p.title, p.folder, p.updated, p.status,
@@ -1189,7 +1199,7 @@ class LexicalIndex:
                     (*terms, max(1, top_n)),
                 ).fetchall()
         except OSError, sqlite3.DatabaseError:
-            return []
+            raise sqlite3.DatabaseError("lexical index unavailable") from None
         if self._snapshot_files_signature() != validated_signature:
             return []
         return [self._row_to_page(row, float(row[10])) for row in rows]
