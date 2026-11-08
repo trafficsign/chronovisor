@@ -79,7 +79,6 @@ files = [
     "src/chronovisor/pages/page_identity.py",
     "src/chronovisor/pages/frontmatter.py",
     "src/chronovisor/pages/markdown_sections.py",
-    "src/chronovisor/pages/link_fix.py",
     "src/chronovisor/pages/store.py",
     "src/chronovisor/index/index_store.py",
     "src/chronovisor/index/lexical_index.py",
