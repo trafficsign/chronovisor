@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core import claude_code_transcript as _claude_code_transcript
+from chronovisor.core.background_jobs import PERMANENT_EXIT_CODE
 from chronovisor.core.save_transaction import (
     SaveTransaction,
     attach_save_transaction_marker,
@@ -452,7 +453,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         result = {"status": "error", "error": str(exc)}
         print(json.dumps(result, ensure_ascii=False))
-        return 1
+        return PERMANENT_EXIT_CODE if getattr(exc, "permanent", False) else 1
 
     print(json.dumps(result, ensure_ascii=False))
     return 0

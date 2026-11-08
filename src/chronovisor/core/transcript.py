@@ -11,9 +11,15 @@ from typing import Any
 class CodexSaveError(RuntimeError):
     """Raised when the Codex save flow cannot complete."""
 
+    category = "permanent_capture_error"
+    permanent = True
+
 
 class ClaudeCodeSaveError(RuntimeError):
     """Raised when the Claude Code save flow cannot complete."""
+
+    category = "permanent_capture_error"
+    permanent = True
 
 
 def iter_jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:

@@ -50,6 +50,7 @@ MAX_ATTEMPTS = 5
 MAX_TERMINAL_JOBS = 500
 MAX_CANCELLATION_TOMBSTONES = 500
 RETRYABLE_EXIT_CODE = 75
+PERMANENT_EXIT_CODE = 65
 QUARANTINE_EXIT_CODE = 78
 RECENT_QUARANTINE_HOURS = 24
 ACTIVE_STATUSES = frozenset({"queued", "running", "retry_wait"})
@@ -422,6 +423,9 @@ def _finish(job_id: str, *, exit_code: int, output: str) -> dict[str, Any]:
             job["next_retry_at"] = None
         elif exit_code == QUARANTINE_EXIT_CODE:
             job["status"] = "quarantined"
+            job["next_retry_at"] = None
+        elif exit_code == PERMANENT_EXIT_CODE:
+            job["status"] = "failed"
             job["next_retry_at"] = None
         elif exit_code == 0:
             job["status"] = "completed"
