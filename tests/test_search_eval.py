@@ -1,4 +1,9 @@
+import tomllib
+from pathlib import Path
+
 from chronovisor.ops.search_eval import compare, rank_of, summarize
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_rank_summary_and_compare() -> None:
@@ -15,3 +20,10 @@ def test_rank_summary_and_compare() -> None:
     a = {"rows": [{"id": "q", "rank": 3}]}
     b = {"rows": [{"id": "q", "rank": 1}]}
     assert compare(a, b) == {"b_better": 1, "b_worse": 0, "same": 0}
+
+
+def test_search_eval_entry_point_is_declared() -> None:
+    scripts = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"
+    ]["scripts"]
+    assert scripts["chronovisor-search-eval"] == "chronovisor.ops.search_eval:main"
