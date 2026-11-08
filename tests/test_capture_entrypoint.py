@@ -252,7 +252,6 @@ def test_deadman_accepts_capture_written_status(tmp_path: Path) -> None:
         (root / "runtime" / "deadman-status.json").read_text(encoding="utf-8")
     )
     assert observed["condition"] == "healthy"
-    assert observed["last_success_at"] == now
     assert not calls.exists()
 
 

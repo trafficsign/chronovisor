@@ -100,10 +100,6 @@ def test_valid_now_is_healthy_without_notification(monitor) -> None:
     assert observed["version"] == 1
     assert observed["status"] == "healthy"
     assert observed["condition"] == "healthy"
-    assert observed["pending"] == 0
-    assert observed["failed"] == 0
-    assert observed["last_error"] == "none"
-    assert observed["last_success_at"].endswith("Z")
 
 
 def test_missing_status_alerts_once_and_writes_private_state(monitor) -> None:
@@ -114,8 +110,6 @@ def test_missing_status_alerts_once_and_writes_private_state(monitor) -> None:
     assert "display notification" in _calls(calls)[0]
     assert observed["status"] == "alert"
     assert observed["condition"] == "missing"
-    assert observed["last_success_at"] is None
-    assert observed["last_error"] == "capture_status_missing"
     state = root / "runtime" / "deadman-state"
     output = root / "runtime" / "deadman-status.json"
     assert stat.S_IMODE(state.stat().st_mode) == 0o600
@@ -126,7 +120,6 @@ def test_null_success_is_stale(monitor) -> None:
     calls, observed = _run(monitor, status=_status())
 
     assert observed["condition"] == "stale"
-    assert observed["last_success_at"] is None
     assert len(_calls(calls)) == 1
 
 
@@ -206,9 +199,6 @@ def test_invalid_status_alert_is_privacy_safe(monitor) -> None:
     assert completed.returncode == 0, completed.stderr
     observed = json.loads((runtime / "deadman-status.json").read_text())
     assert observed["condition"] == "invalid"
-    assert observed["last_attempt_at"] is None
-    assert observed["last_success_at"] is None
-    assert observed["last_error"] == "capture_status_invalid"
     assert len(_calls(calls)) == 1
     assert marker not in (runtime / "deadman-status.json").read_text()
     assert marker not in "\n".join(_calls(calls))
@@ -237,8 +227,6 @@ def test_malformed_status_alerts_without_details(monitor) -> None:
     assert completed.returncode == 0, completed.stderr
     observed = json.loads((runtime / "deadman-status.json").read_text())
     assert observed["condition"] == "invalid"
-    assert observed["last_attempt_at"] is None
-    assert observed["last_success_at"] is None
     assert len(_calls(calls)) == 1
 
 

@@ -1,274 +1,55 @@
 #!/bin/sh
-# Independent capture monitor with no package runtime dependency.
-set -eu
-
+# Capture deadman: a macOS notification when capture stops or reports failures.
+# Independent of the capture runtime: only sh, plutil, date and osascript.
+set -u
 umask 077
 
-: "${HOME:?HOME is required}"
-CHRONOVISOR_ROOT=${CHRONOVISOR_ROOT:-$HOME/.chronovisor}
-RUNTIME_DIR=$CHRONOVISOR_ROOT/runtime
-CAPTURE_STATUS=$RUNTIME_DIR/capture-status.json
-DEADMAN_STATE=$RUNTIME_DIR/deadman-state
-DEADMAN_STATUS=$RUNTIME_DIR/deadman-status.json
+ROOT=${CHRONOVISOR_ROOT:-$HOME/.chronovisor}
+RUN=$ROOT/runtime
+STATUS=$RUN/capture-status.json
+STATE=$RUN/deadman-state
+MAX_AGE=900   # seconds without a completed capture run
+REPEAT=3600   # re-alert the same condition at most hourly
 
-DEADMAN_TMP=
-cleanup() {
-	if [ -n "$DEADMAN_TMP" ]; then
-		rm -f -- "$DEADMAN_TMP"
-	fi
-}
-trap cleanup EXIT HUP INT TERM
+now=$(date -u +%s)
+field() { plutil -extract "$1" raw -o - "$STATUS" 2>/dev/null; }
+epoch() { date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null; }
 
-timestamp_or_null() {
-	case "$1" in
-		'') printf '%s' null ;;
-		*) printf '"%s"' "$1" ;;
-	esac
-}
-
-atomic_write() {
-	atomic_target=$1
-	atomic_payload=$2
-	atomic_directory=$(dirname "$atomic_target")
-	mkdir -p "$atomic_directory"
-	chmod 700 "$atomic_directory"
-	DEADMAN_TMP=$(mktemp "$atomic_directory/.deadman.XXXXXX")
-	chmod 600 "$DEADMAN_TMP"
-	printf '%s\n' "$atomic_payload" > "$DEADMAN_TMP"
-	mv -f "$DEADMAN_TMP" "$atomic_target"
-	DEADMAN_TMP=
-}
-
-valid_timestamp() {
-	valid_value=$1
-	[ -z "$valid_value" ] && return 0
-	case "$valid_value" in
-		[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
-		*) return 1 ;;
-	esac
-	valid_epoch=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$valid_value" '+%s' 2>/dev/null) || return 1
-	[ -n "$valid_epoch" ] || return 1
-	valid_roundtrip=$(date -u -r "$valid_epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) || return 1
-	[ "$valid_roundtrip" = "$valid_value" ]
-}
-
-safe_last_error() {
-	case "$1" in
-		none|ok) printf '%s' none ;;
-		capture_failed|failed|retry_failed|write_failed|record_failed|transient_failure|permanent_failure)
-			printf '%s' capture_failed
-			;;
-		capture_status_missing|capture_status_stale|capture_status_invalid|config_invalid|unknown)
-			printf '%s' "$1"
-			;;
-		*) return 1 ;;
-	esac
-}
-
-extract_string() {
-	extract_key=$1
-	printf '%s' "$capture_compact" |
-		sed -nE 's/.*"'"$extract_key"'":"([^"\\]*)".*/\1/p' | sed -n '1p'
-}
-
-extract_integer() {
-	extract_key=$1
-	printf '%s' "$capture_compact" |
-		sed -nE 's/.*"'"$extract_key"'":([0-9]+)([,}]).*/\1/p' | sed -n '1p'
-}
-
-extract_nullable_string() {
-	extract_key=$1
-	if printf '%s' "$capture_compact" | grep -Eq '"'"$extract_key"'":null([,}])'; then
-		printf '%s' ''
-		return 0
-	fi
-	extract_string "$extract_key"
-}
-
-parse_capture_status() {
-	[ -f "$CAPTURE_STATUS" ] || return 1
-	[ ! -L "$CAPTURE_STATUS" ] || return 1
-	capture_compact=$(tr -d '[:space:]' < "$CAPTURE_STATUS") || return 1
-	case "$capture_compact" in
-		\{*\}) ;;
-		*) return 1 ;;
-	esac
-	printf '%s' "$capture_compact" | grep -Eq '"version":1([,}])' || return 1
-	capture_last_attempt_at=$(extract_nullable_string last_attempt_at)
-	capture_last_success_at=$(extract_nullable_string last_success_at)
-	capture_last_commit_at=$(extract_nullable_string last_commit_at)
-	capture_oldest_pending_at=$(extract_nullable_string oldest_pending_at)
-	[ -n "$capture_last_attempt_at" ] ||
-		printf '%s' "$capture_compact" | grep -Eq '"last_attempt_at":null([,}])' || return 1
-	[ -n "$capture_last_success_at" ] ||
-		printf '%s' "$capture_compact" | grep -Eq '"last_success_at":null([,}])' || return 1
-	[ -n "$capture_last_commit_at" ] ||
-		printf '%s' "$capture_compact" | grep -Eq '"last_commit_at":null([,}])' || return 1
-	[ -n "$capture_oldest_pending_at" ] ||
-		printf '%s' "$capture_compact" | grep -Eq '"oldest_pending_at":null([,}])' || return 1
-	valid_timestamp "$capture_last_attempt_at" || return 1
-	valid_timestamp "$capture_last_success_at" || return 1
-	valid_timestamp "$capture_last_commit_at" || return 1
-	valid_timestamp "$capture_oldest_pending_at" || return 1
-	capture_pending=$(extract_integer pending)
-	capture_failed=$(extract_integer failed)
-	case "$capture_pending" in
-		0|[1-9]|[1-9][0-9]*) ;;
-		*) return 1 ;;
-	esac
-	case "$capture_failed" in
-		0|[1-9]|[1-9][0-9]*) ;;
-		*) return 1 ;;
-	esac
-	capture_last_error_raw=$(extract_nullable_string last_error)
-	if [ -z "$capture_last_error_raw" ]; then
-		printf '%s' "$capture_compact" | grep -Eq '"last_error":null([,}])' || return 1
-		capture_last_error=none
-	else
-		capture_last_error=$(safe_last_error "$capture_last_error_raw") || return 1
-	fi
-}
-
-read_state() {
-	state_condition=healthy
-	state_last_alert_at=
-	if [ ! -f "$DEADMAN_STATE" ] || [ -L "$DEADMAN_STATE" ]; then
-		return 0
-	fi
-	state_compact=$(tr -d '[:space:]' < "$DEADMAN_STATE" 2>/dev/null || true)
-	case "$state_compact" in
-		\{*\}) ;;
-		*) return 0 ;;
-	esac
-	case "$state_compact" in
-		*"\"condition\":\"missing\""*) state_condition=missing ;;
-		*"\"condition\":\"stale\""*) state_condition=stale ;;
-		*"\"condition\":\"failed\""*) state_condition=failed ;;
-		*"\"condition\":\"invalid\""*) state_condition=invalid ;;
-		*) state_condition=healthy ;;
-	esac
-	case "$state_compact" in
-		*"\"last_alert_at\":null"*) state_last_alert_at= ;;
-		*)
-			state_last_alert_at=$(printf '%s' "$state_compact" |
-				sed -nE 's/.*"last_alert_at":"([^"\\]*)".*/\1/p' | sed -n '1p')
-			valid_timestamp "$state_last_alert_at" || state_last_alert_at=
-			;;
-	esac
-}
-
-now_text=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-now_epoch=$(date -u '+%s')
-capture_last_attempt_at=
-capture_last_success_at=
-capture_last_commit_at=
-capture_oldest_pending_at=
-capture_pending=0
-capture_failed=0
-capture_last_error=none
-condition=missing
-
-if [ -f "$CAPTURE_STATUS" ] && [ ! -L "$CAPTURE_STATUS" ]; then
-	if parse_capture_status; then
-		condition=healthy
-		case "$capture_failed" in
-			0)
-				if [ -z "$capture_last_success_at" ]; then
-					condition=stale
-				else
-					capture_success_epoch=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' \
-						"$capture_last_success_at" '+%s' 2>/dev/null || printf '%s' 0)
-					if [ $((now_epoch - capture_success_epoch)) -gt 900 ]; then
-						condition=stale
-					fi
-				fi
-				;;
-			[1-9]*) condition=failed ;;
-			*) condition=invalid ;;
-		esac
-	else
-		capture_last_attempt_at=
-		capture_last_success_at=
-		capture_last_commit_at=
-		capture_oldest_pending_at=
-		capture_pending=0
-		capture_failed=0
-		capture_last_error=capture_status_invalid
-		condition=invalid
-	fi
-fi
-
-read_state
-alerted=false
-if [ "$condition" != healthy ]; then
-	should_alert=true
-	if [ "$state_condition" = "$condition" ] && [ -n "$state_last_alert_at" ]; then
-		state_alert_epoch=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' \
-			"$state_last_alert_at" '+%s' 2>/dev/null || printf '%s' 0)
-		state_age=$((now_epoch - state_alert_epoch))
-		if [ "$state_age" -ge 0 ] && [ "$state_age" -lt 3600 ]; then
-			should_alert=false
+if [ ! -f "$STATUS" ] || [ -L "$STATUS" ]; then
+	condition=missing
+elif [ "$(field version)" != 1 ]; then
+	condition=invalid
+else
+	failed=$(field failed)
+	success=$(epoch "$(field last_success_at)") || success=
+	case $failed in
+	'' | *[!0-9]*) condition=invalid ;;
+	0)
+		if [ -z "$success" ] || [ $((now - success)) -gt $MAX_AGE ]; then
+			condition=stale
+		else
+			condition=healthy
 		fi
-	fi
-	if [ "$should_alert" = true ]; then
-		case "$condition" in
-			missing) notification='display notification "Capture status is missing." with title "Chronovisor"' ;;
-			stale) notification='display notification "Capture has not completed recently." with title "Chronovisor"' ;;
-			failed) notification='display notification "Capture reports failed work." with title "Chronovisor"' ;;
-			invalid) notification='display notification "Capture status is invalid." with title "Chronovisor"' ;;
-		esac
-		osascript_path=$(command -v osascript 2>/dev/null || true)
-		case "$osascript_path" in
-			/*) "$osascript_path" -e "$notification" >/dev/null 2>&1 || true ;;
-		esac
-		alerted=true
-		state_last_alert_at=$now_text
-	fi
-else
-	state_condition=healthy
-	state_last_alert_at=
+		;;
+	*) condition=failed ;;
+	esac
 fi
 
+last_condition=healthy
+last_alert=0
+[ -f "$STATE" ] && [ ! -L "$STATE" ] && read -r last_condition last_alert <"$STATE"
+case $last_alert in '' | *[!0-9]*) last_alert=0 ;; esac
+
+alerted=false
 if [ "$condition" = healthy ]; then
-	status_text=healthy
-else
-	status_text=alert
+	last_alert=0
+elif [ "$condition" != "$last_condition" ] || [ $((now - last_alert)) -ge $REPEAT ]; then
+	osascript -e "display notification \"Capture is $condition.\" with title \"Chronovisor\"" >/dev/null 2>&1 || true
+	alerted=true
+	last_alert=$now
 fi
-case "$condition" in
-	missing) capture_last_error=capture_status_missing ;;
-	invalid) capture_last_error=capture_status_invalid ;;
-	stale)
-		[ "$capture_last_error" = none ] && capture_last_error=capture_status_stale
-		;;
-	failed)
-		[ "$capture_last_error" = none ] && capture_last_error=capture_failed
-		;;
-esac
 
-state_payload=$(printf '%s\n' \
-	'{' \
-	"  \"version\": 1," \
-	"  \"condition\": \"$condition\"," \
-	"  \"last_alert_at\": $(timestamp_or_null "$state_last_alert_at")" \
-	'}')
-atomic_write "$DEADMAN_STATE" "$state_payload"
-
-status_payload=$(printf '%s\n' \
-	'{' \
-	"  \"version\": 1," \
-	"  \"status\": \"$status_text\"," \
-	"  \"condition\": \"$condition\"," \
-	"  \"observed_at\": \"$now_text\"," \
-	"  \"alerted\": $alerted," \
-	"  \"last_attempt_at\": $(timestamp_or_null "$capture_last_attempt_at")," \
-	"  \"last_success_at\": $(timestamp_or_null "$capture_last_success_at")," \
-	"  \"last_commit_at\": $(timestamp_or_null "$capture_last_commit_at")," \
-	"  \"oldest_pending_at\": $(timestamp_or_null "$capture_oldest_pending_at")," \
-	"  \"pending\": $capture_pending," \
-	"  \"failed\": $capture_failed," \
-	"  \"last_error\": \"$capture_last_error\"" \
-	'}')
-atomic_write "$DEADMAN_STATUS" "$status_payload"
-
-exit 0
+write() { printf '%s\n' "$2" >"$1.tmp" && mv -f "$1.tmp" "$1"; }
+write "$STATE" "$condition $last_alert"
+[ "$condition" = healthy ] && status=healthy || status=alert
+write "$RUN/deadman-status.json" "{\"version\": 1, \"status\": \"$status\", \"condition\": \"$condition\", \"observed_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\", \"alerted\": $alerted}"
