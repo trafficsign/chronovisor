@@ -11,6 +11,7 @@ from chronovisor.capture.background_jobs import retry_due, snapshot
 from chronovisor.capture.session_sweeper import run_sweeper
 from chronovisor.common.config import RuntimeConfigError
 from chronovisor.common.timeutil import utc_now
+from chronovisor.index.index_store import get_store
 
 STATUS_FILE = capture_status.status_path()
 RETRY_LIMIT = 8
@@ -127,6 +128,16 @@ def run_capture(*, limit: int = RETRY_LIMIT) -> dict[str, Any]:
         "failed": failed,
         "last_error": last_error,
     }
+    index_refreshed_at = previous.get("index_refreshed_at")
+    index_error = "none"
+    try:
+        get_store().refresh()
+    except Exception as exc:
+        index_error = type(exc).__name__
+    else:
+        index_refreshed_at = capture_status.timestamp()
+    status["index_refreshed_at"] = index_refreshed_at
+    status["index_error"] = index_error
     capture_status.write(STATUS_FILE, status)
     return {**status, "ok": error is None}
 

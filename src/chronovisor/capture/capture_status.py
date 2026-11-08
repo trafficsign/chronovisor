@@ -56,6 +56,14 @@ def safe_error_token(value: object, default: str = "capture_status_invalid") -> 
     return value if isinstance(value, str) and value in SAFE_ERROR_TOKENS else default
 
 
+def index_error_token(value: object, default: str = "none") -> str:
+    if value == "none":
+        return "none"
+    if isinstance(value, str) and value.isidentifier():
+        return value
+    return default
+
+
 def _count(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return 0
@@ -84,6 +92,8 @@ def write(path: Path, status: Mapping[str, Any]) -> None:
         "pending": _count(status.get("pending")),
         "failed": _count(status.get("failed")),
         "last_error": safe_error_token(status.get("last_error"), "capture_failed"),
+        "index_refreshed_at": normalize_timestamp(status.get("index_refreshed_at")),
+        "index_error": index_error_token(status.get("index_error"), "none"),
     }
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
@@ -106,4 +116,6 @@ def snapshot(path: Path) -> dict[str, Any]:
         "pending": _count(data.get("pending")),
         "failed": _count(data.get("failed")),
         "last_error": safe_error_token(data.get("last_error")),
+        "index_refreshed_at": normalize_timestamp(data.get("index_refreshed_at")),
+        "index_error": index_error_token(data.get("index_error"), "none"),
     }

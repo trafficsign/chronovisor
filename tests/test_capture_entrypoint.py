@@ -320,3 +320,71 @@ def test_project_declares_capture_entry_point() -> None:
         "project"
     ]["scripts"]
     assert scripts["chronovisor-capture"] == "chronovisor.surface.cycle:main"
+
+
+def test_capture_records_index_error_without_changing_capture_fields(
+    status_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _install_fakes(monkeypatch, job_results=[], sweep_results=[], by_status={})
+    monkeypatch.setattr(
+        capture_status,
+        "timestamp",
+        lambda value=None: "2026-11-08T00:00:00Z",
+    )
+    status_file.parent.mkdir(parents=True)
+    status_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "last_attempt_at": "2026-11-01T00:00:00Z",
+                "last_success_at": "2026-11-01T00:00:00Z",
+                "last_commit_at": None,
+                "oldest_pending_at": None,
+                "pending": 0,
+                "failed": 0,
+                "last_error": "none",
+                "index_refreshed_at": "2026-11-01T00:00:00Z",
+                "index_error": "none",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class BrokenStore:
+        def refresh(self) -> None:
+            raise RuntimeError("private transcript text")
+
+    monkeypatch.setattr(capture, "get_store", lambda: BrokenStore())
+    result = capture.run_capture()
+    payload = json.loads(status_file.read_text(encoding="utf-8"))
+
+    assert result["ok"] is True
+    assert payload["index_error"] == "RuntimeError"
+    assert payload["index_refreshed_at"] == "2026-11-01T00:00:00Z"
+    assert payload["last_success_at"] == "2026-11-08T00:00:00Z"
+    assert payload["failed"] == 0
+    assert "private transcript text" not in json.dumps(payload)
+    assert capture.main([]) == 0
+    capsys.readouterr()
+
+    class GoodStore:
+        def refresh(self) -> None:
+            return None
+
+    monkeypatch.setattr(capture, "get_store", lambda: GoodStore())
+    capture.run_capture()
+    good = json.loads(status_file.read_text(encoding="utf-8"))
+    for key in (
+        "last_attempt_at",
+        "last_success_at",
+        "last_commit_at",
+        "oldest_pending_at",
+        "pending",
+        "failed",
+        "last_error",
+    ):
+        assert payload[key] == good[key]
+    assert good["index_error"] == "none"
+    assert good["index_refreshed_at"] == "2026-11-08T00:00:00Z"

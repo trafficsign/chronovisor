@@ -62,3 +62,46 @@ def test_mcp_tools_do_not_scan_disk_when_the_snapshot_is_fresh(
     status()
 
     assert scans == []
+
+
+def test_page_edited_after_warmup_is_searchable_after_the_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    _page(root, "alpha", "alpha needle")
+    (root / "system").mkdir()
+
+    store = IndexStore(root)
+    store.refresh()
+
+    monkeypatch.setattr(server, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(server, "get_store", lambda: store)
+    monkeypatch.setattr(index_store, "get_store", lambda: store)
+    monkeypatch.setattr(
+        search_module, "_BM25_CACHE_FILE", root / ".index" / "lexical.sqlite"
+    )
+    monkeypatch.setattr(search_module, "_BM25_SINGLETON", None)
+
+    from chronovisor.surface import cycle as capture
+
+    monkeypatch.setattr(capture, "STATUS_FILE", root / "runtime" / "capture-status.json")
+    monkeypatch.setattr(capture, "get_store", lambda: store)
+    monkeypatch.setattr(capture, "retry_due", lambda *, limit: {"results": []})
+    monkeypatch.setattr(capture, "run_sweeper", lambda *, limit: {"results": []})
+    monkeypatch.setattr(capture, "snapshot", lambda: {"status": "ok", "by_status": {}})
+
+    clock = [0.0]
+    monkeypatch.setattr(index_store.time, "monotonic", lambda: clock[0])
+
+    search = getattr(server.chronovisor_search, "fn", server.chronovisor_search)
+    warm = json.loads(search("needle"))
+    assert [hit["page_id"] for hit in warm["direct_hits"]] == ["alpha"]
+
+    _page(root, "beta", "freshneedle")
+
+    capture.run_capture()
+    clock[0] = 3.0
+    monkeypatch.setattr(search_module, "_BM25_SINGLETON", None)
+
+    after = json.loads(search("freshneedle"))
+    assert [hit["page_id"] for hit in after["direct_hits"]] == ["beta"]
