@@ -472,18 +472,6 @@ def run_job(job_id: str) -> dict[str, Any]:
         result = _finish(job_id, exit_code=completed.returncode, output=output)
     except Exception as exc:
         result = _finish(job_id, exit_code=1, output=exc.__class__.__name__)
-    print(
-        json.dumps(
-            {
-                "job_id": job_id,
-                "status": result["status"],
-                "exit_code": result.get("exit_code"),
-            },
-            ensure_ascii=False,
-        )
-    )
-    if result.get("output_tail"):
-        print(result["output_tail"])
     return result
 
 
@@ -571,6 +559,14 @@ def snapshot() -> dict[str, Any]:
     }
 
 
+def _log_summary(result: dict[str, Any]) -> dict[str, Any]:
+    fields = ("job_id", "status", "exit_code", "due", "items", "by_status", "quarantined_24h", "error")
+    summary = {key: result[key] for key in fields if key in result}
+    if isinstance(result.get("results"), list):
+        summary["results"] = [_log_summary(row) for row in result["results"]]
+    return summary
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-background-jobs`` command-line entry point."""
     parser = argparse.ArgumentParser()
@@ -591,7 +587,7 @@ def main(argv: list[str] | None = None) -> int:
         result = repair_stale(quarantine_pending=args.quarantine_pending)
     else:
         result = snapshot()
-    print(json.dumps(result, ensure_ascii=False))
+    print(json.dumps(_log_summary(result), ensure_ascii=False))
     return 0
 
 
