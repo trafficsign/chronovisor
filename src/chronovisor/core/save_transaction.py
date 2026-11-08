@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.raw_segment import RawSegmentCorrupt
 from chronovisor.core.raw_store import RawStore
 
 _MARKER_PREFIX = "<!-- chronovisor-save-transaction:"
@@ -500,6 +501,8 @@ def find_published_save_transaction(
             )
     except FileNotFoundError:
         pass
+    except RawSegmentCorrupt:
+        raise RawSegmentCorrupt("raw journal validation failed; capture stopped") from None
     search_roots = (
         raw_dir,
         raw_dir / ".dead-letter",
