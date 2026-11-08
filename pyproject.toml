@@ -16,7 +16,7 @@ chronovisor-hook = "chronovisor.surface.hook_dispatcher:main"
 chronovisor-codex-record = "chronovisor.hosts.codex_record:main"
 chronovisor-claude-code-record = "chronovisor.hosts.claude_code_record:main"
 chronovisor-session-sweeper = "chronovisor.capture.session_sweeper:main"
-chronovisor-capture = "chronovisor.capture.cycle:main"
+chronovisor-capture = "chronovisor.surface.cycle:main"
 chronovisor-search-eval = "chronovisor.surface.search_eval:main"
 chronovisor-background-jobs = "chronovisor.capture.background_jobs:main"
 

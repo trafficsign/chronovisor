@@ -32,13 +32,14 @@ chronovisor_search
 - `common/`: paths, runtime config, canonical JSON/document, durable files,
   time and hash helpers.
 - `raw/`: raw v2 storage, commit journals, legacy archive, save transaction.
-- `capture/`: host transcripts, recorders, background jobs, sweeper and the
-  capture cycle.
+- `capture/`: host transcripts, recorders, background jobs and the session
+  sweeper.
 - `pages/`: page lookup, frontmatter, link fixes and page identity.
 - `index/`: page metadata, BM25 lexical index, registry, aliases and search
   types.
 - `search/`: the BM25 query API.
-- `surface/`: MCP server, hook dispatcher, dashboard and search eval.
+- `surface/`: MCP server, hook dispatcher, dashboard, search eval and the
+  scheduled capture cycle (the only scheduled index writer).
 - `hosts/`: exactly two persisted-name shims for old job module strings.
 
 ## Store

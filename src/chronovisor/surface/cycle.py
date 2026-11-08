@@ -1,4 +1,4 @@
-"""Run capture retries and the missed-session sweep in one process."""
+"""The scheduled 120 s cycle: capture retries, the missed-session sweep, then the index refresh (the only scheduled index writer)."""
 
 from __future__ import annotations
 

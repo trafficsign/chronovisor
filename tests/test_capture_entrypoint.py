@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 
 from chronovisor.capture import capture_status
-from chronovisor.capture import cycle as capture
 from chronovisor.common.config import RuntimeConfigError
+from chronovisor.surface import cycle as capture
 
 ROOT = Path(__file__).resolve().parents[1]
 DEADMAN = ROOT / "scripts" / "chronovisor-deadman"
@@ -319,4 +319,4 @@ def test_project_declares_capture_entry_point() -> None:
     scripts = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
         "project"
     ]["scripts"]
-    assert scripts["chronovisor-capture"] == "chronovisor.capture.cycle:main"
+    assert scripts["chronovisor-capture"] == "chronovisor.surface.cycle:main"
