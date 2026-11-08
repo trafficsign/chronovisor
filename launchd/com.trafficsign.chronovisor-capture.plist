@@ -22,6 +22,8 @@
 		<string>@@PYTHON@@</string>
 		<key>CHRONOVISOR_REPO_ROOT</key>
 		<string>@@PROJECT_ROOT@@</string>
+		<key>CHRONOVISOR_ROOT</key>
+		<string>@@HOME@@/.chronovisor</string>
 	</dict>
 	<key>StartInterval</key>
 	<integer>120</integer>
@@ -29,6 +31,8 @@
 	<true/>
 	<key>ProcessType</key>
 	<string>Background</string>
+	<key>Umask</key>
+	<integer>63</integer>
 	<key>StandardOutPath</key>
 	<string>@@HOME@@/.chronovisor/logs/capture.launchd.out.log</string>
 	<key>StandardErrorPath</key>
