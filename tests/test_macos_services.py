@@ -73,12 +73,7 @@ def test_bundled_plist_rejects_wrong_label_and_relative_program(tmp_path: Path) 
 def test_retired_experiments_are_not_bundled() -> None:
     module = _module()
     assert set(module.RETIRED_SUFFIXES).isdisjoint(module.SERVICE_SUFFIXES)
-    assert set(module.SERVICE_SUFFIXES) == {
-        "semantic",
-        "reranker",
-        "dashboard",
-        "lan-dashboard",
-    }
+    assert set(module.SERVICE_SUFFIXES) == {"dashboard", "lan-dashboard"}
     assert set(module.RETIRED_SUFFIXES) == {
         "librarian-rollout",
         "library-evidence",

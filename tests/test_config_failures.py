@@ -22,8 +22,6 @@ def _assert_safe_config_error(exc: BaseException) -> None:
         runtime_config.load_toml_file,
         runtime_config.load_runtime_settings,
         runtime_config.load_hook_policy,
-        runtime_config.load_search_embedding_config,
-        runtime_config.load_reranker_config,
     ),
 )
 def test_missing_config_uses_reader_defaults(
@@ -38,12 +36,8 @@ def test_missing_config_uses_reader_defaults(
         assert result == {}
     elif loader is runtime_config.load_runtime_settings:
         assert result == runtime_config.RuntimeSettings()
-    elif loader is runtime_config.load_hook_policy:
-        assert result == runtime_config.HookPolicy()
-    elif loader is runtime_config.load_search_embedding_config:
-        assert result == runtime_config.SearchEmbeddingConfig()
     else:
-        assert result == runtime_config.RerankerConfig()
+        assert result == runtime_config.HookPolicy()
 
     assert raw_layout_mode(chronovisor_root=tmp_path) == "v2"
 
@@ -54,8 +48,6 @@ def test_missing_config_uses_reader_defaults(
         runtime_config.load_toml_file,
         runtime_config.load_runtime_settings,
         runtime_config.load_hook_policy,
-        runtime_config.load_search_embedding_config,
-        runtime_config.load_reranker_config,
     ),
 )
 def test_invalid_config_is_a_safe_permanent_error(

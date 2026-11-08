@@ -12,8 +12,8 @@ def test_rank_summary_and_compare() -> None:
     assert rank_of(["a"], ["x", "a-part-02"]) == 2
     s = summarize(
         [
-            {"rank": 1, "ms": 10, "rerank": "applied"},
-            {"rank": None, "ms": 30, "rerank": "applied"},
+            {"rank": 1, "ms": 10},
+            {"rank": None, "ms": 30},
         ]
     )
     assert s["hit@1"] == 0.5 and s["mrr"] == 0.5 and s["p50_ms"] == 20

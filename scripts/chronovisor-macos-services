@@ -27,7 +27,7 @@ MANAGER_PROGRAM = "Contents/MacOS/Chronovisor"
 BUNDLE_PROGRAM = "Contents/Helpers/ChronovisorServiceRunner"
 # ponytail: bump this only when the runner changes; local signing pins its CDHash.
 MANAGED_LABEL_VERSION = 2
-SERVICE_SUFFIXES = ("semantic", "reranker", "dashboard", "lan-dashboard")
+SERVICE_SUFFIXES = ("dashboard", "lan-dashboard")
 RETIRED_SUFFIXES = ("librarian-rollout", "library-evidence", "soak")
 
 

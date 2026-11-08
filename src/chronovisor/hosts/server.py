@@ -30,7 +30,7 @@ mcp = FastMCP(
     instructions=(
         "Chronovisor searches existing knowledge pages. Use chronovisor_init at session "
         "start, chronovisor_search during conversation, and chronovisor_read for full "
-        "pages with backlinks. chronovisor_status reports indexes, services and capture jobs. "
+        "pages with backlinks. chronovisor_status reports indexes, capture status and capture jobs. "
         "Use chronovisor_record for explicit 'remember this' requests; it saves raw "
         "content without generating pages."
     ),
@@ -378,11 +378,10 @@ def chronovisor_search(
     updated_after: str | None = None,
     updated_before: str | None = None,
     sort_by: str = "relevance",
-    semantic: bool = True,
     tags: list[str] | None = None,
     tag_match: str = "all",
 ) -> str:
-    """Search wiki pages with BM25 + semantic search and link expansion.
+    """Search wiki pages with BM25 and link expansion.
     Returns direct_hits (pages matching query) and expanded_hits (linked pages).
     Args:
         query: Search query string
@@ -391,7 +390,6 @@ def chronovisor_search(
         updated_after: Filter pages updated after this date (ISO format)
         updated_before: Filter pages updated before this date (ISO format)
         sort_by: Sort order - "relevance" (default), "date", or "title"
-        semantic: Use the local semantic service (default True)
         tags: Filter results to pages whose frontmatter ``tags:`` field
             includes these values. Tags must be the full prefixed form
             (e.g. ``d/ai-industry``). Empty list / None disables the filter.
@@ -399,26 +397,19 @@ def chronovisor_search(
             present; ``"any"`` matches if at least one tag overlaps. Ignored
             when ``tags`` is empty / None.
     """
-    from chronovisor.core.pipeline import apply_rerank_stage
-    from chronovisor.core.reranker import rerank_results
-    from chronovisor.core.runtime_config import load_reranker_config
     from chronovisor.core.search import last_search_trace
     from chronovisor.core.search import search as run_search
 
     store = get_store()
     store.refresh()
-    reranker_cfg = load_reranker_config()
-    rerank_allowed = reranker_cfg.enabled and sort_by == "relevance"
-    search_top_n = max(10, reranker_cfg.top_n) if rerank_allowed else 10
 
     results, search_mode = run_search(
         query=query,
-        top_n=search_top_n,
+        top_n=10,
         folder=folder,
         updated_after=updated_after,
         updated_before=updated_before,
         sort_by=sort_by,
-        semantic=semantic,
     )
     retrieval_trace = last_search_trace()
     results, tag_filter = _filter_search_results(
@@ -427,19 +418,6 @@ def chronovisor_search(
         tags=tags,
         tag_match=tag_match,
     )
-
-    rerank_stage = apply_rerank_stage(
-        query,
-        results,
-        reranker_config=reranker_cfg,
-        rerank_results=rerank_results,
-        sort_by=sort_by,
-    )
-    results = rerank_stage.results
-    reranker_meta = rerank_stage.metadata
-    if rerank_stage.applied:
-        search_mode = f"{search_mode}+rerank"
-    results = results[:10]
 
     direct_hits = _direct_search_hits(
         results,
@@ -467,7 +445,6 @@ def chronovisor_search(
             "depth": depth,
             "search_mode": search_mode,
             "filters_applied": filters_applied,
-            "reranker": reranker_meta,
             "retrieval": retrieval_trace,
             "direct_hits": direct_hits,
             "expanded_hits": expanded_hits,
@@ -500,24 +477,9 @@ def chronovisor_init() -> str:
 
 @mcp.tool()
 def chronovisor_status() -> str:
-    """Return page count, index freshness, service status and capture jobs."""
-    from chronovisor.core import reranker_client, semantic_client
-    from chronovisor.core.runtime_config import (
-        load_reranker_config,
-        load_search_embedding_config,
-    )
-
+    """Return page count, index freshness and capture status."""
     store = get_store()
     store.refresh()
-    services = {}
-    for name, probe, config in (
-        ("semantic", semantic_client.health, load_search_embedding_config()),
-        ("reranker", reranker_client.health, load_reranker_config()),
-    ):
-        try:
-            services[name] = probe(config)
-        except Exception as exc:
-            services[name] = {"status": "unavailable", "error": type(exc).__name__}
     indexes = {}
     for name in ("pages.json", "lexical.sqlite"):
         path = CHRONOVISOR_ROOT / ".index" / name
@@ -529,7 +491,6 @@ def chronovisor_status() -> str:
         {
             "page_count": store.page_count(include_system=False),
             "indexes": indexes,
-            "services": services,
             "capture_jobs": snapshot(),
             "capture_status": capture_status.snapshot(
                 capture_status.status_path(CHRONOVISOR_ROOT)

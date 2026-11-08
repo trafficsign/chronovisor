@@ -272,7 +272,6 @@ def test_capture_launchd_template_runs_the_canonical_wrapper() -> None:
 def test_chronovisor_status_reports_capture_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from chronovisor.core import reranker_client, semantic_client
     from chronovisor.hosts import server
 
     monkeypatch.setattr(server, "CHRONOVISOR_ROOT", tmp_path)
@@ -300,12 +299,6 @@ def test_chronovisor_status_reports_capture_status(
 
     monkeypatch.setattr(server, "get_store", lambda: Store())
     monkeypatch.setattr(server, "snapshot", lambda: {"by_status": {}})
-    monkeypatch.setattr(
-        semantic_client, "health", lambda _config: {"status": "unavailable"}
-    )
-    monkeypatch.setattr(
-        reranker_client, "health", lambda _config: {"status": "unavailable"}
-    )
 
     read = getattr(server.chronovisor_status, "fn", server.chronovisor_status)
     payload = json.loads(read())

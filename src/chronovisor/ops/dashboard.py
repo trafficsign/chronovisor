@@ -11,7 +11,6 @@ import hashlib
 import hmac
 import ipaddress
 import json
-import math
 import os
 import re
 import secrets
@@ -28,7 +27,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from chronovisor.core import capture_status, index_store
-from chronovisor.core.background_jobs import CAPTURE_MODULES, _pid_alive
+from chronovisor.core.background_jobs import CAPTURE_MODULES
 from chronovisor.core.raw_segment import CAPTURE_TIMEZONE
 from chronovisor.core.raw_store import RawStore
 from chronovisor.core.runtime_config import load_toml_file
@@ -46,7 +45,6 @@ RAW_DATE_RE = re.compile(r"(?:^|[^0-9])(?P<stamp>20\d{6})(?:[^0-9]|$)")
 DASHBOARD_TIMEZONE = CAPTURE_TIMEZONE
 SAVE_HISTORY_SEGMENT_DETAIL_DAYS = 30
 SAVE_HISTORY_MAX_SEGMENTS_PER_DAY = 64
-SERVICE_STATUS_MAX_AGE_SECONDS = 30.0
 _LOCK_TYPE = type(threading.Lock())
 _SNAPSHOT_LOCK = threading.Lock()
 _SNAPSHOT_CACHE: dict[str, Any] = {}
@@ -68,85 +66,6 @@ DASHBOARD_IO_TIMEOUT_SECONDS = 30.0
 DASHBOARD_HANDLER_LIMIT = 32
 DASHBOARD_AUTH_CONCURRENCY_LIMIT = 2
 DASHBOARD_STREAM_LIMIT = 8
-
-
-def _service_model_rows(path: Path, *, capability: str) -> list[dict[str, Any]]:
-    """Read one local service status file into model-fleet rows."""
-
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except OSError, json.JSONDecodeError:
-        return []
-    if not isinstance(payload, dict):
-        return []
-    ready = payload.get("status") in {"ok", "ready"} and bool(payload.get("ready"))
-    try:
-        observed_at = float(payload.get("observed_at_epoch"))
-    except TypeError, ValueError:
-        observed_at = 0.0
-    now = time.time()
-    if (
-        not math.isfinite(observed_at)
-        or observed_at <= 0
-        or observed_at > now
-        or now - observed_at > SERVICE_STATUS_MAX_AGE_SECONDS
-        or not _pid_alive(payload.get("pid"))
-    ):
-        ready = False
-    routes = payload.get("routes")
-    if isinstance(routes, dict):
-        routes = {
-            key: route
-            for key, route in routes.items()
-            if key == "search.semantic.foreground"
-        }
-    if not isinstance(routes, dict):
-        route = payload.get("route")
-        routes = {"service": route} if isinstance(route, dict) else {}
-    if not routes:
-        model = payload.get("model")
-        if isinstance(model, str) and model.strip():
-            routes = {
-                "service": {
-                    "model": model,
-                    "provider": (
-                        "nemotron" if capability == "embedding" else "local-reranker"
-                    ),
-                }
-            }
-    models: dict[str, dict[str, Any]] = {}
-    for route in routes.values():
-        if not isinstance(route, dict):
-            continue
-        model = route.get("model") or payload.get("model")
-        if not isinstance(model, str) or not model.strip():
-            continue
-        model = model.strip()
-        provider = route.get("provider") or (
-            "nemotron" if capability == "embedding" else "local-reranker"
-        )
-        row = models.setdefault(
-            model,
-            {
-                "name": model,
-                "model": model,
-                "provider": provider,
-                "loaded": ready,
-                "size": None,
-                "size_vram": None,
-                "processor": payload.get("device") or provider,
-                "details": {
-                    "format": "MLX" if payload.get("device") == "mlx" else "service",
-                    "revision": payload.get("revision"),
-                    "runtime_model": payload.get("runtime_model"),
-                    "runtime_revision": payload.get("runtime_revision"),
-                },
-                "capabilities": [capability],
-                "_service_only": True,
-            },
-        )
-        row["loaded"] = bool(row["loaded"] or ready)
-    return list(models.values())
 
 
 def _read_json_file(path: Path) -> dict[str, Any] | None:
@@ -406,67 +325,8 @@ def _capture_snapshot() -> dict[str, Any]:
     }
 
 
-def _model_status_snapshot() -> dict[str, Any]:
-    config = load_toml_file(CHRONOVISOR_ROOT / "config.toml")
-    llm = config.get("llm", {})
-    roles = llm.get("roles", {}) if isinstance(llm, dict) else {}
-    roles = roles if isinstance(roles, dict) else {}
-    search = config.get("search", {})
-    embedding = search.get("embedding", {}) if isinstance(search, dict) else {}
-    semantic_enabled = not (
-        isinstance(embedding, dict) and embedding.get("enabled") is False
-    )
-    models = []
-    for service, capability, role, fallback in (
-        ("semantic", "embedding", "search.semantic.foreground", "Nemotron embedding"),
-        ("reranker", "rerank", "search.rerank", "StartLux search rerank"),
-    ):
-        enabled = service != "semantic" or semantic_enabled
-        rows = (
-            _service_model_rows(
-                CHRONOVISOR_ROOT / f"runtime/{service}-service-status.json",
-                capability=capability,
-            )
-            if enabled
-            else []
-        )
-        configured = roles.get(role, {})
-        model = configured.get("model") if isinstance(configured, dict) else None
-        row = (
-            rows[0]
-            if rows
-            else {"name": model or fallback, "loaded": False, "details": {}}
-        )
-        models.append(
-            {
-                **row,
-                "service": service,
-                "roles": ["embed" if service == "semantic" else "rerank"],
-                "status": "disabled"
-                if not enabled
-                else "loaded"
-                if row["loaded"]
-                else "unknown",
-                "enabled": enabled,
-                "configured": bool(model or rows),
-                "running": row["loaded"],
-                "installed": False,
-                "size_bytes": None,
-                "loaded_size_bytes": None,
-            }
-        )
-    return {
-        "models": models,
-        "summary": {
-            "loaded": sum(row["running"] for row in models),
-            "configured": sum(row["configured"] for row in models),
-            "enabled": sum(row["enabled"] for row in models),
-        },
-    }
-
-
 def build_snapshot() -> dict[str, Any]:
-    # Frozen pages need one scan; captures refresh independently of service heartbeats.
+    # Frozen pages need one scan; captures refresh independently of the page index.
     root = str(CHRONOVISOR_ROOT)
     with _SNAPSHOT_LOCK:
         if _SNAPSHOT_CACHE.get("root") != root:
@@ -478,39 +338,8 @@ def build_snapshot() -> dict[str, Any]:
         history = _SNAPSHOT_CACHE["save_history"]
         knowledge = _SNAPSHOT_CACHE["knowledge_mix"]
     capture = _capture_snapshot()
-    models = _model_status_snapshot()
-    services = {
-        row["service"]: {
-            "ready": row["running"],
-            "enabled": row["enabled"],
-            "model": row["name"],
-        }
-        for row in models["models"]
-    }
     counts = capture["by_status"]
     events = list(capture.pop("events"))
-    for name, service in services.items():
-        if not service["enabled"]:
-            continue
-        payload = (
-            _read_json_file(CHRONOVISOR_ROOT / f"runtime/{name}-service-status.json")
-            or {}
-        )
-        stamp = payload.get("observed_at_epoch")
-        if (
-            isinstance(stamp, (int, float))
-            and math.isfinite(stamp)
-            and 0 < stamp <= time.time()
-        ):
-            events.append(
-                {
-                    "timestamp": datetime.fromtimestamp(
-                        stamp, DASHBOARD_TIMEZONE
-                    ).isoformat(),
-                    "level": "info" if service["ready"] else "warning",
-                    "message": f"{name} service · {'ready' if service['ready'] else 'unavailable'}",
-                }
-            )
     return {
         "generated_at": datetime.now(DASHBOARD_TIMEZONE).isoformat(),
         "status": {
@@ -518,11 +347,9 @@ def build_snapshot() -> dict[str, Any]:
             "saves_today": history["days"][-1]["raw_saved"],
             "page_count": knowledge["total_pages"],
             "capture": capture,
-            "services": services,
         },
         "save_history": history,
         "knowledge_mix": knowledge,
-        "model_status": models,
         "health": {"capture": capture, "queue": counts},
         "events": sorted(events, key=lambda event: event["timestamp"])[-80:],
     }
@@ -1083,8 +910,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             }:
                 key = path.removeprefix("/api/").replace("-", "_")
                 _json_response(self, {key: build_snapshot()[key]})
-            elif path == "/api/model-status":
-                _json_response(self, {"model_status": _model_status_snapshot()})
             elif path == "/api/cortex/graph":
                 self._cortex_graph_response()
             elif path == "/api/cortex/events":

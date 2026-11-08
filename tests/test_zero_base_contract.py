@@ -14,8 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.core import background_jobs, llm_config
-from chronovisor.core.runtime_config import SearchEmbeddingConfig
+from chronovisor.core import background_jobs
 from chronovisor.hosts import hook_dispatcher, server
 
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -155,7 +154,6 @@ def test_mcp_exposes_exactly_five_tools_and_retained_parameters():
         "updated_after",
         "updated_before",
         "sort_by",
-        "semantic",
         "tags",
         "tag_match",
     }
@@ -266,49 +264,6 @@ def test_init_reads_only_two_pages_and_capture_count(monkeypatch):
     result = json.loads(server.chronovisor_init())
     assert seen == ["user-profile", "lessons-learned"]
     assert result["status"] == {"page_count": 7, "queued_capture_jobs": 2}
-
-
-def test_obsolete_config_sections_and_roles_are_ignored(tmp_path, monkeypatch):
-    path = tmp_path / "config.toml"
-    path.write_text("""[llm.providers.retired]
-kind = "not-a-provider"
-[llm.roles."recall.filter"]
-provider = "missing"
-capability = "invalid"
-[llm.roles."search.rerank"]
-provider = "startlux"
-capability = "rerank"
-model = "decision"
-[llm.providers.startlux]
-kind = "local-decision-mlx"
-path = "/unused/model"
-[llm.roles."search.semantic.foreground"]
-provider = "embedding"
-capability = "embedding"
-model = "nemotron"
-[llm.providers.embedding]
-kind = "nemotron"
-device = "cpu"
-[recall]
-enabled = true
-[decision]
-invalid = true
-[classification]
-provider = "retired"
-""")
-    monkeypatch.setattr(
-        llm_config,
-        "load_search_embedding_config",
-        lambda path: SearchEmbeddingConfig(query_device="cpu"),
-    )
-    runtime = llm_config.load_llm_runtime(path)
-    assert runtime.resolve_rerank("search.rerank").provider == "local-decision"
-    assert set(runtime._embedding) == {"search.semantic.foreground"}
-    path.write_text(
-        path.read_text().replace('kind = "local-decision-mlx"', 'kind = "remote"')
-    )
-    with pytest.raises(llm_config.LLMConfigError, match="local StartLux"):
-        llm_config.load_llm_runtime(path)
 
 
 def test_sweeper_recovers_both_hosts_and_appends_byte_exact_tails(tmp_path):
@@ -486,15 +441,6 @@ def test_read_links_and_search_expansion_keep_read_only_indexes(tmp_path, monkey
         for p in tmp_path.rglob("*")
         if p.is_file()
     } == before
-
-
-@pytest.mark.parametrize("method", ["judge", "recall_filter"])
-def test_reranker_rejects_retired_methods_without_loading_models(method):
-    from chronovisor.search.reranker_service import RerankerServiceState
-
-    state = object.__new__(RerankerServiceState)
-    with pytest.raises(ValueError, match="unknown reranker method"):
-        state.handle({"method": method})
 
 
 def test_existing_page_registry_redirects_remain_read_only_and_contained(

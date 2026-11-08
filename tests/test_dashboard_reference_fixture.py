@@ -205,31 +205,29 @@ def _preview(snapshot, graph=None):
 
 
 OBSERVATORY_AUDIT = r"""
-const required = ['Save History', 'Save Load', 'Knowledge Mix', 'Memory Health', 'Model Fleet', 'Recent Events'];
+const required = ['Save History', 'Save Load', 'Knowledge Mix', 'Memory Health', 'Recent Events'];
 const headings = [...document.querySelectorAll('h2')].map(node => node.textContent);
 if (JSON.stringify(headings) !== JSON.stringify(required)) throw new Error('Unexpected panels: '+headings);
 for (const mode of ['weekly','cumulative','daily']) document.querySelector(`[data-save-mode="${mode}"]`).click();
 for (const mode of ['pages','size']) document.querySelector(`[data-knowledge-mode="${mode}"]`).click();
 document.querySelector('.save-cell:not(.blank)')?.click();
 await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-const overflowing = [...document.querySelectorAll('.metric-card, .model-row, .health-group, .event')].filter(node => node.scrollWidth > node.clientWidth+1).map(node => node.className);
+const overflowing = [...document.querySelectorAll('.metric-card, .health-group, .event')].filter(node => node.scrollWidth > node.clientWidth+1).map(node => node.className);
 if (document.documentElement.scrollWidth > window.innerWidth+1 || overflowing.length) throw new Error('Overflow: '+overflowing);
 const metrics = [...document.querySelectorAll('.metric-card strong')].map(node => node.textContent);
 if (metrics.length !== 5) throw new Error('Expected five metric cards');
-return {headings, metrics, width:innerWidth, overflowing, modelCount:document.querySelectorAll('.model-row').length, disabled:document.querySelectorAll('.model-row.disabled').length, text:document.body.innerText};
+return {headings, metrics, width:innerWidth, overflowing, text:document.body.innerText};
 """
 
 
 @pytest.mark.parametrize("width", [1600, 760])
 @pytest.mark.parametrize(
-    "state", ["ready", "queued", "running", "retry_wait", "failed", "empty", "disabled"]
+    "state", ["ready", "queued", "running", "retry_wait", "failed", "empty"]
 )
 def test_observatory_states_and_controls(tmp_path, monkeypatch, width, state):
     root = tmp_path / "data"
     root.mkdir()
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", root)
-    if state == "disabled":
-        (root / "config.toml").write_text("[search.embedding]\nenabled = false\n")
     if state != "empty":
         (root / "raw").mkdir()
         day = datetime.now(dashboard.DASHBOARD_TIMEZONE).strftime("%Y%m%d")
@@ -256,23 +254,6 @@ def test_observatory_states_and_controls(tmp_path, monkeypatch, width, state):
                 }
             )
         )
-        for service, model in (
-            ("semantic", "nvidia/Nemotron-3-Embed-1B-BF16"),
-            ("reranker", "StartLux-10B-search-rerank"),
-        ):
-            if state == "disabled" and service == "semantic":
-                continue
-            (runtime / f"{service}-service-status.json").write_text(
-                json.dumps(
-                    {
-                        "model": model,
-                        "status": "ok",
-                        "ready": state != "failed",
-                        "pid": os.getpid(),
-                        "observed_at_epoch": time.time(),
-                    }
-                )
-            )
     snapshot = dashboard.build_snapshot()
     visual = Path(os.environ.get("CHRONOVISOR_DASHBOARD_VISUAL_DIR", tmp_path))
     with _preview(snapshot) as url:
@@ -284,17 +265,12 @@ def test_observatory_states_and_controls(tmp_path, monkeypatch, width, state):
             expression=OBSERVATORY_AUDIT,
             full_page=True,
         )
-    assert result["audit"]["modelCount"] == 2
     assert result["audit"]["metrics"][0] == ("0" if state == "empty" else "1")
     assert result["audit"]["metrics"][1] == (
         "1" if state in {"queued", "retry_wait"} else "0"
     )
     if state == "running":
         assert "RUNNING" in result["audit"]["text"]
-    if state == "disabled":
-        assert result["audit"]["metrics"][-1] == "1 / 1"
-        assert result["audit"]["disabled"] == 1
-        assert "semantic: disabled" in result["audit"]["text"]
 
 
 @pytest.mark.parametrize("mode", ["organic", "sphere", "cluster", "empty"])

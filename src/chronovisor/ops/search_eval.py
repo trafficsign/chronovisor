@@ -57,29 +57,19 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mrr": sum(1 / r for r in ranks if r) / n,
         "p50_ms": statistics.median(latency),
         "p95_ms": latency[min(n - 1, int(n * 0.95))],
-        "rerank": _count(r["rerank"] for r in rows),
     }
 
 
-def _count(values: Any) -> dict[str, int]:
-    out: dict[str, int] = {}
-    for value in values:
-        out[str(value)] = out.get(str(value), 0) + 1
-    return out
-
-
-def run(cases: list[dict[str, Any]], *, semantic: bool) -> dict[str, Any]:
+def run(cases: list[dict[str, Any]]) -> dict[str, Any]:
     from chronovisor.hosts.server import chronovisor_search
 
     t0 = time.perf_counter()
-    chronovisor_search(query="warm up", depth=0, semantic=semantic)
+    chronovisor_search(query="warm up", depth=0)
     cold_ms = (time.perf_counter() - t0) * 1000
     rows = []
     for case in cases:
         t = time.perf_counter()
-        payload = json.loads(
-            chronovisor_search(case["query"], depth=0, semantic=semantic)
-        )
+        payload = json.loads(chronovisor_search(case["query"], depth=0))
         ms = (time.perf_counter() - t) * 1000
         hits = [hit["page_id"] for hit in payload.get("direct_hits", [])]
         retrieval = payload.get("retrieval") or {}
@@ -90,7 +80,6 @@ def run(cases: list[dict[str, Any]], *, semantic: bool) -> dict[str, Any]:
                 "rank": rank_of(case["expected"], hits),
                 "ms": round(ms, 1),
                 "mode": payload.get("search_mode"),
-                "rerank": (payload.get("reranker") or {}).get("status"),
                 "stages": retrieval.get("stage_timings_ms"),
                 "hits": hits,
             }
@@ -98,7 +87,6 @@ def run(cases: list[dict[str, Any]], *, semantic: bool) -> dict[str, Any]:
     sets = sorted({r["set"] for r in rows})
     return {
         "commit": os.environ.get("CHRONOVISOR_EVAL_LABEL", ""),
-        "semantic": semantic,
         "cold_first_call_ms": round(cold_ms, 1),
         "summary": {
             "all": summarize(rows),
@@ -128,7 +116,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--set", action="append", dest="sets")
     parser.add_argument("--limit", type=int)
-    parser.add_argument("--semantic", action="store_true")
     parser.add_argument("--out")
     parser.add_argument("--compare", nargs=2, metavar=("A", "B"))
     args = parser.parse_args(argv)
@@ -137,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(compare(a, b)))
         return 0
     cases = load_cases(args.sets or list(DEFAULT_SETS))[: args.limit]
-    result = run(cases, semantic=args.semantic)
+    result = run(cases)
     if args.out:
         Path(args.out).write_text(json.dumps(result, ensure_ascii=False, indent=1))
     print(

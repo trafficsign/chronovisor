@@ -18,8 +18,6 @@ UVX_WRAPPERS = (
     "chronovisor-background-jobs",
     "chronovisor-session-sweeper",
     "chronovisor-capture",
-    "chronovisor-reranker-service",
-    "chronovisor-semantic-service",
 )
 
 

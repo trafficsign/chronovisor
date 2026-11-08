@@ -1,18 +1,12 @@
-"""Core search engine with BM25 and semantic RRF fusion."""
+"""Core BM25 search engine."""
 
-import contextlib
 import os
-import re
 import threading
-from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
 from chronovisor.core.lexical_index import LexicalIndex
-from chronovisor.core.runtime_config import (
-    load_search_embedding_config,
-)
-from chronovisor.core.search_types import ScoredPage, merge_evidence
+from chronovisor.core.search_types import ScoredPage
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     PAGES_DIR,
@@ -171,255 +165,9 @@ def get_bm25() -> BM25Index:
     return _BM25_SINGLETON
 
 
-# Semantic document projection shared by the immutable service index.
-MAX_CHUNKS_PER_PAGE = 8
-MAX_CHUNK_CHARS = 900
-
-
-def _recall_questions(meta: dict[str, Any]) -> list[str]:
-    questions = meta.get("recall_questions")
-    if not isinstance(questions, list):
-        return []
-    return [q for q in questions if isinstance(q, str) and q.strip()][:8]
-
-
-def _markdown_chunks(body: str, title: str, meta: dict[str, Any]) -> list[str]:
-    chunks: list[str] = []
-    heading = title
-    buffer: list[str] = []
-
-    summary_value = meta.get("description") or meta.get("summary")
-    summary = summary_value if isinstance(summary_value, str) else ""
-    entities = meta.get("entities") if isinstance(meta.get("entities"), list) else []
-    page_type = meta.get("page_type") if isinstance(meta.get("page_type"), str) else ""
-    updated = meta.get("updated") if isinstance(meta.get("updated"), str) else ""
-    context_lines = [f"Page: {title}"]
-    if summary.strip():
-        context_lines.append(f"Summary: {summary.strip()}")
-    if entities:
-        context_lines.append(
-            "Entities: " + ", ".join(str(item) for item in entities[:8])
-        )
-    if page_type or updated:
-        context_lines.append(
-            f"Metadata: type={page_type or 'knowledge'} updated={updated or 'unknown'}"
-        )
-    context = "\n".join(context_lines)
-
-    def flush() -> None:
-        nonlocal buffer
-        text = re.sub(r"\s+", " ", "\n".join(buffer)).strip()
-        buffer = []
-        if not text:
-            return
-        prefix = (
-            f"{context}\nHeading: {heading}"
-            if heading and heading != title
-            else context
-        )
-        while text:
-            piece = text[:MAX_CHUNK_CHARS].strip()
-            if len(text) > MAX_CHUNK_CHARS and " " in piece:
-                piece = (
-                    piece.rsplit(" ", 1)[0].strip() or text[:MAX_CHUNK_CHARS].strip()
-                )
-            chunks.append(f"{prefix}\n\n{piece}")
-            text = text[len(piece) :].strip()
-            if len(chunks) >= MAX_CHUNKS_PER_PAGE:
-                return
-
-    for line in body.splitlines():
-        stripped = line.strip()
-        heading_match = re.match(r"^(#{1,6})\s+(.+)$", stripped)
-        if heading_match:
-            flush()
-            heading = heading_match.group(2).strip()
-            if len(chunks) >= MAX_CHUNKS_PER_PAGE:
-                break
-            continue
-        if not stripped:
-            flush()
-            if len(chunks) >= MAX_CHUNKS_PER_PAGE:
-                break
-            continue
-        buffer.append(stripped)
-        if sum(len(item) for item in buffer) >= MAX_CHUNK_CHARS:
-            flush()
-            if len(chunks) >= MAX_CHUNKS_PER_PAGE:
-                break
-    if len(chunks) < MAX_CHUNKS_PER_PAGE:
-        flush()
-    if not chunks and title.strip():
-        chunks.append(title.strip())
-    return chunks[:MAX_CHUNKS_PER_PAGE]
-
-
-def update_embeddings(
-    page_ids: list[str] | None = None, *, strict: bool = False
-) -> int:
-    """Refresh the configured semantic-service index.
-
-    Nemotron writes are durable jobs.  Correctness-critical callers may use
-    ``strict=True`` to wait for generation-scoped delta publication.
-    """
-
-    config = load_search_embedding_config()
-    if not config.enabled:
-        return 0
-    from chronovisor.core.semantic_jobs import enqueue_pages, enqueue_rebuild
-
-    if page_ids is None:
-        enqueue_rebuild()
-        return 0
-    unique = sorted({page_id for page_id in page_ids if page_id})
-    if strict:
-        from chronovisor.core.semantic_client import index_pages
-
-        response = index_pages(unique, config, wait=True)
-        return int(response.get("pages_updated") or 0)
-
-    from chronovisor.core.semantic_index import extract_page_documents
-    from chronovisor.core.store import SYSTEM_DIR, find_page
-
-    hashes: dict[str, str] = {}
-    for page_id in unique:
-        path = find_page(page_id)
-        if path is None:
-            system_path = SYSTEM_DIR / f"{page_id}.md"
-            path = system_path if system_path.is_file() else None
-        documents = extract_page_documents(path) if path is not None else []
-        hashes[page_id] = documents[0].source_sha256 if documents else ""
-    enqueue_pages(unique, source_hashes=hashes)
-    return len(unique)
-
-
-def semantic_search(
-    query: str,
-    top_n: int = 20,
-    *,
-    include_reference: bool = False,
-    strict: bool = False,
-    timeout_ms: int | None = None,
-) -> list[ScoredPage]:
-    """Search through the selected execution topology."""
-
-    config = load_search_embedding_config()
-    if not config.enabled:
-        return []
-    from chronovisor.core import semantic_client
-
-    use_new = semantic_client.selected_for_rollout(query, config)
-    if config.rollout_mode == "shadow":
-        with contextlib.suppress(Exception):
-            semantic_client.search(
-                query,
-                top_n,
-                include_reference=include_reference,
-                config=config,
-                timeout_ms=timeout_ms,
-            )
-        return []
-    if not use_new:
-        return []
-    return semantic_client.search(
-        query,
-        top_n,
-        include_reference=include_reference,
-        config=config,
-        timeout_ms=timeout_ms,
-    )
-
-
 # ---------------------------------------------------------------------------
-# RRF Fusion + Filter + Sort
+# Filter + Sort
 # ---------------------------------------------------------------------------
-
-DEFAULT_FUSION_WEIGHTS: dict[str, float] = {
-    "bm25": 1.0,
-    "semantic": 0.6,
-    "bm25_score_bonus": 0.005,
-    "bm25_rank_bonus": 0.006,
-    "bm25_rank_decay": 0.006,
-    "semantic_min_top_score": 0.45,
-    "semantic_min_margin": 0.002,
-    "semantic_low_confidence_weight": 0.25,
-}
-
-
-def _semantic_reliability_multiplier(
-    semantic_results: list[ScoredPage],
-    weights: dict[str, float],
-) -> float:
-    if not semantic_results:
-        return 0.0
-    min_top = max(0.0, float(weights.get("semantic_min_top_score", 0.0)))
-    min_margin = max(0.0, float(weights.get("semantic_min_margin", 0.0)))
-    low_weight = max(0.0, float(weights.get("semantic_low_confidence_weight", 1.0)))
-    top1 = max(0.0, float(semantic_results[0].score))
-    top2 = (
-        max(0.0, float(semantic_results[1].score)) if len(semantic_results) > 1 else 0.0
-    )
-    if top1 < min_top or (top1 - top2) < min_margin:
-        return low_weight
-    return 1.0
-
-
-def fuse_results(
-    bm25_results: list[ScoredPage],
-    semantic_results: list[ScoredPage],
-    k: int = 60,
-    weights: dict[str, float] | None = None,
-) -> list[ScoredPage]:
-    """Weighted Reciprocal Rank Fusion of result lists."""
-    scores: dict[str, float] = {}
-    meta: dict[str, ScoredPage] = {}
-    weights = {**DEFAULT_FUSION_WEIGHTS, **(weights or {})}
-    bm25_score_bonus = max(0.0, float(weights.get("bm25_score_bonus", 0.0)))
-    bm25_rank_bonus = max(0.0, float(weights.get("bm25_rank_bonus", 0.0)))
-    bm25_rank_decay = max(0.0, float(weights.get("bm25_rank_decay", 0.0)))
-    semantic_multiplier = _semantic_reliability_multiplier(semantic_results, weights)
-
-    def add_results(results: list[ScoredPage], channel: str) -> None:
-        weight = max(0.0, float(weights.get(channel, 1.0)))
-        if channel == "semantic":
-            weight *= semantic_multiplier
-        if weight == 0:
-            return
-        top_raw = max((float(page.score) for page in results), default=0.0)
-        for rank, page in enumerate(results):
-            score = weight / (k + rank)
-            if channel == "bm25" and top_raw > 0:
-                score += (
-                    weight * bm25_score_bonus * (max(0.0, float(page.score)) / top_raw)
-                )
-                score += weight * max(0.0, bm25_rank_bonus - (bm25_rank_decay * rank))
-            scores[page.page_id] = scores.get(page.page_id, 0) + score
-            if page.page_id not in meta:
-                meta[page.page_id] = page
-            else:
-                previous = meta[page.page_id]
-                evidence = merge_evidence(previous.evidence, page.evidence)
-                if previous.content_sha256:
-                    evidence = tuple(
-                        e
-                        for e in evidence
-                        if e.source_sha256 == previous.content_sha256
-                    )
-                if previous.uid:
-                    evidence = tuple(e for e in evidence if e.page_uid == previous.uid)
-                meta[page.page_id] = replace(previous, evidence=evidence)
-
-    add_results(bm25_results, "bm25")
-    add_results(semantic_results, "semantic")
-
-    fused = []
-    for pid, score in scores.items():
-        p = meta[pid]
-        fused.append(replace(p, score=score, snippet=""))
-
-    fused.sort(key=lambda x: x.score, reverse=True)
-    return fused
-
 
 def apply_filters(
     results: list[ScoredPage],
@@ -477,44 +225,14 @@ def search(
     updated_after: str | None = None,
     updated_before: str | None = None,
     sort_by: str = "relevance",
-    semantic: bool = True,
-    fusion_weights: dict[str, float] | None = None,
-    semantic_timeout_ms: int | None = None,
 ) -> tuple[list[ScoredPage], str]:
-    """Retrieve BM25 and semantic candidates with the existing weighted RRF."""
-    weights = {**DEFAULT_FUSION_WEIGHTS, **(fusion_weights or {})}
-    config = load_search_embedding_config()
-    if fusion_weights is None and config.enabled:
-        weights.update(
-            semantic=config.fusion_weight,
-            semantic_min_top_score=config.min_top_score,
-            semantic_min_margin=config.min_margin,
-            semantic_low_confidence_weight=config.low_confidence_weight,
-        )
+    """Retrieve BM25 candidates, then apply filters and sorting."""
     fetch_n = max(top_n * 5, 100)
     index = get_bm25()
     index.build()
     lexical = index.query(query, top_n=fetch_n, include_reference=folder is not None)
-    semantic_results = []
-    if semantic:
-        semantic_results = semantic_search(
-            query,
-            top_n=fetch_n,
-            include_reference=folder is not None,
-            timeout_ms=semantic_timeout_ms,
-        )
-    results = (
-        fuse_results(lexical, semantic_results, weights=weights)
-        if semantic_results
-        else lexical
-    )
-    results = apply_filters(results, folder, updated_after, updated_before)
+    results = apply_filters(lexical, folder, updated_after, updated_before)
     _SEARCH_TRACE.value = {
-        "channels": {
-            "lexical": [p.page_id for p in lexical[:5]],
-            "semantic": [p.page_id for p in semantic_results[:5]],
-        },
+        "channels": {"lexical": [p.page_id for p in lexical[:5]]},
     }
-    return apply_sort(results, sort_by)[
-        :top_n
-    ], "hybrid" if semantic_results else "bm25"
+    return apply_sort(results, sort_by)[:top_n], "bm25"

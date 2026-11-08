@@ -1,26 +1,7 @@
-# Minimal capture and lexical-search configuration.
-# Existing configurations may keep obsolete sections until deployment cleanup.
+# Minimal capture and BM25-search configuration.
+# Retired search/LLM sections are ignored; remove them at deploy.
 [raw]
 layout = "v2"
 
 [hooks.stop]
 save = true
-
-[search.embedding]
-# Enable after configuring the local Nemotron service and its two roles:
-# llm.roles."search.semantic.foreground" / "search.semantic.incremental".
-enabled = false
-
-[search.reranker]
-# Enable after configuring llm.roles."search.rerank" with capability="rerank"
-# and a local-decision-mlx provider pointing to a local StartLux artifact.
-enabled = false
-top_n = 10
-weight = 1.0
-
-[search.reranker.service]
-enabled = false
-socket = "~/.chronovisor/runtime/reranker.sock"
-timeout_ms = 5000
-mode = "off"
-queue_size = 8

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import socket
 import ssl
 import subprocess
@@ -610,97 +609,6 @@ def test_dashboard_lan_websocket_accepts_basic_only_on_exact_https_origin(
     assert session_accepted == 101
 
 
-@pytest.mark.parametrize(
-    ("age_seconds", "pid_alive", "expected_loaded"),
-    [
-        (0, True, True),
-        (dashboard.SERVICE_STATUS_MAX_AGE_SECONDS + 1, True, False),
-        (0, False, False),
-    ],
-)
-def test_service_model_status_requires_fresh_live_process(
-    tmp_path: Path,
-    monkeypatch,
-    age_seconds: float,
-    pid_alive: bool,
-    expected_loaded: bool,
-) -> None:
-    pid = os.getpid() if pid_alive else os.getpid() + 100_000
-    path = tmp_path / "semantic-service-status.json"
-    path.write_text(
-        json.dumps(
-            {
-                "status": "ok",
-                "ready": True,
-                "pid": pid,
-                "observed_at_epoch": time.time() - age_seconds,
-                "routes": {
-                    "search.semantic.foreground": {
-                        "model": "nvidia/Nemotron-3-Embed-1B-BF16",
-                        "provider": "nemotron",
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        dashboard,
-        "_pid_alive",
-        lambda value: value == os.getpid(),
-    )
-
-    rows = dashboard._service_model_rows(path, capability="embedding")
-
-    assert len(rows) == 1
-    assert rows[0]["loaded"] is expected_loaded
-
-
-def test_service_model_status_rejects_invalid_time_and_uses_flat_model(
-    tmp_path: Path, monkeypatch
-) -> None:
-    path = tmp_path / "semantic-service-status.json"
-    path.write_text(
-        json.dumps(
-            {
-                "status": "ok",
-                "ready": True,
-                "pid": os.getpid(),
-                "observed_at_epoch": float("nan"),
-                "model": "nvidia/Nemotron-3-Embed-1B-BF16",
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        dashboard,
-        "_pid_alive",
-        lambda value: value == os.getpid(),
-    )
-
-    rows = dashboard._service_model_rows(path, capability="embedding")
-
-    assert rows == [
-        {
-            "name": "nvidia/Nemotron-3-Embed-1B-BF16",
-            "model": "nvidia/Nemotron-3-Embed-1B-BF16",
-            "provider": "nemotron",
-            "loaded": False,
-            "size": None,
-            "size_vram": None,
-            "processor": "nemotron",
-            "details": {
-                "format": "service",
-                "revision": None,
-                "runtime_model": None,
-                "runtime_revision": None,
-            },
-            "capabilities": ["embedding"],
-            "_service_only": True,
-        }
-    ]
-
-
 def test_knowledge_mix_snapshot_groups_pages_by_category(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -938,77 +846,10 @@ def test_save_history_is_empty_and_bounds_segment_details(tmp_path, monkeypatch)
     ]
 
 
-def test_snapshot_models_only_retained_roles_and_live_heartbeats(tmp_path, monkeypatch):
-    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
-    runtime = tmp_path / "runtime"
-    runtime.mkdir()
-    for name, model in (("semantic", "Nemotron"), ("reranker", "StartLux")):
-        (runtime / f"{name}-service-status.json").write_text(
-            json.dumps(
-                {
-                    "status": "ready",
-                    "ready": True,
-                    "pid": os.getpid(),
-                    "observed_at_epoch": time.time(),
-                    "model": model,
-                }
-            )
-        )
-    snapshot = dashboard.build_snapshot()
-    assert set(snapshot) == {
-        "generated_at",
-        "status",
-        "save_history",
-        "knowledge_mix",
-        "model_status",
-        "health",
-        "events",
-    }
-    assert snapshot["model_status"]["summary"]["loaded"] == 2
-    assert [row["roles"] for row in snapshot["model_status"]["models"]] == [
-        ["embed"],
-        ["rerank"],
-    ]
-    monkeypatch.setattr(dashboard, "_pid_alive", lambda _pid: False)
-    assert dashboard.build_snapshot()["model_status"]["summary"]["loaded"] == 0
-
-
-@pytest.mark.parametrize("semantic_status_exists", [False, True])
-def test_disabled_semantic_is_optional_with_or_without_status(
-    tmp_path, monkeypatch, semantic_status_exists
-):
-    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
-    (tmp_path / "config.toml").write_text("[search.embedding]\nenabled = false\n")
-    runtime = tmp_path / "runtime"
-    runtime.mkdir()
-    ready = {
-        "status": "ready",
-        "ready": True,
-        "pid": os.getpid(),
-        "observed_at_epoch": time.time(),
-        "model": "StartLux",
-    }
-    (runtime / "reranker-service-status.json").write_text(json.dumps(ready))
-    if semantic_status_exists:
-        (runtime / "semantic-service-status.json").write_text(
-            json.dumps({**ready, "model": "Nemotron"})
-        )
-    snapshot = dashboard.build_snapshot()
-    semantic = snapshot["model_status"]["models"][0]
-    assert semantic["status"] == "disabled"
-    assert not semantic["running"]
-    assert snapshot["model_status"]["summary"]["enabled"] == 1
-    assert snapshot["model_status"]["summary"]["loaded"] == 1
-    assert snapshot["status"]["services"]["semantic"]["enabled"] is False
-    assert not any("semantic" in event["message"] for event in snapshot["events"])
-    assert not list(runtime.glob("*.sock"))
-
-
 def test_retired_dashboard_routes_are_absent_and_errors_do_not_disclose(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
-    (tmp_path / "config.toml").write_text("[search.embedding]\nenabled = false\n")
     server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -1029,6 +870,7 @@ def test_retired_dashboard_routes_are_absent_and_errors_do_not_disclose(
             "metrics",
             "frontier-repair",
             "fast-snapshot",
+            "model-status",
         ):
             assert httpx.get(f"{url}/api/{path}").status_code == 404
         for path in (
@@ -1038,7 +880,6 @@ def test_retired_dashboard_routes_are_absent_and_errors_do_not_disclose(
             "save-history",
             "knowledge-mix",
             "health",
-            "model-status",
             "cortex/graph",
         ):
             assert httpx.get(f"{url}/api/{path}").status_code == 200

@@ -650,90 +650,6 @@ function renderKnowledgeMix(knowledgeMix) {
   });
 }
 
-function modelStatusRank(row) {
-  const order = { loaded: 0, unknown: 1, disabled: 2 };
-  return order[row.status] ?? 9;
-}
-
-function modelRoleLabel(role) {
-  return ({ embed: "Semantic embedding", rerank: "Search rerank", configured: "Configured" })[role] || fmt(role);
-}
-
-function renderModelStatus(modelStatus) {
-  const data = modelStatus || {};
-  const summary = data.summary || {};
-  const models = Array.isArray(data.models) ? [...data.models] : [];
-  els.modelServices.textContent = String(models.length);
-  els.modelLoaded.textContent = String(intValue(summary.loaded));
-  els.modelConfigured.textContent = String(intValue(summary.configured));
-  const enabled = models.filter((row) => row.enabled !== false).length;
-  els.modelUnavailable.textContent = String(enabled - intValue(summary.loaded));
-  els.modelCaption.textContent = `${intValue(summary.loaded)} / ${enabled} enabled services ready`;
-
-  els.modelGrid.innerHTML = "";
-  if (!models.length) {
-    els.modelGrid.innerHTML = "<div class=\"empty-state\">No model records yet.</div>";
-    return;
-  }
-
-  models
-    .sort((a, b) => {
-      const configuredRank = Number(Boolean(b.configured)) - Number(Boolean(a.configured));
-      if (configuredRank !== 0) return configuredRank;
-      return modelStatusRank(a) - modelStatusRank(b) || fmt(a.name).localeCompare(fmt(b.name));
-    })
-    .forEach((row) => {
-      const details = row.details || {};
-      const roles = Array.isArray(row.roles) ? row.roles : [];
-      const item = document.createElement("div");
-      item.className = `model-row ${fmt(row.status, "unknown")}`;
-
-      const main = document.createElement("div");
-      main.className = "model-main";
-      const state = document.createElement("span");
-      state.className = "model-state";
-      const stateDot = document.createElement("span");
-      state.append(stateDot, document.createTextNode(fmt(row.status, "unknown")));
-      const name = document.createElement("strong");
-      name.className = "model-name";
-      name.textContent = fmt(row.display_name || row.name);
-      name.title = fmt(row.name);
-      main.append(state, name);
-
-      const roleWrap = document.createElement("div");
-      roleWrap.className = "model-roles";
-      const roleList = roles.length ? roles : row.installed ? ["installed"] : ["configured"];
-      roleList.forEach((role) => {
-        const chip = document.createElement("span");
-        chip.className = `model-role role-${String(role).replace(/[^a-z0-9_-]/gi, "-").toLowerCase()}`;
-        chip.textContent = modelRoleLabel(role);
-        roleWrap.appendChild(chip);
-      });
-
-      const metaPieces = [];
-      if (row.display_name && row.display_name !== row.name) metaPieces.push(`API ${row.name}`);
-      if (row.size_bytes) metaPieces.push(`disk ${formatBytes(row.size_bytes)}`);
-      else if (row.installed && row.size_bytes === null) metaPieces.push("disk unknown");
-      if (row.loaded_size_bytes) metaPieces.push(`loaded ${formatBytes(row.loaded_size_bytes)}`);
-      else if (row.running && row.loaded_size_bytes === null) metaPieces.push("loaded size unknown");
-      if (row.context_length !== null && row.context_length !== undefined && Number(row.context_length) > 0) {
-        metaPieces.push(`${Number(row.context_length).toLocaleString()} ctx`);
-      }
-      if (details.parameter_size) metaPieces.push(details.parameter_size);
-      if (details.quantization_level) metaPieces.push(details.quantization_level);
-      if (details.format) metaPieces.push(details.format);
-      else if (row.provider) metaPieces.push(row.provider);
-      if (row.expires_at) metaPieces.push(`until ${timeLabel(row.expires_at)}`);
-      const meta = document.createElement("div");
-      meta.className = "model-meta";
-      meta.textContent = row.enabled === false ? "Disabled in configuration" : metaPieces.join(" · ") || `${row.provider || "local"} configured model`;
-      meta.title = meta.textContent;
-
-      item.append(main, roleWrap, meta);
-      els.modelGrid.appendChild(item);
-    });
-}
-
 function renderHealth(health) {
   const capture = health.capture || {};
   const queue = health.queue || {};
@@ -750,8 +666,6 @@ function renderHealth(health) {
 function render(snapshot) {
   const status = snapshot.status || {};
   const capture = status.capture || {};
-  const services = status.services || {};
-  const ready = Object.values(services).filter((service) => service.ready).length;
   setState(status.state);
   els.saves.textContent = fmt(status.saves_today);
   els.queue.textContent = fmt(capture.pending);
@@ -760,12 +674,14 @@ function render(snapshot) {
   els.captureSub.textContent = capture.last_error && capture.last_error !== "none" ? `Last error · ${capture.last_error}` : capture.last_success_at ? "Last successful capture" : "No capture runs";
   els.pages.textContent = fmt(status.page_count);
   els.pagesSub.textContent = "Frozen knowledge pages";
-  els.services.textContent = `${ready} / ${Object.values(services).filter((service) => service.enabled !== false).length}`;
-  els.servicesSub.textContent = Object.entries(services).map(([name, service]) => `${name}: ${service.enabled === false ? "disabled" : service.ready ? "ready" : "unavailable"}`).join(" · ");
+  const failed = intValue(capture.failed);
+  els.services.textContent = failed ? "attention" : capture.last_success_at ? "healthy" : "unknown";
+  els.servicesSub.textContent = capture.last_success_at
+    ? `last ${timeLabel(capture.last_success_at)} · ${intValue(capture.pending)} pending`
+    : "no capture status";
   renderSaveHistory(snapshot.save_history);
   renderKnowledgeMix(snapshot.knowledge_mix);
   renderHealth(snapshot.health || {});
-  renderModelStatus(snapshot.model_status);
   renderEvents(snapshot.events || []);
   drawLineChart(els.pendingChart, snapshot.save_history);
 }
