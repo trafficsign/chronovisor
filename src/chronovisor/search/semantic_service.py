@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import ctypes
-import fcntl
 import json
 import math
 import os
@@ -29,7 +28,6 @@ from typing import Any, cast
 
 import numpy as np
 
-from chronovisor.core import runtime_status
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.llm_config import load_default_llm_runtime
 from chronovisor.core.llm_runtime import (
@@ -44,7 +42,6 @@ from chronovisor.core.llm_runtime import (
     SourceDataClassification,
     SourceSensitivity,
 )
-from chronovisor.core.ollama import model_activity
 from chronovisor.core.runtime_config import (
     SearchEmbeddingConfig,
     load_search_embedding_config,
@@ -82,8 +79,6 @@ from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     SYSTEM_DIR,
     find_page,
-    okf_runtime_operation,
-    okf_startup_status,
 )
 from chronovisor.search.accelerator_lease import accelerator_lease
 from chronovisor.search.semantic_model import (
@@ -510,27 +505,6 @@ class QueryBatcher:
                     self._queue.task_done()
 
 
-def _ingest_is_active() -> bool:
-    llm = runtime_status.read_status().get("llm")
-    if not isinstance(llm, dict) or llm.get("active") is not True:
-        return False
-    lock_path = CHRONOVISOR_ROOT / "runtime" / "ingest-orchestrator.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        handle = lock_path.open("a+")
-    except OSError:
-        return False
-    try:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        return False
-    finally:
-        handle.close()
-
-
 def _set_background_qos() -> None:
     """Best-effort macOS per-thread QoS for incremental CPU inference."""
 
@@ -720,25 +694,15 @@ class SemanticServiceState:
                 if self._uses_local_controls(self._foreground_route)
                 else contextlib.nullcontext()
             )
-            activity = (
-                model_activity(
-                    model=self._foreground_route.model,
-                    operation="search",
-                    pipeline="recall",
-                )
-                if self._uses_local_controls(self._foreground_route)
-                else contextlib.nullcontext()
-            )
             with resources:
                 remaining_ms()
-                with activity:
-                    result = self._runtime_vectors(
-                        FOREGROUND_ROLE,
-                        texts,
-                        purpose,
-                        source=source,
-                        timeout_ms=remaining_ms() if deadline_at is not None else None,
-                    )
+                result = self._runtime_vectors(
+                    FOREGROUND_ROLE,
+                    texts,
+                    purpose,
+                    source=source,
+                    timeout_ms=remaining_ms() if deadline_at is not None else None,
+                )
             if deadline_at is not None:
                 _ensure_deadline(deadline_at)
             return result
@@ -768,22 +732,12 @@ class SemanticServiceState:
             return self._embed_background(
                 texts, EmbeddingPurpose.DOCUMENT, source=source
             )
-        activity = (
-            model_activity(
-                model=self._incremental_route.model,
-                operation="generate",
-                pipeline="improve",
-            )
-            if self._uses_local_controls(self._incremental_route)
-            else contextlib.nullcontext()
+        return self._runtime_vectors(
+            INCREMENTAL_ROLE,
+            texts,
+            EmbeddingPurpose.DOCUMENT,
+            source=source,
         )
-        with activity:
-            return self._runtime_vectors(
-                INCREMENTAL_ROLE,
-                texts,
-                EmbeddingPurpose.DOCUMENT,
-                source=source,
-            )
 
     def _embed_background(
         self,
@@ -1281,9 +1235,7 @@ class SemanticServiceState:
                 )
             else:
                 with _query_deadline_scope(deadline):
-                    result = self._search_vector_with_evidence(
-                        cached, bounded_top_n
-                    )
+                    result = self._search_vector_with_evidence(cached, bounded_top_n)
             _ensure_deadline(deadline)
             latency_ms = (time.monotonic() - started) * 1_000
             with self._metrics_lock:
@@ -1387,20 +1339,6 @@ class SemanticServiceState:
         self.reload()
         return {"status": "ok", "active": pointer}
 
-    def _pause_background_work(self) -> bool:
-        if self.config.incremental_pause_during_research:
-            from chronovisor.core import research_scheduler
-
-            if (
-                research_scheduler.sync_pending()
-                or research_scheduler.ACTIVE_FILE.exists()
-            ):
-                return True
-        return bool(
-            self.config.incremental_pause_during_ingest_generation
-            and _ingest_is_active()
-        )
-
     def _ensure_cpu(self) -> None:
         if self.config.incremental_device == "mlx":
             return  # Both lanes use the already-validated resident encoder.
@@ -1444,8 +1382,11 @@ class SemanticServiceState:
             path = system_path if system_path.is_file() else None
         documents = (
             extract_page_documents(
-                path, extractor_schema_version=generation.manifest.extractor_schema_version
-            ) if path is not None else []
+                path,
+                extractor_schema_version=generation.manifest.extractor_schema_version,
+            )
+            if path is not None
+            else []
         )
         current_hash = documents[0].source_sha256 if documents else ""
         if expected_hash and current_hash != expected_hash:
@@ -1465,8 +1406,11 @@ class SemanticServiceState:
                 vectors = self._embed_incremental_documents(texts, source=source)
             refreshed = (
                 extract_page_documents(
-                    path, extractor_schema_version=generation.manifest.extractor_schema_version
-                ) if path is not None else []
+                    path,
+                    extractor_schema_version=generation.manifest.extractor_schema_version,
+                )
+                if path is not None
+                else []
             )
             refreshed_hash = refreshed[0].source_sha256 if refreshed else ""
             if refreshed_hash != current_hash:
@@ -1489,7 +1433,9 @@ class SemanticServiceState:
         # only the pointer swap below is a maintenance window.
         try:
             self._validate_runtime_routes()
-            expected_current = str(read_active(root=self.root).get("generation_id") or "")
+            expected_current = str(
+                read_active(root=self.root).get("generation_id") or ""
+            )
             if (
                 self._generation is not None
                 and self._generation.manifest.generation_id != expected_current
@@ -1497,9 +1443,12 @@ class SemanticServiceState:
                 raise SemanticIndexError("active generation changed before rebuild")
             extractor_version = (
                 self._generation.manifest.extractor_schema_version
-                if self._generation is not None else 2
+                if self._generation is not None
+                else 2
             )
-            documents = extract_all_documents(extractor_schema_version=extractor_version)
+            documents = extract_all_documents(
+                extractor_schema_version=extractor_version
+            )
             built_hashes = {
                 document.page_id: document.source_sha256 for document in documents
             }
@@ -1525,28 +1474,18 @@ class SemanticServiceState:
                         self._model_lock.release()
                 return matrix
 
-            activity = (
-                model_activity(
-                    model=self._foreground_route.model,
-                    operation="generate",
-                    pipeline="improve",
-                )
-                if self._uses_local_controls(self._foreground_route)
-                else contextlib.nullcontext()
+            manifest = build_generation(
+                documents,
+                encode_documents=encode_batch,
+                **self._route_identity(self._foreground_route),
+                revision=self.config.revision,
+                dimensions=self.config.dimensions,
+                query_prefix=self.config.query_prefix,
+                document_prefix=self.config.document_prefix,
+                batch_size=self.config.maintenance_max_batch,
+                extractor_schema_version=extractor_version,
+                root=self.root,
             )
-            with activity:
-                manifest = build_generation(
-                    documents,
-                    encode_documents=encode_batch,
-                    **self._route_identity(self._foreground_route),
-                    revision=self.config.revision,
-                    dimensions=self.config.dimensions,
-                    query_prefix=self.config.query_prefix,
-                    document_prefix=self.config.document_prefix,
-                    batch_size=self.config.maintenance_max_batch,
-                    extractor_schema_version=extractor_version,
-                    root=self.root,
-                )
             self._maintenance.set()
             activate_generation(
                 manifest.generation_id,
@@ -1604,7 +1543,7 @@ class SemanticServiceState:
                 prune_completed_jobs()
                 prune_expired_legacy_archives()
                 self._last_job_prune = time.monotonic()
-            if self._pause_background_work() or self._maintenance.is_set():
+            if self._maintenance.is_set():
                 continue
             kinds = (
                 ("page", "rebuild") if self.config.incremental_enabled else ("rebuild",)
@@ -1737,13 +1676,6 @@ class _Server(socketserver.ThreadingUnixStreamServer):
 
 
 def serve(config: SearchEmbeddingConfig | None = None) -> None:
-    with okf_runtime_operation(CHRONOVISOR_ROOT):
-        _serve_locked(config)
-
-
-def _serve_locked(config: SearchEmbeddingConfig | None) -> None:
-    if not okf_startup_status(CHRONOVISOR_ROOT).allowed:
-        raise SystemExit(75)
     config = config or load_search_embedding_config()
     if not config.enabled:
         raise SystemExit("semantic service is disabled in config")
@@ -1793,22 +1725,10 @@ def main(argv: list[str] | None = None) -> int:
         default="serve",
     )
     args = parser.parse_args(argv)
-    if args.command == "status":
-        return _main_locked(args)
-    from chronovisor.core.okf_cutover import OKFStartupBlocked
-
-    try:
-        with okf_runtime_operation(CHRONOVISOR_ROOT):
-            return _main_locked(args)
-    except OKFStartupBlocked:
-        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
-        return 75
+    return _main_locked(args)
 
 
 def _main_locked(args: argparse.Namespace) -> int:
-    if args.command != "status" and not okf_startup_status(CHRONOVISOR_ROOT).allowed:
-        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
-        return 75
     config = load_search_embedding_config()
     if args.command == "serve":
         serve(config)

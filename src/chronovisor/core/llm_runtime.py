@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, NoReturn, Protocol, TypeVar
@@ -227,71 +226,6 @@ class RuntimeFailureTelemetry:
 
 
 @dataclass(frozen=True)
-class TokenUsage:
-    input_tokens: int | None = None
-    output_tokens: int | None = None
-
-
-@dataclass(frozen=True)
-class BackendCapabilities:
-    generation: bool
-    embedding: bool
-    structured_output: bool = False
-    streaming: bool = False
-    tools: bool = False
-    rerank: bool = False
-
-
-@dataclass(frozen=True)
-class GenerationRequest:
-    prompt: str = field(repr=False)
-    source: SourceDataClassification
-    system: str | None = field(default=None, repr=False)
-    format: Mapping[str, Any] | str | None = field(default=None, repr=False)
-    progress_callback: Callable[[dict[str, Any]], None] | None = field(
-        default=None, repr=False
-    )
-    num_ctx: int | None = None
-    max_output_tokens: int | None = None
-    keep_alive: str | None = None
-    timeout_ms: int | None = None
-    temperature: int | float | None = None
-    seed: int | None = None
-
-
-@dataclass(frozen=True)
-class MessageGenerationRequest:
-    messages: tuple[Mapping[str, str], ...] = field(repr=False)
-    format: Mapping[str, Any] | None = field(repr=False)
-    source: SourceDataClassification
-    num_ctx: int
-    max_output_tokens: int
-    keep_alive: str
-    timeout_ms: int
-    max_output_chars: int
-    temperature: int | float = 0
-    seed: int = 0
-    think: bool | str = False
-    progress_callback: Callable[[dict[str, Any]], None] | None = field(
-        default=None, repr=False
-    )
-
-
-GenerationInput = GenerationRequest | MessageGenerationRequest
-
-
-@dataclass(frozen=True)
-class GenerationResult:
-    content: str = field(repr=False)
-    provider: str
-    model: str
-    completed: bool = True
-    finish_reason: str | None = None
-    usage: TokenUsage = field(default_factory=TokenUsage)
-    metadata: Mapping[str, Any] = field(default_factory=dict, repr=False)
-
-
-@dataclass(frozen=True)
 class EmbeddingRequest:
     texts: tuple[str, ...] = field(repr=False)
     source: SourceDataClassification
@@ -313,11 +247,7 @@ class RerankRequest:
     source: SourceDataClassification
     timeout_ms: int | None = None
     candidate_sources: tuple[SourceDataClassification, ...] | None = None
-    # Decision-model backends phrase the question by purpose ("search" or
-    # "recall_filter"); context is the preceding user turn for the recall filter.
-    # Cross-encoder backends ignore both.
     purpose: str = "search"
-    context: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True)
@@ -334,13 +264,6 @@ class RerankResult:
     metadata: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
 
-class GenerationBackend(Protocol):
-    provider: str
-    location: RouteLocation
-
-    def generate(self, request: GenerationInput, *, model: str) -> GenerationResult: ...
-
-
 class EmbeddingBackend(Protocol):
     provider: str
     location: RouteLocation
@@ -353,44 +276,6 @@ class RerankBackend(Protocol):
     location: RouteLocation
 
     def rerank(self, request: RerankRequest, *, model: str) -> RerankResult: ...
-
-
-class LocalRuntimeControl(Protocol):
-    def resource_lease(
-        self, *, exclusive: bool, timeout_ms: int | None = None
-    ) -> AbstractContextManager[None]: ...
-
-    def resident_models(self) -> Mapping[str, tuple[int, int]]: ...
-
-    def unload(self, model: str, *, verify_timeout: float = 30.0) -> bool: ...
-
-
-@dataclass(frozen=True)
-class GenerationRoute:
-    backend: GenerationBackend
-    model: str
-    capabilities: BackendCapabilities = field(
-        default_factory=lambda: BackendCapabilities(
-            generation=True,
-            embedding=False,
-            structured_output=False,
-        )
-    )
-    protocol: str = "unknown"
-    endpoint_sha256: str | None = None
-    revision: str | None = None
-
-
-@dataclass(frozen=True)
-class ResolvedGenerationRoute:
-    role: str
-    provider: str
-    model: str
-    location: RouteLocation
-    capabilities: BackendCapabilities
-    protocol: str
-    endpoint_sha256: str | None
-    revision: str | None
 
 
 @dataclass(frozen=True)
@@ -433,12 +318,6 @@ def _resolve[Route](routes: Mapping[str, Route], role: str, capability: str) -> 
     return route
 
 
-def _valid_token_count(value: int | None) -> bool:
-    return value is None or (
-        isinstance(value, int) and not isinstance(value, bool) and value >= 0
-    )
-
-
 def _valid_budget(value: object, maximum: int, *, optional: bool) -> bool:
     return (optional and value is None) or (
         isinstance(value, int) and not isinstance(value, bool) and 0 < value <= maximum
@@ -460,14 +339,10 @@ class LLMRuntime:
     def __init__(
         self,
         *,
-        generation: Mapping[str, GenerationRoute] | None = None,
         embedding: Mapping[str, EmbeddingRoute] | None = None,
         rerank: Mapping[str, RerankRoute] | None = None,
-        local_controls: Mapping[str, LocalRuntimeControl] | None = None,
-        remote_egress_opt_ins: Iterable[tuple[str, SourceDataClass]] = (),
         max_retries: int = 0,
         telemetry: Callable[[RuntimeFailureTelemetry], None] | None = None,
-        cloud_execution_allowed: Callable[[], bool] | None = None,
     ) -> None:
         if (
             isinstance(max_retries, bool)
@@ -475,64 +350,10 @@ class LLMRuntime:
             or not 0 <= max_retries <= MAX_RETRIES
         ):
             raise ValueError(f"max_retries must be between 0 and {MAX_RETRIES}")
-        self._generation = dict(generation or {})
         self._embedding = dict(embedding or {})
         self._rerank = dict(rerank or {})
-        self._local_controls = dict(local_controls or {})
-        self._remote_egress_opt_ins = frozenset(remote_egress_opt_ins)
         self._max_retries = max_retries
         self._telemetry = telemetry
-        self._cloud_execution_allowed = cloud_execution_allowed
-
-    def generate(self, role: str, request: GenerationInput) -> GenerationResult:
-        route = _resolve(self._generation, role, "generation")
-        self._validate_request(
-            role, "generation", route.backend.provider, route.backend.location, request
-        )
-        location = self._preflight(
-            role=role,
-            capability="generation",
-            provider=route.backend.provider,
-            location=route.backend.location,
-            source=request.source,
-        )
-        result = self._invoke(
-            lambda: route.backend.generate(request, model=route.model),
-            role=role,
-            capability="generation",
-            provider=route.backend.provider,
-            location=location,
-        )
-        return self._validate_contract(
-            lambda: self._validate_generation(role, route, result),
-            role=role,
-            capability="generation",
-            provider=route.backend.provider,
-            location=location,
-            request_id=_result_request_id(result),
-        )
-
-    def generation_location(self, role: str) -> RouteLocation:
-        """Return the configured generation location without invoking a backend."""
-
-        return self.resolve_generation(role).location
-
-    def resolve_generation(self, role: str) -> ResolvedGenerationRoute:
-        """Return one immutable configured route without invoking its backend."""
-
-        route = _resolve(self._generation, role, "generation")
-        if not isinstance(route.backend.location, RouteLocation):
-            raise RouteConfigurationError(role, "generation")
-        return ResolvedGenerationRoute(
-            role=role,
-            provider=route.backend.provider,
-            model=route.model,
-            location=route.backend.location,
-            capabilities=route.capabilities,
-            protocol=route.protocol,
-            endpoint_sha256=route.endpoint_sha256,
-            revision=route.revision,
-        )
 
     def embed(self, role: str, request: EmbeddingRequest) -> EmbeddingResult:
         route = _resolve(self._embedding, role, "embedding")
@@ -634,46 +455,6 @@ class LLMRuntime:
             revision=route.revision,
         )
 
-    def decision_readout(
-        self, role: str, question: str, states: Sequence[str]
-    ) -> tuple[float, ...]:
-        """Run one binary decision question over untrusted states.
-
-        Only a local backend that exposes ``readout`` is eligible. This is the
-        raw judge primitive; contract mapping belongs to the service.
-        """
-
-        route = _resolve(self._rerank, role, "rerank")
-        if route.backend.location is not RouteLocation.LOCAL:
-            raise RouteConfigurationError(role, "rerank")
-        readout = getattr(route.backend, "readout", None)
-        if not callable(readout):
-            raise CapabilityUnavailableError(role, "rerank")
-        if not states or not question.strip():
-            raise RequestValidationError(role, "rerank", "question")
-        raw_scores = readout(question, tuple(states))
-        if len(raw_scores) != len(states) or any(
-            isinstance(score, bool)
-            or not isinstance(score, int | float)
-            or not math.isfinite(float(score))
-            for score in raw_scores
-        ):
-            raise BackendContractError(role, "rerank", "invalid decision readout")
-        return tuple(float(score) for score in raw_scores)
-
-    def resource_lease(
-        self, role: str, *, exclusive: bool, timeout_ms: int | None = None
-    ) -> AbstractContextManager[None]:
-        """Acquire the configured local provider's shared admission lease."""
-
-        route = _resolve(self._generation, role, "generation")
-        if route.backend.location is not RouteLocation.LOCAL:
-            raise RouteConfigurationError(role, "generation")
-        control = self._local_controls.get(role)
-        if control is None:
-            raise CapabilityUnavailableError(role, "local_control")
-        return control.resource_lease(exclusive=exclusive, timeout_ms=timeout_ms)
-
     def _validate_request(
         self,
         role: str,
@@ -683,35 +464,7 @@ class LLMRuntime:
         request: object,
     ) -> None:
         budgets: tuple[tuple[str, object, int, bool], ...]
-        if isinstance(request, GenerationRequest):
-            budgets = (
-                ("num_ctx", request.num_ctx, MAX_CONTEXT_TOKENS, True),
-                (
-                    "max_output_tokens",
-                    request.max_output_tokens,
-                    MAX_OUTPUT_TOKENS,
-                    True,
-                ),
-                ("timeout_ms", request.timeout_ms, MAX_REQUEST_TIMEOUT_MS, True),
-            )
-        elif isinstance(request, MessageGenerationRequest):
-            budgets = (
-                ("num_ctx", request.num_ctx, MAX_CONTEXT_TOKENS, False),
-                (
-                    "max_output_tokens",
-                    request.max_output_tokens,
-                    MAX_OUTPUT_TOKENS,
-                    False,
-                ),
-                ("timeout_ms", request.timeout_ms, MAX_REQUEST_TIMEOUT_MS, False),
-                (
-                    "max_output_chars",
-                    request.max_output_chars,
-                    MAX_OUTPUT_CHARS,
-                    False,
-                ),
-            )
-        elif isinstance(request, (EmbeddingRequest, RerankRequest)):
+        if isinstance(request, (EmbeddingRequest, RerankRequest)):
             budgets = (
                 ("timeout_ms", request.timeout_ms, MAX_REQUEST_TIMEOUT_MS, True),
             )
@@ -814,34 +567,7 @@ class LLMRuntime:
             raise RouteConfigurationError(role, capability)
         if location is RouteLocation.LOCAL:
             return location
-        if (
-            self._cloud_execution_allowed is not None
-            and not self._cloud_execution_allowed()
-        ):
-            self._emit_failure(
-                EgressDeniedError.category,
-                role=role,
-                capability=capability,
-                provider=provider,
-                location=location,
-            )
-            raise EgressDeniedError(role, capability)
-        default_allowed = (
-            source.sensitivity is SourceSensitivity.NORMAL
-            and source.data_class
-            in {SourceDataClass.PAGE, SourceDataClass.DERIVED_SNIPPET}
-        )
-        opted_in = (role, source.data_class) in self._remote_egress_opt_ins
-        if not default_allowed and not opted_in:
-            self._emit_failure(
-                EgressDeniedError.category,
-                role=role,
-                capability=capability,
-                provider=provider,
-                location=location,
-            )
-            raise EgressDeniedError(role, capability)
-        return location
+        raise EgressDeniedError(role, capability)
 
     def _invoke(
         self,
@@ -937,28 +663,6 @@ class LLMRuntime:
             self._telemetry(event)
         except Exception:
             pass
-
-    @staticmethod
-    def _validate_generation(
-        role: str,
-        route: GenerationRoute,
-        result: GenerationResult,
-    ) -> GenerationResult:
-        if result.provider != route.backend.provider or result.model != route.model:
-            raise BackendContractError(role, "generation", "route identity mismatch")
-        if not isinstance(result.content, str) or not isinstance(
-            result.completed, bool
-        ):
-            raise BackendContractError(role, "generation", "invalid completion")
-        if result.finish_reason is not None and not isinstance(
-            result.finish_reason, str
-        ):
-            raise BackendContractError(role, "generation", "invalid finish reason")
-        if not _valid_token_count(result.usage.input_tokens) or not _valid_token_count(
-            result.usage.output_tokens
-        ):
-            raise BackendContractError(role, "generation", "invalid token usage")
-        return result
 
     @staticmethod
     def _validate_embedding(

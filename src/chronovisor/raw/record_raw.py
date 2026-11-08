@@ -1,4 +1,4 @@
-"""Atomic raw publication and optional ingest triggering."""
+"""Atomic raw publication."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from typing import Any
 from chronovisor.core.durable_state import fsync_directory
 from chronovisor.core.legacy_frontmatter import patch as patch_frontmatter
 from chronovisor.core.save_transaction import parse_save_transaction_receipt
-from chronovisor.core.store import RAW_DIR, okf_runtime_operation
+from chronovisor.core.store import RAW_DIR
 
 RAW_PREFIX_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 RAW_SLUG_TOKEN_RE = re.compile(r"[a-zA-Z0-9]+")
@@ -184,13 +184,6 @@ def link_raw_no_replace(staging: Path, target: Path) -> None:
 
 
 def publish_raw(content: str, *, prefix: str = "", topic_slug: str = "") -> Path:
-    """Write a complete raw entry, then atomically expose its final name."""
-
-    with okf_runtime_operation(RAW_DIR.parent):
-        return _publish_raw_locked(content, prefix=prefix, topic_slug=topic_slug)
-
-
-def _publish_raw_locked(content: str, *, prefix: str, topic_slug: str) -> Path:
 
     staging = allocate_raw_path(prefix=prefix, topic_slug=topic_slug)
     published: Path | None = None
@@ -227,24 +220,6 @@ def publish_raw_idempotent(
     idempotency_key: str,
     prefix: str = "",
     topic_slug: str = "",
-) -> tuple[Path, bool]:
-    """Atomically publish one complete raw per idempotency key."""
-
-    with okf_runtime_operation(RAW_DIR.parent):
-        return _publish_raw_idempotent_locked(
-            content,
-            idempotency_key=idempotency_key,
-            prefix=prefix,
-            topic_slug=topic_slug,
-        )
-
-
-def _publish_raw_idempotent_locked(
-    content: str,
-    *,
-    idempotency_key: str,
-    prefix: str,
-    topic_slug: str,
 ) -> tuple[Path, bool]:
 
     if not RAW_IDEMPOTENCY_RE.fullmatch(idempotency_key):
@@ -302,13 +277,6 @@ def validate_raw_keyword(keyword: object) -> bool:
     return True
 
 
-def ingest_raw(content: str, *, force: bool = True) -> dict[str, Any]:
-    from chronovisor.ingest.orchestrator import run_pending_ingest
-
-    path = publish_raw(content, prefix="ingest", topic_slug=raw_topic_slug(content))
-    return {"saved": path.name, "ingest": run_pending_ingest(force=force)}
-
-
 def record_raw(
     content: str,
     *,
@@ -324,11 +292,11 @@ def record_raw(
             if validate_raw_keyword(keyword):
                 accepted.append(keyword)
             else:
-                rejected.append(
-                    keyword if isinstance(keyword, str) else repr(keyword)
-                )
+                rejected.append(keyword if isinstance(keyword, str) else repr(keyword))
 
-    body = patch_frontmatter(content, {"raw_keywords": accepted}) if accepted else content
+    body = (
+        patch_frontmatter(content, {"raw_keywords": accepted}) if accepted else content
+    )
     raw_slug = raw_topic_slug(body, accepted)
     if idempotency_key:
         path, deduplicated = publish_raw_idempotent(
@@ -341,23 +309,14 @@ def record_raw(
         path = publish_raw(body, prefix=session_id or "", topic_slug=raw_slug)
         deduplicated = False
 
-    from chronovisor.ingest.orchestrator import run_pending_ingest, should_ingest
-
-    should, reason = should_ingest()
     result: dict[str, Any] = {
         "saved": path.name,
         "path": str(path),
         "raw_slug": raw_slug,
-        "ingest_pending": should,
-        "ingest_reason": reason,
     }
     if idempotency_key:
         result["deduplicated"] = deduplicated
     if rejected:
         result["rejected_keywords"] = rejected
-    if should and trigger_ingest:
-        result["ingest_triggered"] = run_pending_ingest()
-    elif should:
-        result["ingest_deferred"] = True
     result["accepted_keywords"] = accepted
     return result

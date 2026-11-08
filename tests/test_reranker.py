@@ -54,9 +54,7 @@ class FakeRerankBackend:
     def rerank(self, request: RerankRequest, *, model: str) -> RerankResult:
         self.requests.append(request)
         return RerankResult(
-            tuple(
-                RerankItem(index, score) for index, score in enumerate(self.scores)
-            ),
+            tuple(RerankItem(index, score) for index, score in enumerate(self.scores)),
             self.provider,
             model,
         )
@@ -72,9 +70,7 @@ def install_runtime(monkeypatch, backend: FakeRerankBackend) -> LLMRuntime:
         "resolve_rerank_candidate",
         lambda candidate, **_kwargs: (
             candidate.page_id,
-            SourceDataClassification(
-                SourceDataClass.PAGE, SourceSensitivity.NORMAL
-            ),
+            SourceDataClassification(SourceDataClass.PAGE, SourceSensitivity.NORMAL),
             ("pages", candidate.page_id, 1, 1, candidate.page_id),
         ),
     )
@@ -109,9 +105,11 @@ def test_rerank_results_applies_scores_without_touching_tail(monkeypatch) -> Non
     assert [detail.raw_score for detail in outcome.scores] == [0.9, 0.1]
     assert round(outcome.scores[0].margin_to_next, 6) == 0.8
     assert backend.requests[0].source == QUERY_SOURCE
-    assert backend.requests[0].candidate_sources == (
-        SourceDataClassification(SourceDataClass.PAGE, SourceSensitivity.NORMAL),
-    ) * 2
+    assert (
+        backend.requests[0].candidate_sources
+        == (SourceDataClassification(SourceDataClass.PAGE, SourceSensitivity.NORMAL),)
+        * 2
+    )
     assert outcome.metadata["route"] == {
         "role": RERANK_RUNTIME_ROLE,
         "provider": "fake-reranker",
@@ -142,7 +140,9 @@ def test_rerank_results_unavailable_preserves_order(monkeypatch) -> None:
     assert "SECRET" not in repr(outcome.metadata)
 
 
-def test_rerank_results_uses_resident_service_without_local_fallback(monkeypatch) -> None:
+def test_rerank_results_uses_resident_service_without_local_fallback(
+    monkeypatch,
+) -> None:
     from chronovisor.core import reranker_client
 
     candidates = [page("a"), page("b")]
@@ -186,41 +186,6 @@ def test_rerank_results_rejects_partial_score_vectors(monkeypatch) -> None:
     assert outcome.results == candidates
     assert outcome.metadata["status"] == "unavailable"
     assert outcome.metadata["score_count"] == 1
-
-
-def test_llm_runtime_routes_to_local_rerank_backend(
-    monkeypatch,
-) -> None:
-    config = RerankerConfig(enabled=True, backend="transformers", model="legacy")
-    seen: list[tuple[str, list[str], str]] = []
-
-    def fake_impl(_config):
-        def score(query, passages, call_config):
-            seen.append((query, passages, call_config.model))
-            return [0.1, 0.9]
-
-        return score
-
-    monkeypatch.setattr(reranker, "_score_impl", fake_impl)
-    backend = reranker.LocalRerankBackend(config)
-    runtime = LLMRuntime(rerank={"search": RerankRoute(backend, "reranker")})
-
-    result = runtime.rerank(
-        "search",
-        RerankRequest(
-            query="query",
-            candidates=("first", "second"),
-            source=SourceDataClassification(
-                SourceDataClass.PAGE, SourceSensitivity.NORMAL
-            ),
-        ),
-    )
-
-    assert seen == [("query", ["first", "second"], "reranker")]
-    assert result.items == (RerankItem(1, 0.9), RerankItem(0, 0.1))
-    assert result.provider == "local-reranker"
-    assert result.model == "reranker"
-    assert result.metadata == {}
 
 
 @pytest.mark.parametrize(
@@ -271,7 +236,8 @@ def test_candidate_resolver_uses_canonical_namespace_and_sensitivity(
     monkeypatch.setattr(reranker, "SYSTEM_DIR", system)
 
     passage, source, identity = reranker.resolve_rerank_candidate(
-        "candidate", store=Store()  # type: ignore[arg-type]
+        "candidate",
+        store=Store(),  # type: ignore[arg-type]
     )
 
     assert passage == "Canonical title\n\nbody only"
@@ -347,7 +313,8 @@ def test_candidate_resolver_uses_verified_semantic_chunks_only(
     )
 
     passage, source_class, identity = reranker.resolve_rerank_candidate(
-        candidate, store=Store()  # type: ignore[arg-type]
+        candidate,
+        store=Store(),  # type: ignore[arg-type]
     )
 
     assert "selected source passage" in passage
@@ -406,7 +373,8 @@ def test_candidate_resolver_uses_canonical_body_for_page_keys_without_uid(
     )
 
     passage, source_class, _identity = reranker.resolve_rerank_candidate(
-        candidate, store=Store()  # type: ignore[arg-type]
+        candidate,
+        store=Store(),  # type: ignore[arg-type]
     )
 
     assert passage == "Legacy\n\ncanonical body"
@@ -425,8 +393,7 @@ def test_candidate_resolver_fails_closed_for_stale_semantic_evidence(
     pages.mkdir()
     system.mkdir()
     source = (
-        f"---\nuid: {uid}\ntitle: Candidate\nstatus: stable\n---\n"
-        "actual source\n"
+        f"---\nuid: {uid}\ntitle: Candidate\nstatus: stable\n---\nactual source\n"
     ).encode()
     path = pages / "candidate.md"
     path.write_bytes(source)
@@ -465,7 +432,8 @@ def test_candidate_resolver_fails_closed_for_stale_semantic_evidence(
     )
 
     passage, source_class, identity = reranker.resolve_rerank_candidate(
-        candidate, store=Store()  # type: ignore[arg-type]
+        candidate,
+        store=Store(),  # type: ignore[arg-type]
     )
 
     assert passage == "candidate"
@@ -513,66 +481,14 @@ def test_candidate_resolver_never_reads_symlinked_outside_bytes(
     monkeypatch.setattr(reranker, "SYSTEM_DIR", system)
     for path in (leaf_link, descendant / "candidate.md"):
         passage, source, identity = reranker.resolve_rerank_candidate(
-            "candidate", store=Store(path)  # type: ignore[arg-type]
+            "candidate",
+            store=Store(path),  # type: ignore[arg-type]
         )
         assert secret not in passage
         assert source == SourceDataClassification(
             SourceDataClass.SYSTEM, SourceSensitivity.HIGH
         )
         assert identity[0] == "invalid"
-
-
-def test_transformer_loader_prefers_complete_local_snapshot() -> None:
-    calls: list[tuple[str, bool]] = []
-
-    class FakeTokenizer:
-        @classmethod
-        def from_pretrained(cls, _model, **kwargs):
-            calls.append(("tokenizer", kwargs.get("local_files_only", False)))
-            return "tokenizer"
-
-    class FakeModel:
-        @classmethod
-        def from_pretrained(cls, _model, **kwargs):
-            calls.append(("model", kwargs.get("local_files_only", False)))
-            return "model"
-
-    tokenizer, model = reranker._load_transformer_components(
-        RerankerConfig(enabled=True), FakeTokenizer, FakeModel
-    )
-
-    assert (tokenizer, model) == ("tokenizer", "model")
-    assert calls == [("tokenizer", True), ("model", True)]
-
-
-def test_transformer_loader_allows_first_install_fallback() -> None:
-    calls: list[tuple[str, bool]] = []
-
-    class FakeTokenizer:
-        @classmethod
-        def from_pretrained(cls, _model, **kwargs):
-            local = kwargs.get("local_files_only", False)
-            calls.append(("tokenizer", local))
-            if local:
-                raise OSError("not cached")
-            return "tokenizer"
-
-    class FakeModel:
-        @classmethod
-        def from_pretrained(cls, _model, **kwargs):
-            calls.append(("model", kwargs.get("local_files_only", False)))
-            return "model"
-
-    tokenizer, model = reranker._load_transformer_components(
-        RerankerConfig(enabled=True), FakeTokenizer, FakeModel
-    )
-
-    assert (tokenizer, model) == ("tokenizer", "model")
-    assert calls[:3] == [
-        ("tokenizer", True),
-        ("tokenizer", False),
-        ("model", False),
-    ]
 
 
 def test_chronovisor_search_uses_reranker_only_when_enabled(monkeypatch) -> None:
@@ -615,9 +531,7 @@ def test_chronovisor_search_uses_reranker_only_when_enabled(monkeypatch) -> None
     monkeypatch.setattr(
         server,
         "_direct_search_hits",
-        lambda results, **_kwargs: [
-            {"page_id": result.page_id} for result in results
-        ],
+        lambda results, **_kwargs: [{"page_id": result.page_id} for result in results],
     )
 
     tool_fn = (
@@ -673,9 +587,7 @@ def test_chronovisor_search_reranks_after_tag_filter(monkeypatch) -> None:
     monkeypatch.setattr(
         server,
         "_direct_search_hits",
-        lambda results, **_kwargs: [
-            {"page_id": result.page_id} for result in results
-        ],
+        lambda results, **_kwargs: [{"page_id": result.page_id} for result in results],
     )
 
     tool_fn = (

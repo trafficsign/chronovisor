@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -18,7 +17,6 @@ from chronovisor.core.raw_segment import (
     seal_segment,
 )
 from chronovisor.core.raw_store import RawStore, raw_layout_mode
-from chronovisor.ingest.raw_semantic_projection import project_native_transcript
 
 
 @pytest.fixture(autouse=True)
@@ -98,34 +96,6 @@ def test_legacy_read_rejects_final_symlink_swap(
         store.read_bytes(unit)
 
 
-def test_store_reads_open_and_sealed_ranges_by_logical_raw_id(tmp_path: Path) -> None:
-    raw_dir = tmp_path / "raw"
-    source = tmp_path / "session.jsonl"
-    payload = b'{"source":"native"}\n'
-    source.write_bytes(payload)
-    receipt = _append(raw_dir, source, payload)
-    store = RawStore(raw_dir, mode="v2")
-
-    unit = store.resolve("save-shared.md")
-    assert unit is not None and unit.storage == "segment_open"
-    assert store.read_bytes(unit) == payload
-    reference = store.materialize_ingest(unit, tmp_path / "runtime" / "parents")
-    reference_bytes = reference.read_bytes()
-
-    seal_segment(receipt.data_path, remove_open=True)
-    sealed_store = RawStore(raw_dir, mode="v2")
-    sealed_unit = sealed_store.resolve("save-shared.md")
-    assert sealed_unit is not None and sealed_unit.storage == "segment_sealed"
-    assert sealed_store.read_bytes(sealed_unit) == payload
-    assert (
-        sealed_store.materialize_ingest(
-            sealed_unit, tmp_path / "runtime" / "parents"
-        ).read_bytes()
-        == reference_bytes
-    )
-    assert sealed_store.resolve_reference(reference) == sealed_unit
-
-
 def test_segment_snapshot_cache_reuses_then_invalidates_authoritative_indexes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -151,12 +121,12 @@ def test_segment_snapshot_cache_reuses_then_invalidates_authoritative_indexes(
         return original_read_commits(path)
 
     monkeypatch.setattr(raw_store_module, "read_commits", counted_read_commits)
-    assert [unit.raw_id for unit in RawStore(raw_dir, mode="v2").iter_segment_units()] == [
-        "save-first.md"
-    ]
-    assert [unit.raw_id for unit in RawStore(raw_dir, mode="v2").iter_segment_units()] == [
-        "save-first.md"
-    ]
+    assert [
+        unit.raw_id for unit in RawStore(raw_dir, mode="v2").iter_segment_units()
+    ] == ["save-first.md"]
+    assert [
+        unit.raw_id for unit in RawStore(raw_dir, mode="v2").iter_segment_units()
+    ] == ["save-first.md"]
     assert journal_reads == 1
 
     _append(
@@ -167,7 +137,9 @@ def test_segment_snapshot_cache_reuses_then_invalidates_authoritative_indexes(
         idempotency_key="second",
         after_line=1,
     )
-    assert [unit.raw_id for unit in RawStore(raw_dir, mode="v2").iter_segment_units()] == [
+    assert [
+        unit.raw_id for unit in RawStore(raw_dir, mode="v2").iter_segment_units()
+    ] == [
         "save-first.md",
         "save-second.md",
     ]
@@ -181,9 +153,7 @@ def test_segment_snapshot_cache_reuses_then_invalidates_authoritative_indexes(
         manifest_reads += 1
         return original_manifest_commits(path)
 
-    monkeypatch.setattr(
-        raw_store_module, "manifest_commits", counted_manifest_commits
-    )
+    monkeypatch.setattr(raw_store_module, "manifest_commits", counted_manifest_commits)
     seal_segment(receipt.data_path, remove_open=True)
     sealed = tuple(RawStore(raw_dir, mode="v2").iter_segment_units())
     assert {unit.storage for unit in sealed} == {"segment_sealed"}
@@ -283,49 +253,6 @@ def test_store_decompresses_one_physical_segment_once_for_all_units(
         list(RawStore(raw_dir, mode="v2").iter_segment_bytes())
 
 
-def test_logical_reference_survives_raw_root_relocation(tmp_path: Path) -> None:
-    raw_dir = tmp_path / "raw"
-    source = tmp_path / "session.jsonl"
-    payload = b'{"source":"relocatable"}\n'
-    source.write_bytes(payload)
-    receipt = _append(raw_dir, source, payload)
-    store = RawStore(raw_dir, mode="v2")
-    unit = store.resolve_segment("save-shared.md")
-    assert unit is not None
-    reference = store.materialize_ingest(unit, tmp_path / "runtime" / "parents")
-    seal_segment(receipt.data_path, remove_open=True)
-
-    relocated = tmp_path / "external-volume" / "raw"
-    relocated.parent.mkdir()
-    raw_dir.rename(relocated)
-    relocated_store = RawStore(relocated, mode="v2")
-
-    assert relocated_store.resolve_reference(reference) is not None
-    assert relocated_store.read_bytes("save-shared.md") == payload
-
-
-def test_noncanonical_schema_reference_is_rejected(tmp_path: Path) -> None:
-    raw_dir = tmp_path / "raw"
-    source = tmp_path / "session.jsonl"
-    payload = b'{"source":"noncanonical-reference"}\n'
-    source.write_bytes(payload)
-    _append(raw_dir, source, payload)
-    store = RawStore(raw_dir, mode="v2")
-    unit = store.resolve_segment("save-shared.md")
-    assert unit is not None
-    reference = store.materialize_ingest(unit, tmp_path / "runtime" / "parents")
-    reference_payload = json.loads(reference.read_text(encoding="utf-8"))
-    reference_payload["schema"] = "precutover.raw-reference.v1"
-    reference.write_text(
-        json.dumps(reference_payload, sort_keys=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-    )
-
-    assert store.resolve_reference(reference) is None
-    with pytest.raises(RawSegmentCorrupt, match="logical Raw reference conflicts"):
-        store.materialize_ingest(unit, reference.parent)
-
-
 def test_store_includes_flat_and_date_partitioned_manual_markdown(
     tmp_path: Path,
 ) -> None:
@@ -399,9 +326,9 @@ def test_committed_watermark_cache_is_thread_safe_and_signature_bound(
     )
     warm_store = RawStore(raw_dir, mode="v2")
     with ThreadPoolExecutor(max_workers=4) as executor:
-        assert set(executor.map(lambda _: warm_store.committed_segment_watermark(), range(8))) == {
-            first
-        }
+        assert set(
+            executor.map(lambda _: warm_store.committed_segment_watermark(), range(8))
+        ) == {first}
     monkeypatch.undo()
 
     second_payload = b'{"source":"second"}\n'
@@ -557,7 +484,14 @@ def test_snapshot_retry_does_not_reparse_unchanged_history(
         index_path = next(raw_dir.glob("**/*.manifest.json"))
     else:
         index_path = historical.commit_path
-    _append(raw_dir, source, payload, host="codex", raw_id="save-active.md", idempotency_key="active")
+    _append(
+        raw_dir,
+        source,
+        payload,
+        host="codex",
+        raw_id="save-active.md",
+        idempotency_key="active",
+    )
     reader_name = "manifest_commits" if sealed else "read_commits"
     original = getattr(raw_store_module, reader_name)
     history_reads = 0
@@ -568,16 +502,24 @@ def test_snapshot_retry_does_not_reparse_unchanged_history(
         if path == index_path:
             history_reads += 1
             _append(
-                raw_dir, source, payload, host="codex",
+                raw_dir,
+                source,
+                payload,
+                host="codex",
                 raw_id=f"save-appended-{history_reads}.md",
-                idempotency_key=f"appended-{history_reads}", after_line=history_reads,
+                idempotency_key=f"appended-{history_reads}",
+                after_line=history_reads,
             )
         return commits
 
     monkeypatch.setattr(raw_store_module, reader_name, read_while_capture_continues)
     units, watermark = RawStore(raw_dir, mode="v2").committed_segment_snapshot()
     assert history_reads == 1
-    assert {unit.raw_id for unit in units} == {"save-shared.md", "save-active.md", "save-appended-1.md"}
+    assert {unit.raw_id for unit in units} == {
+        "save-shared.md",
+        "save-active.md",
+        "save-appended-1.md",
+    }
     assert RawStore(raw_dir, mode="v2").committed_segment_watermark() == watermark
 
 
@@ -597,7 +539,14 @@ def test_index_cache_does_not_publish_a_parse_that_raced_an_append(
         commits = original(path)
         reads += 1
         if reads == 1:
-            _append(raw_dir, source, payload, raw_id="save-second.md", idempotency_key="second", after_line=1)
+            _append(
+                raw_dir,
+                source,
+                payload,
+                raw_id="save-second.md",
+                idempotency_key="second",
+                after_line=1,
+            )
         return commits
 
     monkeypatch.setattr(raw_store_module, "read_commits", append_after_read)
@@ -617,9 +566,7 @@ def test_committed_snapshot_cache_includes_index_ctime(
     journal = next(raw_dir.glob("**/*.commits.jsonl"))
     before = journal.stat()
     original_text = journal.read_text(encoding="utf-8")
-    journal.write_text(
-        original_text.replace("shared", "mutate"), encoding="utf-8"
-    )
+    journal.write_text(original_text.replace("shared", "mutate"), encoding="utf-8")
     os.utime(journal, ns=(before.st_atime_ns, before.st_mtime_ns))
     after = journal.stat()
     assert after.st_size == before.st_size and after.st_mtime_ns == before.st_mtime_ns
@@ -662,202 +609,8 @@ def test_committed_snapshot_rejects_rebound_segment_index_symlink(
         RawStore(raw_dir, mode="v2").committed_segment_snapshot()
 
 
-def test_materialized_reference_projects_native_transcript_without_copying_it(
-    tmp_path: Path,
-) -> None:
-    raw_dir = tmp_path / "raw"
-    source = tmp_path / "session.jsonl"
-    payload = (
-        b'{"type":"user","sessionId":"session","message":{"content":"remember me"}}\n'
-    )
-    source.write_bytes(payload)
-    receipt = _append(raw_dir, source, payload)
-    store = RawStore(raw_dir, mode="v2")
-    unit = store.resolve_segment("save-shared.md")
-    assert unit is not None and unit.commit is not None
-
-    reference = store.materialize_ingest(unit, tmp_path / "runtime" / "parents")
-    projection = project_native_transcript(
-        reference,
-        store.read_bytes(unit),
-        unit.commit,
-        output_dir=tmp_path / "runtime" / "artifacts",
-        max_child_bytes=32_000,
-    )
-
-    assert len(reference.read_bytes()) < len(payload) + 1024
-    assert projection.kind == "children"
-    child = json.loads(projection.child_paths[0].read_text())
-    assert child["records"][0]["text"] == "remember me"
-    assert receipt.commit.sha256 == unit.sha256
-
-
-def test_materialized_reference_projects_pi_transcript(tmp_path: Path) -> None:
-    raw_dir = tmp_path / "raw"
-    source = tmp_path / "session.jsonl"
-    payload = (
-        b'{"type":"message","timestamp":"2026-08-13T00:00:00Z",'
-        b'"message":{"role":"user","content":"remember from pi"}}\n'
-    )
-    source.write_bytes(payload)
-    _append(raw_dir, source, payload, host="pi")
-    store = RawStore(raw_dir, mode="v2")
-    unit = store.resolve_segment("save-shared.md")
-    assert unit is not None and unit.commit is not None
-
-    reference = store.materialize_ingest(unit, tmp_path / "runtime" / "parents")
-    projection = project_native_transcript(
-        reference,
-        store.read_bytes(unit),
-        unit.commit,
-        output_dir=tmp_path / "runtime" / "artifacts",
-        max_child_bytes=32_000,
-    )
-
-    child = json.loads(projection.child_paths[0].read_text())
-    assert child["records"][0]["role"] == "user"
-    assert child["records"][0]["text"] == "remember from pi"
-
-
-def test_materialized_reference_projects_hermes_transcript(tmp_path: Path) -> None:
-    raw_dir = tmp_path / "raw"
-    source = tmp_path / "state.db"
-    source.write_bytes(b"sqlite-placeholder")
-    payload = (
-        b'{"schema":"chronovisor.hermes-message.v1","host":"hermes",'
-        b'"session":{"session_id":"session","platform":"cli",'
-        b'"provider":"provider-test","model":"gpt-test"},'
-        b'"message":{"id":7,"role":"user","content":"remember from hermes"},'
-        b'"timestamp":"2026-08-14T00:00:00+00:00"}\n'
-    )
-    _append(raw_dir, source, payload, host="hermes")
-    store = RawStore(raw_dir, mode="v2")
-    unit = store.resolve_segment("save-shared.md")
-    assert unit is not None and unit.commit is not None
-
-    reference = store.materialize_ingest(unit, tmp_path / "runtime" / "parents")
-    projection = project_native_transcript(
-        reference,
-        store.read_bytes(unit),
-        unit.commit,
-        output_dir=tmp_path / "runtime" / "artifacts",
-        max_child_bytes=32_000,
-    )
-
-    child = json.loads(projection.child_paths[0].read_text())
-    assert child["records"][0]["role"] == "user"
-    assert child["records"][0]["text"] == "remember from hermes"
-    assert projection.manifest_path is not None
-    manifest = json.loads(projection.manifest_path.read_text())
-    assert manifest["source"]["parents"][0]["receipt"]["host"] == "hermes"
-
-
 def test_hermes_raw_id_uses_the_per_session_journal_fast_path() -> None:
     assert (
         _raw_id_prefix("save-hermes-0123456789abcdef01234567-from1-to2.md")
         == "hermes-0123456789abcdef01234567"
     )
-
-
-def test_v2_parent_and_semantic_child_use_separate_physical_stores(
-    tmp_path: Path, monkeypatch
-) -> None:
-    from chronovisor.ingest import failure_supervisor, orchestrator
-
-    raw_dir = tmp_path / "raw"
-    source = tmp_path / "session.jsonl"
-    payload = (
-        b'{"type":"user","sessionId":"session","message":{"content":"separate me"}}\n'
-    )
-    source.write_bytes(payload)
-    _append(raw_dir, source, payload)
-    monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", "v2")
-    monkeypatch.setattr(orchestrator, "RAW_DIR", raw_dir)
-    monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "state.json")
-    monkeypatch.setattr(
-        failure_supervisor, "operational_deferred_raw_files", lambda _paths: {}
-    )
-
-    parent_reference = orchestrator.get_pending_raw_files()
-    assert len(parent_reference) == 1
-    units, quarantined, deferred = orchestrator._prepare_pending_raw_units(
-        parent_reference
-    )
-    assert quarantined == [] and deferred == []
-    native = units[0]
-    assert native.native_raw_bytes == payload
-    assert native.native_commit is not None
-    artifact_dir = tmp_path / "runtime" / "raw-projections" / "artifacts"
-    projection = project_native_transcript(
-        parent_reference[0],
-        native.native_raw_bytes,
-        native.native_commit,
-        output_dir=artifact_dir,
-        max_child_bytes=32_000,
-    )
-    orchestrator.mark_raw_processed([parent_reference[0].name])
-
-    pending = orchestrator.get_pending_raw_files()
-
-    assert pending == list(projection.child_paths)
-    assert projection.child_paths[0].parent == artifact_dir
-    assert not list(raw_dir.glob("semantic-*.md"))
-
-
-def test_processed_segment_is_not_materialized_into_pending_cache(
-    tmp_path: Path, monkeypatch
-) -> None:
-    from chronovisor.ingest import failure_supervisor, orchestrator
-
-    raw_dir = tmp_path / "raw"
-    source = tmp_path / "session.jsonl"
-    payload = b'{"type":"user","message":{"content":"already processed"}}\n'
-    receipt = _append(raw_dir, source, payload)
-    state_file = tmp_path / "state.json"
-    state_file.write_text(
-        json.dumps(
-            {
-                "processed_raw_files": [receipt.commit.raw_id],
-                "current_job_id": None,
-            }
-        )
-    )
-    monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", "v2")
-    monkeypatch.setattr(orchestrator, "RAW_DIR", raw_dir)
-    monkeypatch.setattr(orchestrator, "STATE_FILE", state_file)
-    monkeypatch.setattr(
-        failure_supervisor, "operational_deferred_raw_files", lambda _paths: {}
-    )
-
-    assert orchestrator.get_pending_raw_files() == []
-    assert not (tmp_path / "runtime" / "raw-projections" / "parents").exists()
-
-
-def test_raw_replay_projects_v2_transport_before_ingest(
-    tmp_path: Path, monkeypatch
-) -> None:
-    from chronovisor.ingest import raw_replay
-
-    raw_dir = tmp_path / "raw"
-    source = tmp_path / "session.jsonl"
-    payload = (
-        b'{"type":"user","sessionId":"secret-transport-id",'
-        b'"message":{"content":"remember this"}}\n'
-    )
-    source.write_bytes(payload)
-    _append(raw_dir, source, payload)
-    store = RawStore(raw_dir, mode="v2")
-    unit = store.resolve_segment("save-shared.md")
-    assert unit is not None
-    reference = store.materialize_ingest(unit, tmp_path / "runtime" / "parents")
-    monkeypatch.setattr(raw_replay, "RAW_DIR", raw_dir)
-    monkeypatch.setattr(raw_replay, "CHRONOVISOR_ROOT", tmp_path)
-
-    content, summary = raw_replay._replay_ingest_content(reference.name, reference)
-
-    assert content is not None
-    bundle = json.loads(content)
-    assert bundle["schema"] == "chronovisor.raw-replay-semantic-bundle.v1"
-    assert bundle["children"][0]["records"][0]["text"] == "remember this"
-    assert "secret-transport-id" not in content
-    assert summary["kind"] == "children"

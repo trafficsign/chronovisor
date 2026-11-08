@@ -15,8 +15,6 @@ SRC = ROOT / "src"
 HOST_RECORD_MODULES = (
     "chronovisor.hosts.codex_record",
     "chronovisor.hosts.claude_code_record",
-    "chronovisor.hosts.pi_record",
-    "chronovisor.hosts.hermes_record",
 )
 
 

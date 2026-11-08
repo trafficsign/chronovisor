@@ -19,7 +19,6 @@ from chronovisor.core.save_transaction import (
     validate_published_save_receipt,
 )
 from chronovisor.core.store import RAW_DIR, RuntimeContext, init_chronovisor
-from chronovisor.decision.decision_policy import resolve_decision_policy
 from chronovisor.raw.agent_save_base import (
     load_state,
     read_hook_payload,
@@ -63,36 +62,6 @@ def run_save_transaction(
         return {
             "status": "disabled",
             "reason": f"{spec.hook_enable_env}=1 is required for hook execution",
-        }
-
-    if context is None:
-        policy, policy_mode, policy_error = resolve_decision_policy("raw_capture")
-    else:
-        policy, policy_mode, policy_error = resolve_decision_policy(
-            "raw_capture", config_path=context.config_file
-        )
-    policy_kind = policy.kind if policy is not None else None
-    policy_result = {
-        "lane": "raw_capture",
-        "kind": policy_kind,
-        "mode": policy_mode,
-        "error": policy_error,
-    }
-    if (
-        policy_error is not None
-        or policy_kind != "validated_local"
-        or policy_mode != "enabled"
-    ):
-        return {
-            "status": "deferred",
-            "reason": policy_error
-            or (
-                "raw_capture_policy_kind_invalid"
-                if policy_kind != "validated_local"
-                else f"raw_capture_policy_not_enabled:{policy_mode}"
-            ),
-            "decision_policy": policy_result,
-            "model_calls": 0,
         }
 
     if context is None:
@@ -185,7 +154,11 @@ def run_save_transaction(
                 "status": "recovered",
                 "reason": "published raw recovered before state cursor commit",
             }
-        return {**base_result, "status": "skipped", "reason": "no new transcript records"}
+        return {
+            **base_result,
+            "status": "skipped",
+            "reason": "no new transcript records",
+        }
 
     if not args.ignore_state:
         proceed, trigger_reason = should_process(transcript_slice, state)
@@ -215,7 +188,7 @@ def run_save_transaction(
             state=state,
             state_file=state_file,
             raw_dir=raw_dir,
-            base_result={**base_result, "decision_policy": policy_result},
+            base_result=base_result,
         )
 
     transcript_slice = spec.bounded_transcript_slice_for_layout(
@@ -234,7 +207,6 @@ def run_save_transaction(
             "capture_mode": "deterministic-lossless",
             "transcript_bytes": len(transcript_bytes),
             "transcript_sha256": hashlib.sha256(transcript_bytes).hexdigest(),
-            "decision_policy": policy_result,
         }
 
     capture_result: dict[str, Any] = {
@@ -267,7 +239,6 @@ def run_save_transaction(
             "raw_content_bytes": len(raw_bytes),
             "raw_content_sha256": hashlib.sha256(raw_bytes).hexdigest(),
             "raw_layout": layout,
-            "decision_policy": policy_result,
         }
 
     save_result = publish_transcript_capture(
@@ -307,5 +278,4 @@ def run_save_transaction(
         **capture_result,
         "status": "saved",
         "save_result": save_result,
-        "decision_policy": policy_result,
     }

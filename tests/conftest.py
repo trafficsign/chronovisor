@@ -65,7 +65,9 @@ def _append_guard_attempt(method: str, address: object) -> None:
         ],
         "address": repr(address)[:_MAX_ADDRESS_FIELD],
     }
-    payload = (json.dumps(row, ensure_ascii=True, separators=(",", ":")) + "\n").encode()
+    payload = (
+        json.dumps(row, ensure_ascii=True, separators=(",", ":")) + "\n"
+    ).encode()
     flags = os.O_WRONLY | os.O_APPEND
     flags |= getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -73,7 +75,9 @@ def _append_guard_attempt(method: str, address: object) -> None:
     try:
         written = os.write(descriptor, payload)
         if written != len(payload):
-            raise OSError(f"short write to live Ollama guard ledger: {written}/{len(payload)}")
+            raise OSError(
+                f"short write to live Ollama guard ledger: {written}/{len(payload)}"
+            )
     finally:
         os.close(descriptor)
 
@@ -105,9 +109,7 @@ def _guarded_socket_connect_ex(
 
 
 _SHELL_INTERPRETERS: Final = frozenset({"bash", "dash", "ksh", "sh", "zsh"})
-_SHELL_OPTIONS_WITH_VALUE: Final = frozenset(
-    {"-O", "-o", "--init-file", "--rcfile"}
-)
+_SHELL_OPTIONS_WITH_VALUE: Final = frozenset({"-O", "-o", "--init-file", "--rcfile"})
 _LAUNCHER_WRAPPERS: Final = frozenset({"command", "env", "exec", "nohup", "time"})
 
 
@@ -116,7 +118,7 @@ def _argv_tokens(command: object) -> list[str]:
         return []
     try:
         return [os.fsdecode(token) for token in command]
-    except (TypeError, UnicodeError):
+    except TypeError, UnicodeError:
         return []
 
 
@@ -126,11 +128,7 @@ def _shell_command_option_is_present(tokens: list[str]) -> bool:
         option = tokens[index]
         if option == "--" or not option.startswith("-"):
             return False
-        if (
-            not option.startswith("--")
-            and option != "-"
-            and "c" in option[1:]
-        ):
+        if not option.startswith("--") and option != "-" and "c" in option[1:]:
             return True
         index += 2 if option in _SHELL_OPTIONS_WITH_VALUE else 1
     return False
@@ -151,7 +149,7 @@ def _resolved_executable_name(
         return ""
     try:
         return os.path.basename(os.fsdecode(candidate)).casefold()
-    except (TypeError, UnicodeError):
+    except TypeError, UnicodeError:
         return ""
 
 
@@ -303,7 +301,9 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 
     del session
     global _LEDGER_PATH, _ORIGINAL_PYTHONPATH
-    descriptor, ledger_name = tempfile.mkstemp(prefix="chronovisor-ollama-guard-", suffix=".jsonl")
+    descriptor, ledger_name = tempfile.mkstemp(
+        prefix="chronovisor-ollama-guard-", suffix=".jsonl"
+    )
     os.fchmod(descriptor, 0o600)
     os.close(descriptor)
     _LEDGER_PATH = Path(ledger_name)
@@ -413,24 +413,6 @@ def isolate_operator_raw_layout(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def isolate_operator_recall_filter(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the operator's live recall filter mode out of tests that do not set one."""
-
-    from dataclasses import replace
-
-    from chronovisor.core import runtime_config
-
-    live = runtime_config.load_reranker_config
-    monkeypatch.setattr(
-        runtime_config,
-        "load_reranker_config",
-        lambda path=None: live(path)
-        if path is not None
-        else replace(live(None), recall_filter="off"),
-    )
-
-
-@pytest.fixture(autouse=True)
 def isolate_operator_search_rollout(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep tests from enqueueing work against the live semantic service."""
 
@@ -441,3 +423,17 @@ def isolate_operator_search_rollout(monkeypatch: pytest.MonkeyPatch) -> None:
         "load_search_embedding_config",
         lambda: SearchEmbeddingConfig(enabled=False),
     )
+
+
+@pytest.fixture(autouse=True)
+def require_current_worktree_modules():
+    """A shared editable venv must never silently supply another checkout's code."""
+    import sys
+
+    yield
+    source = (Path(__file__).resolve().parents[1] / "src").resolve()
+    for name, module in tuple(sys.modules.items()):
+        if name == "chronovisor" or name.startswith("chronovisor."):
+            path = getattr(module, "__file__", None)
+            if path:
+                assert Path(path).resolve().is_relative_to(source), (name, path)

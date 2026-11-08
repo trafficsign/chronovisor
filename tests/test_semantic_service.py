@@ -9,7 +9,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from chronovisor.core import ollama
 from chronovisor.core.llm_runtime import (
     EgressDeniedError,
     EmbeddingPurpose,
@@ -35,7 +34,6 @@ from chronovisor.search.semantic_service import (
     ServiceBusy,
     _drifted_page_ids,
     _Handler,
-    _ingest_is_active,
     _safe_service_error,
 )
 
@@ -68,41 +66,14 @@ def test_drifted_page_ids_are_deduplicated_across_states() -> None:
     ) == ["changed", "gone", "new", "shared"]
 
 
-def test_ingest_only_pauses_semantic_work_during_generation(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    monkeypatch.setattr(semantic_service, "CHRONOVISOR_ROOT", tmp_path)
-    monkeypatch.setattr(
-        semantic_service.runtime_status,
-        "read_status",
-        lambda: {"llm": {"active": False}},
-    )
-    assert _ingest_is_active() is False
-
-    monkeypatch.setattr(
-        semantic_service.runtime_status,
-        "read_status",
-        lambda: {"llm": {"active": True}},
-    )
-    monkeypatch.setattr(
-        semantic_service.fcntl,
-        "flock",
-        lambda _fd, flags: (
-            (_ for _ in ()).throw(BlockingIOError())
-            if flags & semantic_service.fcntl.LOCK_NB
-            else None
-        ),
-    )
-    assert _ingest_is_active() is True
-
-
 def test_service_errors_expose_only_safe_categories() -> None:
     assert _safe_service_error(EgressDeniedError("role", "embedding")) == (
         "egress_denied"
     )
-    assert _safe_service_error(
-        SemanticModelError("secret prompt / private/path")
-    ) == "model_unavailable"
+    assert (
+        _safe_service_error(SemanticModelError("secret prompt / private/path"))
+        == "model_unavailable"
+    )
     assert _safe_service_error(ValueError("credential=secret")) == "semantic_failure"
 
     assert _safe_service_error(CanaryRuntimeError("private/path")) == (
@@ -147,49 +118,6 @@ def _forbid_local_controls(monkeypatch: pytest.MonkeyPatch) -> None:
         pytest.fail("remote semantic route touched a local control")
 
     monkeypatch.setattr(semantic_service, "accelerator_lease", forbidden)
-    monkeypatch.setattr(semantic_service, "model_activity", forbidden)
-    for name in (
-        "embed",
-        "is_available",
-        "model_digests",
-        "model_resource_lease",
-        "model_resource_lease_mode",
-        "plan_model_residency",
-        "resident_model_rows",
-        "unload_model",
-        "unload_named_model",
-    ):
-        monkeypatch.setattr(ollama, name, forbidden)
-
-
-def test_remote_normal_document_uses_interactive_deadline_without_local_controls(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class RemoteBackend(FakeEmbeddingBackend):
-        provider = "cloud"
-        location = RouteLocation.REMOTE
-
-    backend = RemoteBackend()
-    runtime = LLMRuntime(
-        embedding={
-            FOREGROUND_ROLE: EmbeddingRoute(backend, "model"),
-            INCREMENTAL_ROLE: EmbeddingRoute(backend, "model"),
-        }
-    )
-    state = _state(runtime)
-    _forbid_local_controls(monkeypatch)
-
-    vectors = state._embed_foreground_documents(["document"])
-
-    assert vectors.shape == (1, 2)
-    assert backend.requests == [
-        EmbeddingRequest(
-            ("document",),
-            DOCUMENT_SOURCE,
-            state.config.interactive_timeout_ms,
-            EmbeddingPurpose.DOCUMENT,
-        )
-    ]
 
 
 @pytest.mark.parametrize("difference", ["provider", "model", "location"])
@@ -259,9 +187,7 @@ def test_remote_raw_query_denial_has_no_backend_or_local_control(
     _forbid_local_controls(monkeypatch)
 
     with pytest.raises(EgressDeniedError):
-        state._embed_foreground(
-            ["query"], EmbeddingPurpose.QUERY, source=QUERY_SOURCE
-        )
+        state._embed_foreground(["query"], EmbeddingPurpose.QUERY, source=QUERY_SOURCE)
 
     assert backend.requests == []
 
@@ -348,7 +274,9 @@ def _index_test_state(monkeypatch: pytest.MonkeyPatch) -> SemanticServiceState:
     monkeypatch.setattr(
         semantic_service, "extract_page_documents", lambda _path, **_kwargs: [document]
     )
-    monkeypatch.setattr(semantic_service, "write_page_delta", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        semantic_service, "write_page_delta", lambda *_args, **_kwargs: None
+    )
     return state
 
 
@@ -358,8 +286,9 @@ def test_strict_page_index_uses_foreground_document_route(
     state = _index_test_state(monkeypatch)
     routes: list[str] = []
     state._embed_foreground_documents = (  # type: ignore[method-assign]
-        lambda _texts, **_kwargs: routes.append("foreground")
-        or np.asarray([[1.0, 0.0]], dtype=np.float32)
+        lambda _texts, **_kwargs: (
+            routes.append("foreground") or np.asarray([[1.0, 0.0]], dtype=np.float32)
+        )
     )
     state._ensure_cpu = lambda: pytest.fail("strict fast lane loaded CPU")  # type: ignore[method-assign]
     state._embed_incremental_documents = (  # type: ignore[method-assign]
@@ -380,8 +309,9 @@ def test_background_page_index_keeps_incremental_cpu_route(
     routes: list[str] = []
     state._ensure_cpu = lambda: routes.append("ensure-cpu")  # type: ignore[method-assign]
     state._embed_incremental_documents = (  # type: ignore[method-assign]
-        lambda _texts, **_kwargs: routes.append("incremental")
-        or np.asarray([[1.0, 0.0]], dtype=np.float32)
+        lambda _texts, **_kwargs: (
+            routes.append("incremental") or np.asarray([[1.0, 0.0]], dtype=np.float32)
+        )
     )
     state._embed_foreground_documents = (  # type: ignore[method-assign]
         lambda *_args, **_kwargs: pytest.fail("background index used MPS")
@@ -404,8 +334,9 @@ def test_strict_page_index_falls_back_to_incremental_cpu(
     )
     state._ensure_cpu = lambda: routes.append("ensure-cpu")  # type: ignore[method-assign]
     state._embed_incremental_documents = (  # type: ignore[method-assign]
-        lambda _texts, **_kwargs: routes.append("incremental")
-        or np.asarray([[1.0, 0.0]], dtype=np.float32)
+        lambda _texts, **_kwargs: (
+            routes.append("incremental") or np.asarray([[1.0, 0.0]], dtype=np.float32)
+        )
     )
 
     state.index_pages(["page"], wait=True)
@@ -660,6 +591,7 @@ def test_pointer_reload_propagates_deadline_and_records_late_work(tmp_path) -> N
     state._late_reload_count = 0
     state._late_reload_ms = 0.0
     reloaded: list[bool] = []
+
     def reload() -> None:
         time.sleep(0.05)
         reloaded.append(True)
@@ -720,11 +652,6 @@ def test_embed_foreground_rechecks_deadline_after_accelerator_lease(
         "accelerator_lease",
         lambda **_kwargs: SlowLease(),
     )
-    monkeypatch.setattr(
-        semantic_service,
-        "model_activity",
-        lambda **_kwargs: semantic_service.contextlib.nullcontext(),
-    )
 
     with pytest.raises(TimeoutError):
         state._embed_foreground(
@@ -762,7 +689,7 @@ def test_startup_embedding_allows_cold_work_beyond_query_timeout(
         )
     )
     monkeypatch.setattr(semantic_service.time, "monotonic", lambda: clock[0])
-    for control in ("accelerator_lease", "model_activity"):
+    for control in ("accelerator_lease",):
         monkeypatch.setattr(
             semantic_service,
             control,
@@ -783,10 +710,7 @@ def test_startup_embedding_allows_cold_work_beyond_query_timeout(
         )
         result = state._warm_query_path()
         assert result["hits"] == result["queries"] == 3
-    assert all(
-        request.timeout_ms is None
-        for request in backend.requests
-    )
+    assert all(request.timeout_ms is None for request in backend.requests)
 
 
 def test_query_batcher_rejects_when_generation_is_unavailable() -> None:
@@ -858,9 +782,7 @@ def test_search_serializes_evidence_from_one_captured_generation() -> None:
     state._generation_lock = threading.RLock()
     state._generation = SimpleNamespace(
         manifest=SimpleNamespace(generation_id="test-generation"),
-        search_with_evidence=lambda *_args, **_kwargs: [
-            ("page", 0.92, (evidence,))
-        ],
+        search_with_evidence=lambda *_args, **_kwargs: [("page", 0.92, (evidence,))],
     )
     state._metrics_lock = threading.Lock()
     state._query_latencies_ms = deque(maxlen=10)
@@ -1067,9 +989,7 @@ def test_reload_rejects_old_generation_without_exposing_details(
     assert state._generation is None
     assert state._last_error == "generation_invalid"
     with pytest.raises(ServiceBusy):
-        state._search_vector_with_evidence(
-            np.asarray([1.0, 0.0], dtype=np.float32), 1
-        )
+        state._search_vector_with_evidence(np.asarray([1.0, 0.0], dtype=np.float32), 1)
 
 
 def test_worker_persists_only_safe_job_failure_category(
@@ -1168,7 +1088,7 @@ def test_status_heartbeat_publishes_while_index_job_blocks(
                 first_observed_at = json.loads(status_path.read_text())[
                     "observed_at_epoch"
                 ]
-            except (FileNotFoundError, json.JSONDecodeError):
+            except FileNotFoundError, json.JSONDecodeError:
                 time.sleep(0.01)
                 continue
             break
@@ -1181,7 +1101,7 @@ def test_status_heartbeat_publishes_while_index_job_blocks(
                 second_observed_at = json.loads(status_path.read_text())[
                     "observed_at_epoch"
                 ]
-            except (FileNotFoundError, json.JSONDecodeError):
+            except FileNotFoundError, json.JSONDecodeError:
                 time.sleep(0.01)
                 continue
             if second_observed_at > first_observed_at:
@@ -1235,66 +1155,80 @@ def test_query_path_warmup_exercises_three_queries_and_ann_search() -> None:
     assert result["hits"] == 3
 
 
-def test_incremental_projection_follows_active_generation_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_incremental_projection_follows_active_generation_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     state = _index_test_state(monkeypatch)
     state._generation.manifest.extractor_schema_version = 3
     versions: list[int] = []
     monkeypatch.setattr(
-        semantic_service, 'extract_page_documents',
-        lambda _path, *, extractor_schema_version: versions.append(extractor_schema_version) or [],
+        semantic_service,
+        "extract_page_documents",
+        lambda _path, *, extractor_schema_version: (
+            versions.append(extractor_schema_version) or []
+        ),
     )
-    state._index_page('page', expected_hash='')
+    state._index_page("page", expected_hash="")
     state._generation.manifest.extractor_schema_version = 2
-    state._index_page('page', expected_hash='')
+    state._index_page("page", expected_hash="")
     assert versions == [3, 2]
 
 
-@pytest.mark.parametrize('concurrent_rollback', [False, True])
+@pytest.mark.parametrize("concurrent_rollback", [False, True])
 def test_rebuild_preserves_extractor_and_compares_original_pointer(
-    monkeypatch: pytest.MonkeyPatch, concurrent_rollback: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    concurrent_rollback: bool,
 ) -> None:
     state = _index_test_state(monkeypatch)
     state._generation.manifest.extractor_schema_version = 3
     state._maintenance = threading.Event()
     state._model_lock = semantic_service._ModelLock()
     state._validate_runtime_routes = lambda: None
-    state._foreground_route = SimpleNamespace(model='test')
+    state._foreground_route = SimpleNamespace(model="test")
     state._uses_local_controls = lambda _route: False
     state._route_identity = lambda _route: {}
     versions: list[int] = []
-    active = {'generation_id': 'generation'}
-    monkeypatch.setattr(semantic_service, 'read_active', lambda **_kwargs: dict(active))
-    monkeypatch.setattr(semantic_service, 'extract_all_documents',
-                        lambda *, extractor_schema_version: versions.append(extractor_schema_version) or [])
+    active = {"generation_id": "generation"}
+    monkeypatch.setattr(semantic_service, "read_active", lambda **_kwargs: dict(active))
+    monkeypatch.setattr(
+        semantic_service,
+        "extract_all_documents",
+        lambda *, extractor_schema_version: (
+            versions.append(extractor_schema_version) or []
+        ),
+    )
     state._document_source = lambda _rows: None
     state._runtime_vectors = lambda _role, texts, _purpose, *, source: np.array(
         [[len(text), 0.0] for text in texts], dtype=np.float32
     )
+
     def build(_documents, **kwargs):
-        assert kwargs['extractor_schema_version'] == 3
+        assert kwargs["extractor_schema_version"] == 3
         assert not state._maintenance.is_set()  # queries stay served while building
-        rows = [SimpleNamespace(text='x' * n) for n in (5, 1, 9, 3, 7, 2, 8, 4, 6, 10)]
-        vectors = kwargs['encode_documents'](rows, 32)
+        rows = [SimpleNamespace(text="x" * n) for n in (5, 1, 9, 3, 7, 2, 8, 4, 6, 10)]
+        vectors = kwargs["encode_documents"](rows, 32)
         assert vectors[:, 0].tolist() == [5, 1, 9, 3, 7, 2, 8, 4, 6, 10]
         if concurrent_rollback:
-            active['generation_id'] = 'rollback'
-        return SimpleNamespace(generation_id='rebuilt')
+            active["generation_id"] = "rollback"
+        return SimpleNamespace(generation_id="rebuilt")
+
     def activate(generation_id, *, expected_current, **_kwargs):
-        assert expected_current == 'generation'
+        assert expected_current == "generation"
         assert state._maintenance.is_set()
-        if active['generation_id'] != expected_current:
-            raise SemanticIndexError('active generation changed')
-        active['generation_id'] = generation_id
-    monkeypatch.setattr(semantic_service, 'build_generation', build)
-    monkeypatch.setattr(semantic_service, 'activate_generation', activate)
-    monkeypatch.setattr(semantic_service, 'prune_generations', lambda **_kwargs: None)
+        if active["generation_id"] != expected_current:
+            raise SemanticIndexError("active generation changed")
+        active["generation_id"] = generation_id
+
+    monkeypatch.setattr(semantic_service, "build_generation", build)
+    monkeypatch.setattr(semantic_service, "activate_generation", activate)
+    monkeypatch.setattr(semantic_service, "prune_generations", lambda **_kwargs: None)
     if concurrent_rollback:
-        with pytest.raises(SemanticIndexError, match='active generation changed'):
+        with pytest.raises(SemanticIndexError, match="active generation changed"):
             state._rebuild()
-        assert active['generation_id'] == 'rollback'
+        assert active["generation_id"] == "rollback"
         assert versions == [3]
     else:
         state._rebuild()
-        assert active['generation_id'] == 'rebuilt'
+        assert active["generation_id"] == "rebuilt"
         assert versions == [3, 3]
     assert not state._maintenance.is_set()

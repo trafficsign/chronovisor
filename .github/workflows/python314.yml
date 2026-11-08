@@ -44,12 +44,6 @@ jobs:
       - run: uv run --frozen ruff check --no-cache src scripts tests
       - run: uv run --frozen mypy
       - run: uv run --frozen lint-imports --no-cache
-      - name: Architecture and runtime-analysis contracts
-        run: |
-          uv run --frozen python scripts/architecture_baseline.py \
-            --check docs/refactoring/architecture-baseline.json
-          uv run --frozen pytest -q \
-            tests/test_architecture_baseline.py
       - name: Isolated full test suite
         run: >-
           uv run --frozen pytest -q

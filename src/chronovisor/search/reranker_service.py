@@ -13,30 +13,14 @@ import statistics
 import threading
 import time
 from collections import OrderedDict, deque
-from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from chronovisor.core import index_store, llm_config
-from chronovisor.core.decision_mlx import RECALL_FILTER_PURPOSE, DecisionMLXBackend
+from chronovisor.core.decision_mlx import DecisionMLXBackend
 
 # isort: split
-from chronovisor.core.decision_mlx import (
-    ANSWER_AXES,
-    ANSWER_AXIS_QUESTIONS,
-    JUDGE_ANSWER_AXES,
-    JUDGE_CERTIFICATE,
-    JUDGE_QUESTIONS,
-    JUDGE_ROLE_BY_KIND,
-    JUDGE_ROLES,
-    JUDGE_UTILITY,
-    DecisionRoute,
-    answer_axis_scores,
-    certificate_verdict,
-    decision_fingerprint,
-    judge_state,
-)
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.llm_runtime import (
     SAFE_FAILURE_CATEGORIES,
@@ -45,7 +29,6 @@ from chronovisor.core.llm_runtime import (
     RouteLocation,
     SourceDataClassification,
 )
-from chronovisor.core.ollama import model_activity
 from chronovisor.core.reranker import (
     QUERY_SOURCE,
     RERANK_RUNTIME_ROLE,
@@ -64,21 +47,11 @@ from chronovisor.core.search_types import (
 )
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
-    okf_runtime_operation,
-    okf_startup_status,
 )
 from chronovisor.search.accelerator_lease import accelerator_lease
 
 SERVICE_STATUS_FILE = CHRONOVISOR_ROOT / "runtime" / "reranker-service-status.json"
 PASSAGE_CACHE_SIZE = 512
-# A recall turn publishes at most a few items; this only bounds one filter request's work.
-RECALL_FILTER_MAX_TEXTS = 16
-# One utility judgement carries the evidence the answerer saw; bound it like
-# every other judge field before any forward.
-UTILITY_EVIDENCE_MAX_ITEMS = 16
-# Lower number wins the next candidate turn.
-PRIORITY_RECALL = 0
-PRIORITY_SEARCH = 1
 
 
 def _candidate_evidence_from_payload(
@@ -151,35 +124,6 @@ def _percentile(values: list[float], quantile: float) -> float:
     return float(ordered[index])
 
 
-class _PriorityTurn:
-    """Give a waiting recall request the next candidate turn ahead of search."""
-
-    def __init__(self) -> None:
-        self._condition = threading.Condition()
-        self._busy = False
-        self._waiting = {PRIORITY_RECALL: 0, PRIORITY_SEARCH: 0}
-
-    @contextlib.contextmanager
-    def slot(self, priority: int) -> Iterator[None]:
-        with self._condition:
-            self._waiting[priority] += 1
-            self._condition.notify_all()
-            try:
-                while self._busy or any(
-                    count for level, count in self._waiting.items() if level < priority
-                ):
-                    self._condition.wait()
-            finally:
-                self._waiting[priority] -= 1
-            self._busy = True
-        try:
-            yield
-        finally:
-            with self._condition:
-                self._busy = False
-                self._condition.notify_all()
-
-
 class RerankerServiceState:
     def __init__(
         self,
@@ -190,10 +134,9 @@ class RerankerServiceState:
         self.config = config
         self._llm_runtime = llm_runtime or llm_config.load_default_llm_runtime()
         self._route = self._llm_runtime.resolve_rerank(RERANK_RUNTIME_ROLE)
-        self._decision_fingerprint = self._judge_fingerprint()
         self._store = index_store.get_store()
         self._work_lock = threading.Lock()
-        self._turn = _PriorityTurn()
+        self._inference_lock = threading.Lock()
         self._slots = threading.BoundedSemaphore(config.service.queue_size)
         self._passages: OrderedDict[
             str,
@@ -241,274 +184,10 @@ class RerankerServiceState:
             stack.enter_context(
                 accelerator_lease(timeout_ms=self.config.service.timeout_ms)
             )
-            stack.enter_context(
-                model_activity(
-                    model=self._route.model,
-                    operation="rerank",
-                    pipeline="recall",
-                )
-            )
         return stack
 
-    def _judge_fingerprint(self) -> str:
-        if (
-            self._route.provider != DecisionMLXBackend.provider
-            or not self._route.revision
-        ):
-            return ""
-        return decision_fingerprint(
-            DecisionRoute(
-                role=RERANK_RUNTIME_ROLE,
-                provider=self._route.provider,
-                model=self._route.model,
-                location=self._route.location.value,
-                revision=self._route.revision,
-            )
-        )
-
-    def _judge_route(self, role: str) -> dict[str, str]:
-        if role not in JUDGE_ROLES:
-            raise ValueError("unknown decision judge role")
-        route = self._llm_runtime.resolve_rerank(role)
-        if (
-            route.provider != self._route.provider
-            or route.model != self._route.model
-            or route.location is not self._route.location
-            or route.revision != self._route.revision
-            or not self._decision_fingerprint
-        ):
-            raise ValueError("decision judge route mismatch")
-        return {
-            "role": role,
-            "provider": route.provider,
-            "model": route.model,
-            "location": route.location.value,
-        }
-
-    def _judge_forward(
-        self, role: str, question: str, state: str, priority: int
-    ) -> float:
-        with self._turn.slot(priority), self._local_resources():
-            scores = self._llm_runtime.decision_readout(role, question, (state,))
-        if len(scores) != 1:
-            raise ValueError("decision judge returned the wrong number of scores")
-        return float(scores[0])
-
-    def _judge(self, payload: dict[str, Any]) -> dict[str, Any]:
-        kind = payload.get("kind")
-        if not isinstance(kind, str) or kind not in JUDGE_ROLE_BY_KIND:
-            raise ValueError("judge requires a known kind")
-        role = payload.get("role")
-        if not isinstance(role, str) or role != JUDGE_ROLE_BY_KIND[kind]:
-            raise ValueError("judge role does not match kind")
-        expected = {
-            JUDGE_ANSWER_AXES: {
-                "method",
-                "kind",
-                "role",
-                "query",
-                "answer",
-                "reference",
-            },
-            JUDGE_CERTIFICATE: {
-                "method",
-                "kind",
-                "role",
-                "query",
-                "rubric",
-                "evidence",
-            },
-            JUDGE_UTILITY: {
-                "method",
-                "kind",
-                "role",
-                "query",
-                "context",
-                "evidence",
-                "answer",
-            },
-        }[kind]
-        allowed = expected | ({"rubric_id"} if kind == JUDGE_CERTIFICATE else set())
-        allowed = allowed | {"priority"}
-        if set(payload) - allowed or not expected <= set(payload):
-            raise ValueError("judge request has invalid fields")
-        query = payload.get("query")
-        if not isinstance(query, str) or not query.strip():
-            raise ValueError("judge requires a non-empty query")
-        # Bound the whole request before taking a slot or doing any forward.
-        for field, value in payload.items():
-            if isinstance(value, str) and len(value) > (
-                512 if field == "rubric_id" else 16_384
-            ):
-                raise ValueError(f"judge {field} is too long")
-        if kind == JUDGE_UTILITY:
-            evidence_rows = payload.get("evidence")
-            if (
-                not isinstance(evidence_rows, list)
-                or len(evidence_rows) > UTILITY_EVIDENCE_MAX_ITEMS
-                or not all(isinstance(row, str) for row in evidence_rows)
-                or sum(len(row) for row in evidence_rows) > 16_384
-            ):
-                raise ValueError(
-                    "utility evidence must be a bounded list of strings"
-                )
-        if kind == JUDGE_CERTIFICATE:
-            evidence_rows = payload.get("evidence")
-            if not isinstance(evidence_rows, list) or not 1 <= len(evidence_rows) <= 2:
-                raise ValueError("certificate requires 1..2 evidence spans")
-            seen_pages: set[str] = set()
-            for row in evidence_rows:
-                if not isinstance(row, dict) or set(row) != {"page_id", "span"}:
-                    raise ValueError("certificate evidence is invalid")
-                for field, limit in (("page_id", 512), ("span", 16_384)):
-                    value = row[field]
-                    if (
-                        not isinstance(value, str)
-                        or not value.strip()
-                        or len(value) > limit
-                    ):
-                        raise ValueError(f"certificate {field} is invalid")
-                if row["page_id"] in seen_pages:
-                    raise ValueError("certificate evidence is duplicated")
-                seen_pages.add(row["page_id"])
-        route = self._judge_route(role)
-        default_priority = (
-            PRIORITY_RECALL if kind == JUDGE_CERTIFICATE else PRIORITY_SEARCH
-        )
-        priority_value = payload.get("priority")
-        if priority_value is None:
-            priority = default_priority
-        elif (
-            isinstance(priority_value, int)
-            and not isinstance(priority_value, bool)
-            and priority_value in {PRIORITY_RECALL, PRIORITY_SEARCH}
-        ):
-            priority = priority_value
-        else:
-            raise ValueError("judge priority is invalid")
-        if not self._slots.acquire(blocking=False):
-            raise ServiceBusy("reranker queue is full")
-        started = time.perf_counter()
-        body: dict[str, Any]
-        try:
-            if kind == JUDGE_ANSWER_AXES:
-                answer = payload.get("answer")
-                reference = payload.get("reference")
-                if (
-                    not isinstance(answer, str)
-                    or not answer
-                    or not isinstance(reference, str)
-                    or not reference
-                ):
-                    raise ValueError("answer_axes requires answer and reference")
-                state = judge_state(
-                    kind, query=query, answer=answer, reference=reference
-                )
-                axis_logits = tuple(
-                    self._judge_forward(
-                        role, ANSWER_AXIS_QUESTIONS[axis], state, priority
-                    )
-                    for axis in ANSWER_AXES
-                )
-                body = {
-                    "scores": answer_axis_scores(axis_logits),
-                    "logits": dict(zip(ANSWER_AXES, axis_logits, strict=True)),
-                }
-            elif kind == JUDGE_CERTIFICATE:
-                rubric = payload.get("rubric")
-                rubric_id = payload.get("rubric_id", "")
-                evidence = payload.get("evidence")
-                if (
-                    not isinstance(rubric, str)
-                    or not rubric
-                    or not isinstance(rubric_id, str)
-                    or not isinstance(evidence, list)
-                    or not 1 <= len(evidence) <= 2
-                ):
-                    raise ValueError(
-                        "certificate requires rubric and 1..2 evidence spans"
-                    )
-                verdicts: list[dict[str, Any]] = []
-                certificate_logits: list[float] = []
-                seen: set[str] = set()
-                for row in evidence:
-                    if not isinstance(row, dict) or set(row) != {"page_id", "span"}:
-                        raise ValueError("certificate evidence is invalid")
-                    page_id = row.get("page_id")
-                    span = row.get("span")
-                    if (
-                        not isinstance(page_id, str)
-                        or not page_id
-                        or page_id in seen
-                        or not isinstance(span, str)
-                        or not span
-                    ):
-                        raise ValueError("certificate evidence is invalid")
-                    seen.add(page_id)
-                    state = judge_state(
-                        kind,
-                        query=query,
-                        rubric=rubric,
-                        rubric_id=rubric_id,
-                        page_id=page_id,
-                        evidence=span,
-                    )
-                    logit = self._judge_forward(
-                        role, JUDGE_QUESTIONS[JUDGE_CERTIFICATE], state, priority
-                    )
-                    certificate_logits.append(logit)
-                    verdicts.append(certificate_verdict(page_id, logit))
-                body = {
-                    "verdicts": verdicts,
-                    "logits": certificate_logits,
-                }
-            else:
-                context = payload.get("context")
-                evidence = payload.get("evidence")
-                answer = payload.get("answer")
-                if (
-                    not isinstance(context, str)
-                    or not isinstance(evidence, list)
-                    or not all(isinstance(row, str) for row in evidence)
-                    or not isinstance(answer, str)
-                    or not answer
-                ):
-                    raise ValueError("utility requires context, evidence and answer")
-                state = judge_state(
-                    kind,
-                    query=query,
-                    context=context,
-                    evidence_items=evidence,
-                    answer=answer,
-                )
-                logit = self._judge_forward(
-                    role, JUDGE_QUESTIONS[JUDGE_UTILITY], state, priority
-                )
-                body = {"logit": logit}
-        finally:
-            self._slots.release()
-        elapsed_ms = self._record_request(started)
-        return {
-            "status": "ok",
-            "method": "judge",
-            "kind": kind,
-            "role": role,
-            "priority": priority,
-            "route": route,
-            "decision_fingerprint": self._decision_fingerprint,
-            "latency_ms": int(round(elapsed_ms)),
-            **body,
-        }
-
-    def _score(self, request: RerankRequest, priority: int) -> list[float]:
-        """Raw score per candidate, in request order, in priority turn order.
-
-        A decision model is compute-bound (4B: ~0.2 s a candidate, batching does
-        not help), so it takes the accelerator lease one candidate at a time:
-        the semantic service then waits at most one forward, not ~2 s.  The
-        priority turn is taken before the lease so a waiting recall request can
-        take the next candidate turn ahead of a multi-candidate search rerank.
-        """
+    def _score(self, request: RerankRequest) -> list[float]:
+        """Score candidates while releasing the shared accelerator between forwards."""
 
         count = len(request.candidates)
         groups = (
@@ -525,7 +204,7 @@ class RerankerServiceState:
                 if request.candidate_sources is None
                 else tuple(request.candidate_sources[index] for index in group),
             )
-            with self._turn.slot(priority), self._local_resources():
+            with self._inference_lock, self._local_resources():
                 result = self._llm_runtime.rerank(RERANK_RUNTIME_ROLE, part)
             for item in result.items:
                 scores[group[item.index]] = float(item.score)
@@ -654,7 +333,6 @@ class RerankerServiceState:
                         source for _passage, source, _digest in passages_and_hashes
                     ),
                 ),
-                PRIORITY_SEARCH,
             )
         finally:
             self._slots.release()
@@ -675,45 +353,6 @@ class RerankerServiceState:
                     strict=True,
                 )
             ],
-            "latency_ms": int(round(elapsed_ms)),
-            "route": self._route_payload(),
-        }
-
-    def _recall_filter(
-        self, query: str, context: str, texts: list[str]
-    ) -> dict[str, Any]:
-        """Score exact publishable recall texts against the user turn (logit P(yes) each, in order)."""
-
-        # The filter question and its threshold belong to a decision model; a
-        # relevance reranker would answer a different question silently.
-        if self._route.provider != DecisionMLXBackend.provider:
-            raise ValueError("recall_filter requires a decision model route")
-        if not query.strip():
-            raise ValueError("query must not be empty")
-        if not texts or len(texts) > RECALL_FILTER_MAX_TEXTS:
-            raise ValueError("recall_filter requires 1..RECALL_FILTER_MAX_TEXTS texts")
-        if not self._slots.acquire(blocking=False):
-            raise ServiceBusy("reranker queue is full")
-        started = time.perf_counter()
-        try:
-            scores = self._score(
-                RerankRequest(
-                    query,
-                    tuple(texts),
-                    QUERY_SOURCE,
-                    timeout_ms=self.config.service.timeout_ms,
-                    purpose=RECALL_FILTER_PURPOSE,
-                    context=context,
-                ),
-                PRIORITY_RECALL,
-            )
-        finally:
-            self._slots.release()
-        elapsed_ms = self._record_request(started)
-        return {
-            "status": "ok",
-            "method": "recall_filter",
-            "scores": scores,
             "latency_ms": int(round(elapsed_ms)),
             "route": self._route_payload(),
         }
@@ -748,24 +387,6 @@ class RerankerServiceState:
                 normalized_ids,
                 evidence_by_page=evidence_by_page,
             )
-        if method == "judge":
-            return self._judge(payload)
-        if method == "recall_filter":
-            query, context, texts = (
-                payload.get("query"),
-                payload.get("context", ""),
-                payload.get("texts"),
-            )
-            if (
-                not isinstance(query, str)
-                or not isinstance(context, str)
-                or not isinstance(texts, list)
-                or not all(isinstance(text, str) and text for text in texts)
-            ):
-                raise ValueError(
-                    "recall_filter requires query, context and non-empty texts"
-                )
-            return self._recall_filter(query, context, texts)
         raise ValueError(f"unknown reranker method: {method}")
 
 
@@ -804,13 +425,6 @@ class _Server(socketserver.ThreadingUnixStreamServer):
 
 
 def serve(config: RerankerConfig | None = None) -> None:
-    with okf_runtime_operation(CHRONOVISOR_ROOT):
-        _serve_locked(config)
-
-
-def _serve_locked(config: RerankerConfig | None) -> None:
-    if not okf_startup_status(CHRONOVISOR_ROOT).allowed:
-        raise SystemExit(75)
     config = config or load_reranker_config()
     if not config.enabled:
         raise SystemExit("reranker is disabled in config")
@@ -858,25 +472,10 @@ def main(argv: list[str] | None = None) -> int:
     """Run the resident reranker service command-line entry point."""
 
     args = build_parser().parse_args(argv)
-    if args.command in {"status", "health"}:
-        return _main_locked(args)
-    from chronovisor.core.okf_cutover import OKFStartupBlocked
-
-    try:
-        with okf_runtime_operation(CHRONOVISOR_ROOT):
-            return _main_locked(args)
-    except OKFStartupBlocked:
-        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
-        return 75
+    return _main_locked(args)
 
 
 def _main_locked(args: argparse.Namespace) -> int:
-    if (
-        args.command not in {"status", "health"}
-        and not okf_startup_status(CHRONOVISOR_ROOT).allowed
-    ):
-        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
-        return 75
     if args.command == "serve":
         serve()
         return 0

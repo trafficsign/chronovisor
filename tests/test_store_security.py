@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from chronovisor.core import store
-from chronovisor.core.canonical_document import validate_canonical_document
 from chronovisor.hosts import server
 
 
@@ -36,7 +35,7 @@ def test_all_pages_returns_only_stable_nonreserved_canonical_documents(
     assert store.all_pages() == [stable.resolve()]
 
 
-def test_init_chronovisor_corrects_private_directory_modes(tmp_path: Path) -> None:
+def test_capture_init_corrects_private_raw_directory_mode(tmp_path: Path) -> None:
     root = tmp_path / "wiki"
     context = store.RuntimeContext(root)
     for directory in (root, context.raw_dir, context.pages_dir, context.system_dir):
@@ -47,7 +46,7 @@ def test_init_chronovisor_corrects_private_directory_modes(tmp_path: Path) -> No
 
     assert all(
         stat.S_IMODE(directory.stat().st_mode) == 0o700
-        for directory in (root, context.raw_dir, context.pages_dir, context.system_dir)
+        for directory in (context.raw_dir,)
     )
 
 
@@ -127,7 +126,6 @@ def test_chronovisor_read_confines_pages_and_system(
     monkeypatch.setattr(store, "PAGES_DIR", pages)
     monkeypatch.setattr(server, "CHRONOVISOR_ROOT", root)
     monkeypatch.setattr(server, "get_store", FakeStore)
-    monkeypatch.setattr(server, "_append_pull_log", lambda _row: None)
     read = getattr(server.chronovisor_read, "fn", server.chronovisor_read)
 
     for page_id, expected in (
@@ -150,17 +148,4 @@ def test_chronovisor_read_confines_pages_and_system(
         "page-link",
         "system-link",
     ):
-        assert json.loads(read(page_id)) == {
-            "error": f"Page '{page_id}' not found"
-        }
-def test_generated_schema_teaches_the_canonical_page_contract() -> None:
-    document = validate_canonical_document(
-        store.SCHEMA_CONTENT.encode("utf-8"),
-        namespace="pages",
-        path="schema.md",
-        require_stable=True,
-    )
-
-    assert document.metadata["type"] == "knowledge"
-    assert "[[" not in store.SCHEMA_CONTENT
-    assert "(<jt-v10-probability-contexts.md>)" in store.SCHEMA_CONTENT
+        assert json.loads(read(page_id)) == {"error": f"Page '{page_id}' not found"}

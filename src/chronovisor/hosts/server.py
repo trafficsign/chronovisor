@@ -1,20 +1,16 @@
-"""Chronovisor MCP Server."""
+"""Read-only MCP access to captured knowledge pages."""
 
 import contextlib
-import hashlib
 import json
-import re
-from collections.abc import Callable
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 try:
-    from mcp.server.fastmcp import Context, FastMCP
+    from mcp.server.fastmcp import FastMCP
 except ModuleNotFoundError:
-    from mcp.server.mcpserver import Context
     from mcp.server.mcpserver import MCPServer as FastMCP
-from chronovisor.core import activity_log, runtime_status
+
+from chronovisor.core.background_jobs import snapshot
 from chronovisor.core.frontmatter import parse as _frontmatter_parse
 from chronovisor.core.index_store import (
     PAGE_RESERVED_FILENAMES,
@@ -24,254 +20,21 @@ from chronovisor.core.index_store import (
     stable_indexed_document_path,
 )
 from chronovisor.core.markdown_sections import markdown_sections
-from chronovisor.core.store import (
-    ACTIVITY_FILE,
-    CHRONOVISOR_ROOT,
-    RAW_DIR,
-    init_chronovisor,
-    okf_runtime_operation,
-)
-from chronovisor.hosts import evidence_composition
-from chronovisor.ingest.page_registry import PageRegistry, PageRegistryError
-from chronovisor.raw.record_raw import ingest_raw, record_raw
-
-evidence_composition.bind_recall_provider()
+from chronovisor.core.page_registry import PageRegistry, PageRegistryError
+from chronovisor.core.store import CHRONOVISOR_ROOT
 
 mcp = FastMCP(
     "chronovisor",
     instructions=(
-        "Chronovisor is your structured knowledge base. "
-        "Use chronovisor_init at session start, chronovisor_search during "
-        "conversation, and chronovisor_read for full pages with backlinks. "
-        "Before finishing an answer, call chronovisor_recall_used with the "
-        "forwarded decision and session IDs for every recalled page that "
-        "materially affected the answer; never mark exposure-only pages used."
+        "Chronovisor searches existing knowledge pages. Use chronovisor_init at session "
+        "start, chronovisor_search during conversation, and chronovisor_read for full "
+        "pages with backlinks. chronovisor_status reports indexes, services and capture jobs."
     ),
 )
-
-_MCP_DROP = object()
-_MCP_BODY_KEYS = frozenset(
-    {
-        "body",
-        "content",
-        "log_entries",
-        "message",
-        "preview",
-        "raw",
-        "raw_content",
-        "text",
-    }
-)
-_MCP_ALWAYS_DROP_KEYS = frozenset(
-    {"accepted_keywords", "rejected_keywords", "raw_slug"}
-)
-_MCP_PATH_KEYS = frozenset(
-    {
-        "archive_path",
-        "chronovisor_root",
-        "manifest",
-        "module_path",
-        "path",
-        "raw_path",
-        "raw_file",
-        "root",
-        "saved",
-        "session_file",
-        "source_path",
-        "transcript_path",
-    }
-)
-_MCP_FILE_URI_RE = re.compile(r"file:///(?:[^\s\"'<>]+)")
-_MCP_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w:])/(?!/)(?:[^\s\"'<>]+)")
-
-
-def _mcp_raw_content_allowed(include_raw_content: bool) -> bool:
-    """Require both the local opt-in and an explicit tool request."""
-
-    if include_raw_content is not True:
-        return False
-    try:
-        from chronovisor.core.runtime_config import load_mcp_config
-
-        return load_mcp_config().expose_raw_content
-    except Exception:
-        return False
-
-
-def _mcp_redact_text(value: str) -> str:
-    """Redact known credentials and absolute paths from opt-in text."""
-
-    from chronovisor.core.background_jobs import redact_sensitive_text
-
-    redacted = redact_sensitive_text(value)
-    root = str(CHRONOVISOR_ROOT)
-    resolved_root = str(CHRONOVISOR_ROOT.resolve())
-    redacted = redacted.replace(resolved_root, "<chronovisor-root>")
-    if root != resolved_root:
-        redacted = redacted.replace(root, "<chronovisor-root>")
-    redacted = _MCP_FILE_URI_RE.sub("file:///<path>", redacted)
-    return _MCP_ABSOLUTE_PATH_RE.sub("<path>", redacted)
-
-
-def _mcp_safe_relative_path(value: object) -> str | None:
-    if not isinstance(value, str) or not value:
-        return None
-    candidate = Path(value).expanduser()
-    root = CHRONOVISOR_ROOT.resolve()
-    if candidate.is_absolute():
-        try:
-            return candidate.resolve(strict=False).relative_to(root).as_posix()
-        except (OSError, ValueError):
-            return None
-    if any(part in {"", ".", ".."} for part in candidate.parts):
-        return None
-    return candidate.as_posix()
-
-
-def _mcp_project_response(
-    value: object,
-    *,
-    allow_raw_content: bool = False,
-    metadata_only: bool = False,
-    _key: str = "",
-) -> object:
-    """Project MCP results into bounded metadata or explicitly opted-in text."""
-
-    if metadata_only:
-        allow_raw_content = False
-    key = _key.casefold()
-    if isinstance(value, dict):
-        projected: dict[str, object] = {}
-        for raw_name, item in value.items():
-            name = str(raw_name)
-            folded = name.casefold()
-            if folded in _MCP_ALWAYS_DROP_KEYS:
-                continue
-            if folded in _MCP_BODY_KEYS and not allow_raw_content:
-                continue
-            if folded in _MCP_PATH_KEYS or folded.endswith("_path"):
-                safe_path = _mcp_safe_relative_path(item)
-                if safe_path is not None:
-                    projected[name] = safe_path
-                continue
-            child = _mcp_project_response(
-                item,
-                allow_raw_content=allow_raw_content,
-                metadata_only=metadata_only,
-                _key=name,
-            )
-            if child is not _MCP_DROP:
-                projected[name] = child
-        return projected
-    if isinstance(value, list):
-        if key in _MCP_BODY_KEYS and not allow_raw_content:
-            return _MCP_DROP
-        return [
-            child
-            for item in value
-            if (
-                child := _mcp_project_response(
-                    item,
-                    allow_raw_content=allow_raw_content,
-                    metadata_only=metadata_only,
-                    _key=_key,
-                )
-            )
-            is not _MCP_DROP
-        ]
-    if isinstance(value, tuple):
-        projected_tuple = _mcp_project_response(
-            list(value),
-            allow_raw_content=allow_raw_content,
-            metadata_only=metadata_only,
-            _key=_key,
-        )
-        return projected_tuple
-    if isinstance(value, str):
-        if key in _MCP_BODY_KEYS and not allow_raw_content:
-            return _MCP_DROP
-        return _mcp_redact_text(value)
-    return value
-
-
-def _mcp_client_host(ctx: Context | None) -> str:
-    """Map an MCP connection's client identity onto a Chronovisor host."""
-
-    if ctx is None:
-        return ""
-    candidates: list[str] = []
-    with contextlib.suppress(Exception):
-        candidates.append(str(ctx.client_id or ""))
-    with contextlib.suppress(Exception):
-        client_params = ctx.session.client_params
-        client_info = getattr(client_params, "clientInfo", None) or getattr(
-            client_params,
-            "client_info",
-            None,
-        )
-        candidates.append(str(getattr(client_info, "name", "") or ""))
-    folded = " ".join(candidates).casefold()
-    if "claude" in folded:
-        return "claude-code"
-    if "codex" in folded or "openai" in folded:
-        return "codex"
-    return ""
-
-
-def _record_mcp_field_activity(
-    *,
-    ctx: Context | None,
-    session_id: str | None,
-    page_ids: list[str],
-    activity_kind: str,
-) -> dict[str, Any]:
-    """Best-effort bridge from actual MCP use to the live Recall Field."""
-
-    if ctx is None:
-        return {}
-    try:
-        from chronovisor.recall.recall_field import record_mcp_activity
-
-        return record_mcp_activity(
-            host=_mcp_client_host(ctx),
-            session_id=session_id or "",
-            page_ids=page_ids,
-            activity_kind=activity_kind,
-        )
-    except Exception:
-        return {"status": "error"}
-
-
-def _parse_frontmatter(text: str) -> dict:
-    """Return full-YAML metadata from a canonical Markdown document."""
-    meta, _ = _frontmatter_parse(text)
-    return meta
-
-
-def _find_backlinks(page_id: str) -> list[str]:
-    """Find pages that link to the given page.
-
-    Backed by the persistent IndexStore. Callers expect scan-order
-    (`pages/` then `system/`, rglob within each), source-deduped, and
-    edges recorded for non-existent targets too — all preserved by
-    `IndexStore._rebuild_backlinks`.
-
-    Tool handlers must call ``get_store().refresh()`` once at entry;
-    this helper does *not* refresh on its own to avoid redundant scans
-    when called multiple times per tool invocation.
-    """
-    return get_store().backlinks(page_id)
-
-
-def _page_metadata(path: Path) -> dict:
-    """Extract metadata from a page file."""
-    content = path.read_text()
-    fm = _parse_frontmatter(content)
-    return {
-        "page_id": path.stem,
-        "title": fm.get("title", path.stem),
-        "updated": fm.get("updated", "unknown"),
-    }
+READ_MAX_CHARS = 40_000
+_READ_SECTION_INDEX_LIMIT = 80
+_EXPANDED_PER_HIT = 3
+_EXPANDED_TOTAL = 20
 
 
 def _find_page_with_alias(
@@ -313,12 +76,6 @@ def _find_page_with_alias(
     )
 
 
-# Host tool results above ~100k chars are rejected outright, so page bodies are
-# returned in windows and oversized pages advertise their section offsets.
-READ_MAX_CHARS = 40_000
-_READ_SECTION_INDEX_LIMIT = 80
-
-
 def _content_window(content: str, offset: int, max_chars: int) -> dict[str, Any]:
     total = len(content)
     offset = min(max(0, offset), total)
@@ -345,14 +102,182 @@ def _content_window(content: str, offset: int, max_chars: int) -> dict[str, Any]
     return window
 
 
+def _filter_search_results(
+    results: list[Any],
+    *,
+    store: Any,
+    tags: list[str] | None,
+    tag_match: str,
+) -> tuple[list[Any], list[str]]:
+    """Apply exact metadata filters after ranked retrieval."""
+
+    tag_filter = [tag for tag in (tags or []) if isinstance(tag, str) and tag]
+    if tag_filter:
+        target = set(tag_filter)
+        match_all = tag_match != "any"
+        results = [
+            result
+            for result in results
+            if (
+                target.issubset(set(store.tags(result.page_id)))
+                if match_all
+                else bool(target & set(store.tags(result.page_id)))
+            )
+        ]
+
+    return results, tag_filter
+
+
+def _direct_search_hits(
+    results: list[Any],
+    *,
+    query: str,
+    store: Any,
+) -> list[dict[str, Any]]:
+    """Project ranked results into the stable MCP direct-hit shape."""
+
+    query_terms = query.lower().split()
+    direct_hits = []
+    for result in results:
+        meta = store.meta(result.page_id)
+        path = stable_indexed_document_path(
+            meta,
+            pages_dir=CHRONOVISOR_ROOT / "pages",
+            system_dir=CHRONOVISOR_ROOT / "system",
+        )
+        if path is None:
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError, UnicodeDecodeError:
+            continue
+        snippet = _extract_snippet(content, query_terms)
+        identity = meta or {}
+        direct_hits.append(
+            {
+                "page_id": result.page_id,
+                **({"uid": identity["uid"]} if identity.get("uid") else {}),
+                "title": result.title,
+                "updated": result.updated,
+                "score": round(result.score, 4),
+                "snippets": [snippet] if snippet else [],
+                "tags": store.tags(result.page_id),
+            }
+        )
+    return direct_hits
+
+
+def _expanded_search_hits(
+    direct_hits: list[dict[str, Any]],
+    *,
+    depth: int,
+    store: Any,
+    tag_filter: list[str],
+    tag_match: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Expand direct hits through one-hop links while preserving filters."""
+
+    expanded_hits: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    if depth <= 0 or not direct_hits:
+        return expanded_hits, edges
+    seen = {hit["page_id"] for hit in direct_hits}
+    target_tags = set(tag_filter)
+    for hit in direct_hits:
+        taken = 0
+        for link in store.outlinks(hit["page_id"]):
+            if taken >= _EXPANDED_PER_HIT or len(expanded_hits) >= _EXPANDED_TOTAL:
+                break
+            if link in seen:
+                continue
+            meta = store.meta(link)
+            if meta is None:
+                continue
+            if tag_filter:
+                link_tags = set(store.tags(link))
+                matches = (
+                    bool(target_tags & link_tags)
+                    if tag_match == "any"
+                    else target_tags.issubset(link_tags)
+                )
+                if not matches:
+                    continue
+            seen.add(link)
+            taken += 1
+            identity = meta
+            expanded_hits.append(
+                {
+                    "page_id": link,
+                    **({"uid": identity["uid"]} if identity.get("uid") else {}),
+                    "title": meta["title"],
+                    "updated": meta["updated"],
+                    "distance": 1,
+                    "via": [hit["page_id"]],
+                    "score": round(hit["score"] * 0.5, 4),
+                    "reason": "linked from direct hit",
+                    "tags": store.tags(link),
+                }
+            )
+            edges.append(
+                {
+                    "from": hit["page_id"],
+                    "to": link,
+                    "from_uid": hit.get("uid"),
+                    "to_uid": identity.get("uid"),
+                    "type": "wikilink",
+                }
+            )
+    return expanded_hits, edges
+
+
+def _search_filters_applied(
+    *,
+    folder: str | None,
+    updated_after: str | None,
+    updated_before: str | None,
+    tag_filter: list[str],
+    tag_match: str,
+) -> dict[str, Any]:
+    """Render only filters that materially constrained this search."""
+
+    filters: dict[str, Any] = {}
+    if folder:
+        filters["folder"] = folder
+    if updated_after:
+        filters["updated_after"] = updated_after
+    if updated_before:
+        filters["updated_before"] = updated_before
+    if tag_filter:
+        filters["tags"] = tag_filter
+        filters["tag_match"] = tag_match if tag_match in {"all", "any"} else "all"
+    return filters
+
+
+def _extract_snippet(content: str, terms: list[str], max_len: int = 150) -> str | None:
+    """Extract a relevant snippet from content."""
+    _meta, body = _frontmatter_parse(content)
+    body = body.strip()
+
+    body_lower = body.lower()
+    for term in terms:
+        idx = body_lower.find(term)
+        if idx != -1:
+            start = max(0, idx - 50)
+            end = min(len(body), idx + max_len)
+            snippet = body[start:end].strip()
+            if start > 0:
+                snippet = "..." + snippet
+            if end < len(body):
+                snippet = snippet + "..."
+            return snippet
+    return None
+
+
 @mcp.tool()
 def chronovisor_read(
     page: str,
-    session_id: str | None = None,
-    decision_id: str | None = None,
     offset: int = 0,
     max_chars: int = READ_MAX_CHARS,
-    ctx: Context = None,
 ) -> str:
     """Read a wiki page with outlinks and backlinks.
 
@@ -362,8 +287,6 @@ def chronovisor_read(
 
     Args:
         page: Page ID (filename without .md extension)
-        session_id: Optional session id for recall pull feedback.
-        decision_id: Optional automatic-Recall decision id for turn tracing.
         offset: Character offset into the page body to start from.
         max_chars: Maximum characters of content to return (capped at 40000).
     """
@@ -399,30 +322,6 @@ def chronovisor_read(
     content = path.read_text()
     outlinks = store.outlinks(canonical_page_id)
     backlinks = store.backlinks(canonical_page_id)
-    field_activity = _record_mcp_field_activity(
-        ctx=ctx,
-        session_id=session_id,
-        page_ids=[canonical_page_id],
-        activity_kind="read",
-    )
-    _append_pull_log(
-        {
-            "type": "read",
-            "stage": "read",
-            "session_id": session_id or "",
-            "decision_id": decision_id or "",
-            "page_id": canonical_page_id,
-            **({"host": field_activity["host"]} if field_activity.get("host") else {}),
-            **(
-                {"field_session_hash": field_activity["session_hash"]}
-                if field_activity.get("session_hash")
-                else {}
-            ),
-            **({"page_uid": canonical_uid} if canonical_uid else {}),
-            **({"requested_page_id": page} if canonical_page_id != page else {}),
-        }
-    )
-
     return json.dumps(
         {
             "page_id": canonical_page_id,
@@ -441,726 +340,6 @@ def chronovisor_read(
 
 
 @mcp.tool()
-def chronovisor_index(limit: int = 50, cursor: int = 0) -> str:
-    """Return structured catalog of wiki pages with pagination.
-
-    Args:
-        limit: Max number of entries to return (default 50)
-        cursor: Offset for pagination (default 0)
-    """
-    store = get_store()
-    store.refresh()
-    entries = store.all_pages_meta(include_system=False)
-    try:
-        registry_state = PageRegistry(CHRONOVISOR_ROOT).load()
-    except PageRegistryError:
-        registry_state = PageRegistry.empty()
-    for entry in entries:
-        if entry.get("uid"):
-            continue
-        uid = registry_state.get("keys", {}).get(
-            str(entry.get("page_id") or "").casefold()
-        )
-        if uid:
-            entry["uid"] = uid
-    total = len(entries)
-    sliced = entries[cursor : cursor + limit]
-
-    return json.dumps(
-        {
-            "total": total,
-            "cursor": cursor,
-            "limit": limit,
-            "has_more": cursor + limit < total,
-            "pages": sliced,
-        },
-        ensure_ascii=False,
-    )
-
-
-@mcp.tool()
-def chronovisor_log(limit: int = 20, include_raw_content: bool = False) -> str:
-    """Return recent change history.
-
-    Args:
-        limit: Number of recent log entries to return
-        include_raw_content: Request redacted message bodies when the local
-            ``[mcp]`` exposure opt-in is enabled.
-    """
-    allow_raw_content = _mcp_raw_content_allowed(include_raw_content)
-    return json.dumps(
-        _mcp_project_response(
-            {"entries": activity_log.read_activity(ACTIVITY_FILE, limit=limit)},
-            allow_raw_content=allow_raw_content,
-        ),
-        ensure_ascii=False,
-    )
-
-
-def _raw_defer_counts() -> tuple[int, int, int]:
-    """Return raw total plus semantic and operational queue-hold counts."""
-    from chronovisor.core.raw_store import RawStore
-    from chronovisor.ingest.failure_supervisor import (
-        SEMANTIC_NO_QUORUM_DEFER_REASON,
-        operational_deferred_raw_files,
-    )
-
-    raw_store = RawStore(RAW_DIR)
-    reference_dir = RAW_DIR.parent / "runtime" / "raw-projections" / "parents"
-    raw_paths = sorted(
-        unit.path
-        if unit.storage == "legacy_file"
-        else raw_store.materialize_ingest(unit, reference_dir)
-        for unit in raw_store.iter_units()
-    )
-    artifact_dir = RAW_DIR.parent / "runtime" / "raw-projections" / "artifacts"
-    if artifact_dir.exists():
-        raw_paths.extend(sorted(artifact_dir.glob("*.md")))
-        raw_paths = sorted(dict.fromkeys(raw_paths), key=lambda path: path.name)
-    deferred = operational_deferred_raw_files(raw_paths)
-    semantic_deferred = sum(
-        reason == SEMANTIC_NO_QUORUM_DEFER_REASON for reason in deferred.values()
-    )
-    operational_deferred = len(deferred) - semantic_deferred
-    return len(raw_paths), semantic_deferred, operational_deferred
-
-
-@mcp.tool()
-def chronovisor_status() -> str:
-    """Return wiki health, Ollama status, and basic statistics."""
-    from chronovisor.ingest.orchestrator import get_pending_raw_files
-
-    store = get_store()
-    store.refresh()
-
-    page_count = store.page_count(include_system=False)
-    raw_total, semantic_deferred, operational_deferred = _raw_defer_counts()
-    raw_pending = len(get_pending_raw_files())
-
-    # Check Ollama via the shared httpx client used by every other Ollama
-    # call in the process. The status string preserves the original
-    # vocabulary ("running" / "error" / "stopped") so callers see no
-    # behaviour change.
-    ollama_status = "unknown"
-    try:
-        from chronovisor.core.ollama import client
-
-        resp = client().get("/api/tags", timeout=3)
-        ollama_status = "running" if resp.status_code == 200 else "error"
-    except Exception:
-        ollama_status = "stopped"
-
-    # Find oldest/newest page from the index (mtime-sorted).
-    sorted_meta = store.all_pages_meta(include_system=False)
-    oldest = sorted_meta[-1] if sorted_meta else None
-    newest = sorted_meta[0] if sorted_meta else None
-
-    # Orphan count: pages with no inbound backlinks.
-    orphan_count = len(store.orphans(include_system=False))
-    page_types: dict[str, int] = {}
-    for meta in store.all_pages_meta(include_system=False):
-        page_type = str(meta.get("page_type") or "knowledge")
-        page_types[page_type] = page_types.get(page_type, 0) + 1
-    try:
-        from chronovisor.ops.health import health_snapshot
-
-        health = health_snapshot()
-    except Exception:
-        health = {}
-    try:
-        from chronovisor.recall.librarian_status import build_librarian_status
-
-        librarian = build_librarian_status(CHRONOVISOR_ROOT)
-    except Exception:
-        librarian = {
-            "state": "BLOCKED",
-            "detail": "librarian status unavailable",
-        }
-
-    return json.dumps(
-        {
-            "page_count": page_count,
-            "raw_total": raw_total,
-            "raw_pending": raw_pending,
-            "semantic_deferred": semantic_deferred,
-            "operational_deferred": operational_deferred,
-            "raw_outstanding": raw_pending + semantic_deferred + operational_deferred,
-            "orphan_count": orphan_count,
-            "page_types": page_types,
-            # health_snapshot embeds the same Librarian status; ship it once.
-            "health": {k: v for k, v in health.items() if k != "librarian"},
-            "librarian": librarian,
-            "ollama_status": ollama_status,
-            "oldest_page": oldest,
-            "newest_page": newest,
-            "chronovisor_root": str(CHRONOVISOR_ROOT),
-        },
-        ensure_ascii=False,
-    )
-
-
-def _append_log(message: str) -> None:
-    """Append one validated operational activity record."""
-
-    activity_log.append_activity(
-        message,
-        source="mcp",
-        level=activity_log_level(message),
-        root=CHRONOVISOR_ROOT,
-        path=ACTIVITY_FILE,
-    )
-
-
-def activity_log_level(message: str) -> str:
-    return runtime_status.classify_log_message(message)
-
-
-def _append_pull_log(record: dict) -> bool:
-    """Append pull telemetry and return a durable-write receipt."""
-
-    try:
-        from chronovisor.recall.recall_runtime import RECALL_PULL_LOG_FILE, append_jsonl
-
-        record = {
-            "ts": datetime.now().isoformat(timespec="seconds"),
-            **record,
-        }
-        append_jsonl(RECALL_PULL_LOG_FILE, record)
-        return True
-    except Exception:
-        return False
-
-
-def _validate_used_recall_decision(
-    decision_id: str,
-    session_id: str,
-) -> dict[str, Any]:
-    """Resolve a used receipt to one durable Recall decision before accepting it."""
-
-    from chronovisor.core.jsonl import read_jsonl
-    from chronovisor.core.recall_log_schema import (
-        page_ids_from_record,
-        recall_identity_from_record,
-        used_page_ids_from_record,
-    )
-    from chronovisor.recall.recall_runtime import RECALL_LOG_FILE, RECALL_PULL_LOG_FILE
-
-    matches = [
-        row
-        for row in read_jsonl(RECALL_LOG_FILE, limit=10_000)
-        if str(row.get("decision_id") or "") == decision_id
-    ]
-    if not matches:
-        return {"status": "error", "error": "unknown recall decision"}
-    if len(matches) != 1:
-        return {"status": "error", "error": "ambiguous recall decision"}
-    recall = matches[0]
-    recall_session = str(recall.get("session_id") or "")
-    if recall_session and session_id and session_id != recall_session:
-        return {"status": "error", "error": "recall session mismatch"}
-    canonical_session = session_id or recall_session
-    observable_pages = page_ids_from_record(recall)
-    identity = recall_identity_from_record(recall)
-    pull_rows = read_jsonl(RECALL_PULL_LOG_FILE, limit=10_000)
-    for pull in pull_rows:
-        if str(pull.get("decision_id") or "") != decision_id:
-            continue
-        pull_session = str(pull.get("session_id") or "")
-        if canonical_session and pull_session != canonical_session:
-            continue
-        if pull.get("type") == "used" and used_page_ids_from_record(pull):
-            for key, value in recall_identity_from_record(pull).items():
-                # The durable recall decision is authoritative. A prior
-                # server-written used receipt can only fill a missing field.
-                identity.setdefault(key, value)
-        if pull.get("type") == "read":
-            page_id = pull.get("page_id")
-            if isinstance(page_id, str) and page_id:
-                observable_pages.append(page_id)
-        elif pull.get("type") == "search":
-            returned = pull.get("returned_pages")
-            if isinstance(returned, list):
-                observable_pages.extend(
-                    value for value in returned if isinstance(value, str) and value
-                )
-    features = recall.get("evidence_features")
-    shadow = features.get("processor_shadow") if isinstance(features, dict) else None
-    shadow_pages = (
-        [
-            value
-            for value in shadow.get("committed_page_ids", [])
-            if isinstance(value, str) and value
-        ]
-        if isinstance(shadow, dict)
-        else []
-    )
-    return {
-        "status": "ok",
-        "session_id": canonical_session,
-        "observable_page_ids": list(dict.fromkeys(observable_pages)),
-        "processor_shadow_page_ids": list(dict.fromkeys(shadow_pages)),
-        "identity": identity,
-    }
-
-
-def _existing_used_receipt(decision_id: str, session_id: str) -> dict[str, Any] | None:
-    """Return the aggregate immutable used receipts for a decision, if any."""
-
-    from chronovisor.core.jsonl import read_jsonl
-    from chronovisor.recall.recall_runtime import RECALL_PULL_LOG_FILE
-
-    matches: list[dict[str, Any]] = []
-    pages: list[str] = []
-    for row in read_jsonl(RECALL_PULL_LOG_FILE, limit=10_000):
-        if row.get("type") != "used":
-            continue
-        if str(row.get("decision_id") or "") != decision_id:
-            continue
-        row_session = str(row.get("session_id") or "")
-        if row_session and session_id and row_session != session_id:
-            continue
-        matches.append(row)
-        values = row.get("page_ids")
-        if isinstance(values, list):
-            pages.extend(value for value in values if isinstance(value, str) and value)
-    if not matches:
-        return None
-    return {
-        "event_id": str(matches[0].get("event_id") or ""),
-        "event_count": len(matches),
-        "page_ids": list(dict.fromkeys(pages)),
-    }
-
-
-def _record_search_pull(
-    *,
-    ctx: Context | None,
-    session_id: str | None,
-    decision_id: str | None,
-    query: str,
-    direct_hits: list[dict],
-    expanded_hits: list[dict],
-    provisional_hits: list[dict],
-    retrieval_trace: dict,
-) -> None:
-    """Record search telemetry and project returned pages into the live Field."""
-
-    direct_page_ids = [hit["page_id"] for hit in direct_hits]
-    all_hits = [*direct_hits, *expanded_hits]
-    field_activity = _record_mcp_field_activity(
-        ctx=ctx,
-        session_id=session_id,
-        page_ids=direct_page_ids,
-        activity_kind="search",
-    )
-    _append_pull_log(
-        {
-            "type": "search",
-            "stage": "returned",
-            "session_id": session_id or "",
-            "decision_id": decision_id or "",
-            "query": query,
-            "direct_pages": direct_page_ids,
-            "expanded_pages": [hit["page_id"] for hit in expanded_hits],
-            "returned_pages": [hit["page_id"] for hit in all_hits],
-            "direct_uids": [hit["uid"] for hit in direct_hits if hit.get("uid")],
-            "expanded_uids": [hit["uid"] for hit in expanded_hits if hit.get("uid")],
-            "returned_uids": [hit["uid"] for hit in all_hits if hit.get("uid")],
-            "provisional_ids": [hit["provisional_id"] for hit in provisional_hits],
-            "retrieval": retrieval_trace,
-            **({"host": field_activity["host"]} if field_activity.get("host") else {}),
-            **(
-                {"field_session_hash": field_activity["session_hash"]}
-                if field_activity.get("session_hash")
-                else {}
-            ),
-        }
-    )
-
-
-_SESSION_LIBRARIAN_KEYS = (
-    "state",
-    "reason_codes",
-    "detail",
-    "mode",
-    "enabled",
-    "authority",
-    "queue",
-    "debts",
-    "eta",
-    "blocked_reasons",
-    "last_run",
-)
-
-
-def _session_librarian_summary(librarian: dict[str, Any]) -> dict[str, Any]:
-    """Session bootstrap only needs health; chronovisor_status has the detail."""
-
-    summary = {key: librarian[key] for key in _SESSION_LIBRARIAN_KEYS if key in librarian}
-    authority = librarian.get("collection_authority")
-    if isinstance(authority, dict):
-        summary["collection_warnings"] = authority.get("warnings") or []
-        summary["collection_hard_failures"] = authority.get("hard_failures") or []
-    return summary
-
-
-def _session_recall_distillation_health() -> dict[str, Any]:
-    """Return the lightweight distillation alert used during session bootstrap."""
-
-    try:
-        from chronovisor.ops.health import recall_distillation_health
-
-        return recall_distillation_health(CHRONOVISOR_ROOT)
-    except Exception:
-        return {
-            "status": "unavailable",
-            "alert": True,
-            "alerts": [
-                {
-                    "category": "human_wait",
-                    "reason": "health_unavailable",
-                    "message": "人の判断待ち: 蒸留のhealthを確認できません",
-                }
-            ],
-            "stop_reason": {
-                "category": "human_wait",
-                "reason": "health_unavailable",
-                "message": "人の判断待ち: 蒸留のhealthを確認できません",
-            },
-        }
-
-
-def _session_queue_health() -> dict[str, Any]:
-    """Return current queue stall metadata for session bootstrap."""
-
-    try:
-        from chronovisor.ops.health import queue_health_snapshot
-
-        return queue_health_snapshot(CHRONOVISOR_ROOT)
-    except Exception:
-        return {
-            "alert": True,
-            "alerts": [
-                {
-                    "component": "queues",
-                    "category": "human_wait",
-                    "reason": "queue_health_unavailable",
-                    "message": "人の判断待ち: queue healthを確認できません",
-                }
-            ],
-        }
-
-
-@mcp.tool()
-def chronovisor_init() -> str:
-    """Initialize session: returns system pages + status in a single call.
-
-    Replaces the need for separate chronovisor_status + 3x chronovisor_read at session start.
-    Returns user-profile, current-state, lessons-learned, and basic wiki stats.
-    """
-    from concurrent.futures import ThreadPoolExecutor
-
-    from chronovisor.core.ollama import is_available
-    from chronovisor.ingest.orchestrator import get_pending_raw_files
-
-    store = get_store()
-
-    # Run the index refresh, raw-dir count, and Ollama health probe in
-    # parallel. The Ollama probe is the heaviest (network) so doing it
-    # alongside the on-disk scans hides its latency. The distillation health
-    # probe only reads sealed metadata and config; it does not run a model.
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        f_refresh = ex.submit(store.refresh)
-        f_raw = ex.submit(_raw_defer_counts)
-        f_pending = ex.submit(lambda: len(get_pending_raw_files()))
-        f_ollama = ex.submit(is_available)
-        f_recall_health = ex.submit(_session_recall_distillation_health)
-        f_queue_health = ex.submit(_session_queue_health)
-        f_refresh.result()
-        raw_total, semantic_deferred, operational_deferred = f_raw.result()
-        raw_pending = f_pending.result()
-        ollama_status = "running" if f_ollama.result() else "stopped"
-        recall_health = f_recall_health.result()
-        queue_health = f_queue_health.result()
-
-    page_count = store.page_count(include_system=False)
-    try:
-        from chronovisor.recall.librarian_status import build_librarian_status
-
-        librarian = build_librarian_status(CHRONOVISOR_ROOT)
-    except Exception:
-        librarian = {
-            "state": "BLOCKED",
-            "detail": "librarian status unavailable",
-        }
-    system_pages = {}
-    for page_id in ("user-profile", "current-state", "lessons-learned"):
-        path = _find_page_with_alias(page_id)
-        if path is None:
-            system_pages[page_id] = {"error": f"Page '{page_id}' not found"}
-            continue
-        content = path.read_text()
-        system_pages[page_id] = {
-            "page_id": page_id,
-            "content": content,
-            "outlinks": store.outlinks(page_id),
-            "backlinks": store.backlinks(page_id),
-        }
-
-    return json.dumps(
-        {
-            "status": {
-                "page_count": page_count,
-                "raw_total": raw_total,
-                "raw_pending": raw_pending,
-                "semantic_deferred": semantic_deferred,
-                "operational_deferred": operational_deferred,
-                "raw_outstanding": (
-                    raw_pending + semantic_deferred + operational_deferred
-                ),
-                "ollama_status": ollama_status,
-                "chronovisor_root": str(CHRONOVISOR_ROOT),
-                "librarian": _session_librarian_summary(librarian),
-                "health": {
-                    "status": "alert"
-                    if (
-                        recall_health.get("alert")
-                        or recall_health.get("status") == "alert"
-                        or queue_health.get("alert")
-                        or queue_health.get("status") == "alert"
-                    )
-                    else "ok",
-                    "alerts": [
-                        *recall_health.get("alerts", []),
-                        *queue_health.get("alerts", []),
-                    ],
-                },
-                "recall_distillation": recall_health,
-                "queues": queue_health,
-            },
-            "system_pages": system_pages,
-        },
-        ensure_ascii=False,
-    )
-
-
-def _filter_search_results(
-    results: list[Any],
-    *,
-    store: Any,
-    registry_row: Callable[[str], dict[str, Any]],
-    tags: list[str] | None,
-    tag_match: str,
-    classification_notation: str | None,
-    classification_status: str | None,
-) -> tuple[list[Any], list[str]]:
-    """Apply exact metadata filters after ranked retrieval."""
-
-    tag_filter = [tag for tag in (tags or []) if isinstance(tag, str) and tag]
-    if tag_filter:
-        target = set(tag_filter)
-        match_all = tag_match != "any"
-        results = [
-            result
-            for result in results
-            if (
-                target.issubset(set(store.tags(result.page_id)))
-                if match_all
-                else bool(target & set(store.tags(result.page_id)))
-            )
-        ]
-
-    if classification_notation or classification_status:
-        filtered = []
-        for result in results:
-            row = registry_row(result.page_id)
-            classification = row.get("classification")
-            classification = classification if isinstance(classification, dict) else {}
-            primary = classification.get("primary")
-            primary = primary if isinstance(primary, dict) else {}
-            if (
-                classification_notation
-                and str(primary.get("notation") or "") != classification_notation
-            ):
-                continue
-            if (
-                classification_status
-                and str(row.get("classification_status") or "") != classification_status
-            ):
-                continue
-            filtered.append(result)
-        results = filtered
-    return results, tag_filter
-
-
-def _direct_search_hits(
-    results: list[Any],
-    *,
-    query: str,
-    store: Any,
-    registry_row: Callable[[str], dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Project ranked results into the stable MCP direct-hit shape."""
-
-    query_terms = query.lower().split()
-    direct_hits = []
-    for result in results:
-        meta = store.meta(result.page_id)
-        path = stable_indexed_document_path(
-            meta,
-            pages_dir=CHRONOVISOR_ROOT / "pages",
-            system_dir=CHRONOVISOR_ROOT / "system",
-        )
-        if path is None:
-            continue
-        try:
-            content = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        snippet = _extract_snippet(content, query_terms)
-        identity = registry_row(result.page_id)
-        classification = identity.get("classification")
-        direct_hits.append(
-            {
-                "page_id": result.page_id,
-                **({"uid": identity["uid"]} if identity.get("uid") else {}),
-                "title": result.title,
-                "updated": result.updated,
-                "score": round(result.score, 4),
-                "snippets": [snippet] if snippet else [],
-                "tags": store.tags(result.page_id),
-                **(
-                    {"classification": classification}
-                    if isinstance(classification, dict)
-                    else {}
-                ),
-            }
-        )
-    return direct_hits
-
-
-# Hubs of split pages link every child; unbounded one-hop expansion let a
-# single hub flood the response.
-_EXPANDED_PER_HIT = 3
-_EXPANDED_TOTAL = 20
-
-
-def _expanded_search_hits(
-    direct_hits: list[dict[str, Any]],
-    *,
-    depth: int,
-    store: Any,
-    registry_row: Callable[[str], dict[str, Any]],
-    tag_filter: list[str],
-    tag_match: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Expand direct hits through one-hop links while preserving filters."""
-
-    expanded_hits: list[dict[str, Any]] = []
-    edges: list[dict[str, Any]] = []
-    if depth <= 0 or not direct_hits:
-        return expanded_hits, edges
-    seen = {hit["page_id"] for hit in direct_hits}
-    target_tags = set(tag_filter)
-    for hit in direct_hits:
-        taken = 0
-        for link in store.outlinks(hit["page_id"]):
-            if taken >= _EXPANDED_PER_HIT or len(expanded_hits) >= _EXPANDED_TOTAL:
-                break
-            if link in seen:
-                continue
-            meta = store.meta(link)
-            if meta is None:
-                continue
-            if tag_filter:
-                link_tags = set(store.tags(link))
-                matches = (
-                    bool(target_tags & link_tags)
-                    if tag_match == "any"
-                    else target_tags.issubset(link_tags)
-                )
-                if not matches:
-                    continue
-            seen.add(link)
-            taken += 1
-            identity = registry_row(link)
-            expanded_hits.append(
-                {
-                    "page_id": link,
-                    **({"uid": identity["uid"]} if identity.get("uid") else {}),
-                    "title": meta["title"],
-                    "updated": meta["updated"],
-                    "distance": 1,
-                    "via": [hit["page_id"]],
-                    "score": round(hit["score"] * 0.5, 4),
-                    "reason": "linked from direct hit",
-                    "tags": store.tags(link),
-                }
-            )
-            edges.append(
-                {
-                    "from": hit["page_id"],
-                    "to": link,
-                    "from_uid": hit.get("uid"),
-                    "to_uid": identity.get("uid"),
-                    "type": "wikilink",
-                }
-            )
-    return expanded_hits, edges
-
-
-def _search_filters_applied(
-    *,
-    folder: str | None,
-    updated_after: str | None,
-    updated_before: str | None,
-    tag_filter: list[str],
-    tag_match: str,
-    classification_notation: str | None,
-    classification_status: str | None,
-) -> dict[str, Any]:
-    """Render only filters that materially constrained this search."""
-
-    filters: dict[str, Any] = {}
-    if folder:
-        filters["folder"] = folder
-    if updated_after:
-        filters["updated_after"] = updated_after
-    if updated_before:
-        filters["updated_before"] = updated_before
-    if tag_filter:
-        filters["tags"] = tag_filter
-        filters["tag_match"] = tag_match if tag_match in {"all", "any"} else "all"
-    if classification_notation:
-        filters["classification_notation"] = classification_notation
-    if classification_status:
-        filters["classification_status"] = classification_status
-    return filters
-
-
-def _retrieval_summary(trace: object, hits: list) -> object:
-    """Bound the retrieval trace in MCP output; the full trace is logged."""
-
-    if not isinstance(trace, dict):
-        return trace
-    shown = {str(hit.get("page_id")) for hit in hits if isinstance(hit, dict)}
-    summary = dict(trace)
-    channels = trace.get("channels")
-    if isinstance(channels, dict):
-        summary["channels"] = {
-            name: {"count": len(ids), "top": list(ids[:5])}
-            if isinstance(ids, list)
-            else ids
-            for name, ids in channels.items()
-        }
-    paths = trace.get("paths")
-    if isinstance(paths, dict):
-        summary["paths"] = {k: v for k, v in paths.items() if k in shown}
-        summary["path_count"] = len(paths)
-    return summary
-
-
-@mcp.tool()
 def chronovisor_search(
     query: str,
     depth: int = 1,
@@ -1171,11 +350,6 @@ def chronovisor_search(
     semantic: bool = True,
     tags: list[str] | None = None,
     tag_match: str = "all",
-    classification_notation: str | None = None,
-    classification_status: str | None = None,
-    session_id: str | None = None,
-    decision_id: str | None = None,
-    ctx: Context = None,
 ) -> str:
     """Search wiki pages with BM25 + semantic search and link expansion.
     Returns direct_hits (pages matching query) and expanded_hits (linked pages).
@@ -1186,19 +360,13 @@ def chronovisor_search(
         updated_after: Filter pages updated after this date (ISO format)
         updated_before: Filter pages updated before this date (ISO format)
         sort_by: Sort order - "relevance" (default), "date", or "title"
-        semantic: Use semantic search when Ollama is available (default True)
+        semantic: Use the local semantic service (default True)
         tags: Filter results to pages whose frontmatter ``tags:`` field
             includes these values. Tags must be the full prefixed form
             (e.g. ``d/ai-industry``). Empty list / None disables the filter.
         tag_match: ``"all"`` (default) requires every tag in ``tags`` to be
             present; ``"any"`` matches if at least one tag overlaps. Ignored
             when ``tags`` is empty / None.
-        classification_notation: Optional exact UDC notation. While the
-            classification authority is inactive this filters shadow proposals
-            and the response explicitly reports that status.
-        classification_status: Optional exact classification disposition.
-        session_id: Optional session id for recall pull feedback.
-        decision_id: Optional automatic-Recall decision id for turn tracing.
     """
     from chronovisor.core.pipeline import apply_rerank_stage
     from chronovisor.core.reranker import rerank_results
@@ -1222,36 +390,11 @@ def chronovisor_search(
         semantic=semantic,
     )
     retrieval_trace = last_search_trace()
-    registry = PageRegistry(CHRONOVISOR_ROOT)
-    try:
-        registry_state = registry.load()
-    except PageRegistryError:
-        registry_state = PageRegistry.empty()
-    try:
-        from chronovisor.recall.classification import (
-            classification_authority_status,
-        )
-
-        classification_authority = classification_authority_status(CHRONOVISOR_ROOT)
-    except Exception:
-        classification_authority = {
-            "active": False,
-            "reason": "classification_authority_unavailable",
-        }
-
-    def registry_row(page_id: str) -> dict:
-        uid = registry_state.get("keys", {}).get(page_id.casefold())
-        row = registry_state.get("pages", {}).get(uid) if uid else None
-        return dict(row) if isinstance(row, dict) else {}
-
     results, tag_filter = _filter_search_results(
         results,
         store=store,
-        registry_row=registry_row,
         tags=tags,
         tag_match=tag_match,
-        classification_notation=classification_notation,
-        classification_status=classification_status,
     )
 
     rerank_stage = apply_rerank_stage(
@@ -1271,34 +414,12 @@ def chronovisor_search(
         results,
         query=query,
         store=store,
-        registry_row=registry_row,
     )
-
-    # Fail-closed semantic holds remain visible only through a separate,
-    # projection-only namespace. They never compete as normal wiki pages and
-    # can never be used as mutation authority.
-    provisional_hits: list[dict] = []
-    if (
-        sort_by == "relevance"
-        and not folder
-        and not updated_after
-        and not updated_before
-        and not tag_filter
-    ):
-        try:
-            from chronovisor.recall.provisional_recall import search_provisional
-
-            provisional_hits = search_provisional(
-                query, chronovisor_root=CHRONOVISOR_ROOT
-            )
-        except Exception:
-            provisional_hits = []
 
     expanded_hits, edges = _expanded_search_hits(
         direct_hits,
         depth=depth,
         store=store,
-        registry_row=registry_row,
         tag_filter=tag_filter,
         tag_match=tag_match,
     )
@@ -1308,46 +429,16 @@ def chronovisor_search(
         updated_before=updated_before,
         tag_filter=tag_filter,
         tag_match=tag_match,
-        classification_notation=classification_notation,
-        classification_status=classification_status,
     )
-    _record_search_pull(
-        ctx=ctx,
-        session_id=session_id,
-        decision_id=decision_id,
-        query=query,
-        direct_hits=direct_hits,
-        expanded_hits=expanded_hits,
-        provisional_hits=provisional_hits,
-        retrieval_trace=retrieval_trace,
-    )
-
     return json.dumps(
         {
             "query": query,
             "depth": depth,
             "search_mode": search_mode,
             "filters_applied": filters_applied,
-            "classification_authority": {
-                **classification_authority,
-                "mode": (
-                    "active" if classification_authority.get("active") else "shadow"
-                ),
-                "note": (
-                    "classification authority adopted"
-                    if classification_authority.get("active")
-                    else (
-                        "classification filters use non-authoritative shadow "
-                        "proposals until calibration and activation"
-                    )
-                ),
-            },
             "reranker": reranker_meta,
-            "retrieval": _retrieval_summary(
-                retrieval_trace, [*direct_hits, *expanded_hits]
-            ),
+            "retrieval": retrieval_trace,
             "direct_hits": direct_hits,
-            "provisional_hits": provisional_hits,
             "expanded_hits": expanded_hits,
             "edges": edges,
         },
@@ -1356,671 +447,67 @@ def chronovisor_search(
 
 
 @mcp.tool()
-def chronovisor_recall_used(
-    decision_id: str,
-    page_ids: list[str],
-    session_id: str | None = None,
-    note: str = "",
-) -> str:
-    """Record exposure telemetry for recalled pages that affected the answer.
-
-    Used receipts are append-only exposure telemetry, never positive learning
-    evidence. Search results and page reads remain exploration telemetry. The
-    decision and session are validated synchronously so a successful response
-    is guaranteed to be joinable by downstream diagnostics. The legacy
-    ``learning_join`` response label is retained for clients; ``telemetry_join``
-    is the authoritative status and neither grants promotion authority.
-    """
-
-    decision_id = decision_id.strip()
-    if not decision_id:
-        return json.dumps({"status": "error", "error": "decision_id is required"})
-    pages = list(
-        dict.fromkeys(
-            page.strip() for page in page_ids if isinstance(page, str) and page.strip()
-        )
-    )[:20]
-    if not pages:
-        return json.dumps({"status": "error", "error": "page_ids is required"})
-    validation = _validate_used_recall_decision(
-        decision_id,
-        str(session_id or "").strip(),
-    )
-    if validation.get("status") != "ok":
-        return json.dumps(
-            {
-                "status": "error",
-                "error": str(validation.get("error") or "invalid recall decision"),
-                "decision_id": decision_id,
-            },
-            ensure_ascii=False,
-        )
-    canonical_session = str(validation.get("session_id") or "")
-    observable_pages = {
-        value
-        for value in validation.get("observable_page_ids", [])
-        if isinstance(value, str) and value
-    }
-    unobserved_pages = [page for page in pages if page not in observable_pages]
-    if unobserved_pages:
-        return json.dumps(
-            {
-                "status": "error",
-                "error": "used pages were not returned, injected, or read",
-                "decision_id": decision_id,
-                "page_ids": unobserved_pages,
-            },
-            ensure_ascii=False,
-        )
-    existing = _existing_used_receipt(decision_id, canonical_session)
-    existing_page_list = [
-        value
-        for value in (existing or {}).get("page_ids", [])
-        if isinstance(value, str) and value
-    ]
-    existing_pages = set(existing_page_list)
-    new_pages = [page for page in pages if page not in existing_pages]
-    if existing is not None and not new_pages:
-        return json.dumps(
-            {
-                "status": "already_recorded",
-                "event_id": str(existing.get("event_id") or ""),
-                "decision_id": decision_id,
-                "page_ids": existing.get("page_ids") or [],
-                "learning_join": "ready",
-                "telemetry_join": "ready",
-            },
-            ensure_ascii=False,
-        )
-    event_identity = json.dumps(
-        [decision_id, canonical_session, sorted(new_pages)],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    event_id = hashlib.sha256(event_identity.encode()).hexdigest()[:32]
-    from chronovisor.core.recall_log_schema import recall_identity_from_record
-
-    identity_value = validation.get("identity")
-    derived_identity = recall_identity_from_record(
-        identity_value if isinstance(identity_value, dict) else {}
-    )
-    recorded = _append_pull_log(
-        {
-            "type": "used",
-            "stage": "used",
-            "event_id": event_id,
-            "session_id": canonical_session,
-            "decision_id": decision_id,
-            "page_ids": new_pages,
-            "note": note[:500],
-            **derived_identity,
-        }
-    )
-    if recorded is not True:
-        return json.dumps(
-            {
-                "status": "error",
-                "error": "used receipt was not durably recorded",
-                "decision_id": decision_id,
-            },
-            ensure_ascii=False,
-        )
+def chronovisor_init() -> str:
+    """Return user-profile, lessons-learned, page count and queued capture jobs."""
+    store = get_store()
+    store.refresh()
+    jobs = snapshot()
     return json.dumps(
         {
-            "status": "recorded",
-            "event_id": event_id,
-            "decision_id": decision_id,
-            "page_ids": [*existing_page_list, *new_pages],
-            "new_page_ids": new_pages,
-            "learning_join": "ready",
-            # ``learning_join`` is a legacy response label; used receipts are
-            # telemetry only and never grant promotion authority.
-            "telemetry_join": "ready",
-            "processor_shadow_covered_page_ids": sorted(
-                set(pages) & set(validation.get("processor_shadow_page_ids") or [])
-            ),
+            "status": {
+                "page_count": store.page_count(include_system=False),
+                "queued_capture_jobs": jobs["by_status"].get("queued", 0),
+            },
+            "system_pages": {
+                page: json.loads(chronovisor_read(page))
+                for page in ("user-profile", "lessons-learned")
+            },
         },
         ensure_ascii=False,
     )
 
 
 @mcp.tool()
-def chronovisor_reindex() -> str:
-    """Rebuild search embeddings for all wiki pages.
-
-    Call this after bulk changes or to initialize semantic search.
-    """
-    from chronovisor.core.runtime_config import load_search_embedding_config
-    from chronovisor.core.search import update_embeddings
-
-    config = load_search_embedding_config()
-    count = update_embeddings()
-    if config.enabled:
-        return json.dumps(
-            {
-                "status": "queued",
-                "execution_mode": "service",
-                "message": "immutable semantic generation rebuild queued",
-            }
-        )
-    if count == 0:
-        return json.dumps(
-            {
-                "status": "skipped",
-                "message": "semantic indexing is disabled or no pages were updated",
-            }
-        )
-    return json.dumps({"status": "ok", "pages_updated": count})
-
-
-def _extract_snippet(content: str, terms: list[str], max_len: int = 150) -> str | None:
-    """Extract a relevant snippet from content."""
-    _meta, body = _frontmatter_parse(content)
-    body = body.strip()
-
-    body_lower = body.lower()
-    for term in terms:
-        idx = body_lower.find(term)
-        if idx != -1:
-            start = max(0, idx - 50)
-            end = min(len(body), idx + max_len)
-            snippet = body[start:end].strip()
-            if start > 0:
-                snippet = "..." + snippet
-            if end < len(body):
-                snippet = snippet + "..."
-            return snippet
-    return None
-
-
-@mcp.tool()
-def chronovisor_ingest(content: str, force: bool = True) -> str:
-    """Persist raw content and trigger ingest.
-
-    The previous implementation called ``start_ingest`` directly, bypassing
-    the orchestrator lock and never persisting the content. We now write
-    to ``raw/`` first (so a partial failure can still be retried) and then
-    invoke the orchestrator.
-
-    Args:
-        content: Raw session data to structure into wiki pages.
-        force: If True (default, matching the historical contract of
-            "ingest now"), trigger ingest even if pending count is below
-            ``INGEST_THRESHOLD``. Pass ``force=False`` to defer to the
-            normal threshold check.
-    """
-    return json.dumps(
-        _mcp_project_response(ingest_raw(content, force=force), metadata_only=True),
-        ensure_ascii=False,
+def chronovisor_status() -> str:
+    """Return page count, index freshness, service status and capture jobs."""
+    from chronovisor.core import reranker_client, semantic_client
+    from chronovisor.core.runtime_config import (
+        load_reranker_config,
+        load_search_embedding_config,
     )
 
-
-@mcp.tool()
-def chronovisor_check() -> str:
-    """Run lint checks on the wiki. Returns list of detected issues.
-
-    Issues include: broken links, stale pages, orphan pages, duplicates.
-    Does NOT auto-fix anything.
-    """
-    from chronovisor.ingest.lint import check, issue_lane, summarize_issues
-
-    issues = check()
-    issue_limit = 40
-
-    def compact(issue: dict) -> dict:
-        detail = str(issue.get("detail") or "")
-        if len(detail) > 180:
-            detail = detail[:177].rstrip() + "..."
-        return {
-            "type": issue.get("type"),
-            "severity": issue.get("severity"),
-            "lane": issue_lane(issue),
-            "page": issue.get("page"),
-            "detail": detail,
-            "auto_fixable": bool(issue.get("auto_fixable")),
-        }
-
-    return json.dumps(
-        {
-            "total_issues": len(issues),
-            "summary": summarize_issues(issues),
-            "issues": [compact(issue) for issue in issues[:issue_limit]],
-            "omitted_issues": max(0, len(issues) - issue_limit),
-            "output_budget": {"issue_limit": issue_limit, "detail_chars": 180},
-        },
-        ensure_ascii=False,
-    )
-
-
-@mcp.tool()
-def chronovisor_apply(dry_run: bool = False, fuzzy: bool = True) -> str:
-    """Apply safe auto-fixes to the wiki.
-
-    broken_link は fuzzy match で近い page_id に置換し、見つからなければ
-    plaintext 化する。system/ 配下に実在する target は false positive と見なして
-    書き換えない。Contradictions / orphans / stale などは flag のまま残す。
-    Run chronovisor_check first to see what will be fixed.
-
-    Args:
-        dry_run: True なら実際には書き込まず actions のプレビューだけ返す。
-        fuzzy: False にすると broken_link の自動書き換えを無効化する (より保守的)。
-    """
-    from chronovisor.ingest.lint import (
-        apply_safe_fixes,
-        check,
-        issue_lane,
-        summarize_issues,
-        write_repair_queue,
-    )
-
-    issues = check()
-    snapshot = {"status": "skipped", "reason": "dry_run"} if dry_run else None
-    if snapshot is None:
+    store = get_store()
+    store.refresh()
+    services = {}
+    for name, probe, config in (
+        ("semantic", semantic_client.health, load_search_embedding_config()),
+        ("reranker", reranker_client.health, load_reranker_config()),
+    ):
         try:
-            from chronovisor.ingest.snapshot import snapshot_chronovisor
-
-            snapshot = snapshot_chronovisor("before chronovisor_apply")
+            services[name] = probe(config)
         except Exception as exc:
-            snapshot = {"status": "error", "error": str(exc)}
-    actions = apply_safe_fixes(issues, dry_run=dry_run, fuzzy=fuzzy)
-    remaining = [i for i in issues if not i.get("auto_fixable")]
-    try:
-        repair_queue = str(write_repair_queue(remaining))
-    except Exception:
-        repair_queue = None
-    issue_limit = 40
-
-    def compact(issue: dict) -> dict:
-        detail = str(issue.get("detail") or "")
-        if len(detail) > 180:
-            detail = detail[:177].rstrip() + "..."
-        return {
-            "type": issue.get("type"),
-            "severity": issue.get("severity"),
-            "lane": issue_lane(issue),
-            "page": issue.get("page"),
-            "detail": detail,
-            "auto_fixable": bool(issue.get("auto_fixable")),
+            services[name] = {"status": "unavailable", "error": type(exc).__name__}
+    indexes = {}
+    for name in ("pages.json", "lexical.sqlite"):
+        path = CHRONOVISOR_ROOT / ".index" / name
+        indexes[name] = {
+            "exists": path.is_file(),
+            "mtime": path.stat().st_mtime if path.is_file() else None,
         }
-
     return json.dumps(
         {
-            "actions_taken": actions,
-            "snapshot": snapshot,
-            "summary": summarize_issues(remaining),
-            "remaining_issues": [compact(issue) for issue in remaining[:issue_limit]],
-            "omitted_remaining_issues": max(0, len(remaining) - issue_limit),
-            "output_budget": {"issue_limit": issue_limit, "detail_chars": 180},
-            "repair_queue": repair_queue,
-            "dry_run": dry_run,
-            "fuzzy": fuzzy,
+            "page_count": store.page_count(include_system=False),
+            "indexes": indexes,
+            "services": services,
+            "capture_jobs": snapshot(),
         },
         ensure_ascii=False,
     )
 
 
-@mcp.tool()
-def chronovisor_jobs(job_id: str | None = None) -> str:
-    """Check job progress.
-
-    Args:
-        job_id: Specific job ID to check. If None, returns recent jobs.
-    """
-    from chronovisor.core.jobs import job_store
-
-    if job_id:
-        job = job_store.get(job_id)
-        if not job:
-            from chronovisor.core.background_jobs import get_job
-
-            durable = get_job(job_id)
-            if durable is None:
-                return json.dumps({"error": f"Job '{job_id}' not found"})
-            return json.dumps(
-                {
-                    "job_id": durable.get("job_id"),
-                    "status": durable.get("status"),
-                    "processor": durable.get("name"),
-                    "stage": "durable-worker",
-                    "created_at": durable.get("created_at"),
-                    "updated_at": durable.get("updated_at"),
-                    "attempts": durable.get("attempts"),
-                    "output_tail": durable.get("output_tail"),
-                    "error": (
-                        durable.get("output_tail")
-                        if durable.get("status") in {"failed", "quarantined"}
-                        else None
-                    ),
-                },
-                ensure_ascii=False,
-            )
-        return json.dumps(
-            {
-                "job_id": job.job_id,
-                "status": job.status.value,
-                "processor": job.processor,
-                "stage": job.stage,
-                "total_ops": job.total_ops,
-                "completed_ops": job.completed_ops,
-                "created_at": job.created_at,
-                "completed_at": job.completed_at,
-                "pages_created": job.pages_created,
-                "pages_updated": job.pages_updated,
-                "result": job.result,
-                "error": job.error,
-            },
-            ensure_ascii=False,
-        )
-
-    jobs = job_store.recent()
-    return json.dumps(
-        {
-            "jobs": [
-                {
-                    "job_id": j.job_id,
-                    "status": j.status.value,
-                    "processor": j.processor,
-                    "created_at": j.created_at,
-                }
-                for j in jobs
-            ]
-        },
-        ensure_ascii=False,
-    )
-
-
-@mcp.tool()
-def chronovisor_deep_dive(
-    query: str,
-    max_iterations: int = 3,
-    fanout: int = 5,
-    semantic: bool = True,
-    use_llm: bool = True,
-    background: bool = True,
-    engine: str = "v2",
-) -> str:
-    """Run agentic search -> read -> wikilink -> requery retrieval.
-
-    Args:
-        query: Initial research query.
-        max_iterations: Search/read/requery loops to run, capped at 5.
-        fanout: Direct and linked pages to inspect per loop, capped at 10.
-        semantic: Use hybrid semantic search for each loop.
-        use_llm: Ask the local heavy model to propose follow-up queries.
-            When unavailable, the tool falls back to deterministic requery.
-        background: When True, return a job_id immediately and inspect with
-            chronovisor_jobs(job_id). When False, run synchronously and return result.
-        engine: Keep v2 (default), use v1 for compatibility, or evidence for
-            Campaign Y projection-first retrieval.
-    """
-    from chronovisor.research.deep_retrieval import (
-        run_deep_dive,
-        run_deep_dive_v2,
-        start_deep_dive,
-    )
-
-    if engine not in {"v1", "v2", "evidence"}:
-        raise ValueError("engine must be v1, v2, or evidence")
-    if background:
-        job_id = start_deep_dive(
-            query,
-            max_iterations=max_iterations,
-            fanout=fanout,
-            semantic=semantic,
-            use_llm=use_llm,
-            engine=engine,
-        )
-        return json.dumps(
-            {
-                "status": "started",
-                "job_id": job_id,
-                "processor": "deep-retrieval",
-                "query": query,
-            },
-            ensure_ascii=False,
-        )
-
-    runner = run_deep_dive_v2 if engine == "v2" else run_deep_dive
-    if engine == "evidence":
-        runner = run_deep_dive_v2
-    result = runner(
-        query,
-        max_iterations=max_iterations,
-        fanout=fanout,
-        semantic=semantic,
-        use_llm=use_llm,
-        **({"engine": engine} if runner is run_deep_dive_v2 else {}),
-    )
-    return json.dumps(result, ensure_ascii=False)
-
-
-@mcp.tool()
-def chronovisor_research(
-    query: str,
-    claims: list[str] | None = None,
-    challenge: bool = True,
-    background: bool = True,
-) -> str:
-    """Run bounded source-backed research with citations and local challenge.
-
-    The authority ladder is Wiki -> verified claims -> Raw -> Web. Web is
-    unavailable unless its independent kill switches are enabled. This tool is
-    asynchronous by default so the host prompt path never waits on a 35B model.
-
-    Args:
-        query: Research goal.
-        claims: Optional concrete claims to classify and verify.
-        challenge: Ask the configured local challenger and conditional tie-breaker.
-        background: Return a durable job immediately when True.
-    """
-    from chronovisor.research.research_service import (
-        enqueue_evidence_research,
-        run_evidence_research,
-    )
-
-    if background:
-        job = enqueue_evidence_research(query, claims=claims, challenge=challenge)
-        return json.dumps(
-            {
-                "status": "started"
-                if job.get("status") in {"queued", "running"}
-                else job.get("status"),
-                "job_id": job.get("job_id"),
-                "processor": "research",
-                "query": query,
-                "coalesced": job.get("coalesced", False),
-            },
-            ensure_ascii=False,
-        )
-    return json.dumps(
-        run_evidence_research(query, claims=claims, challenge=challenge),
-        ensure_ascii=False,
-    )
-
-
-@mcp.tool()
-def chronovisor_provenance(
-    page: str,
-    include_raw_content: bool = False,
-) -> str:
-    """Trace the provenance of a wiki page back to raw session data.
-
-    Args:
-        page: Page ID to trace
-        include_raw_content: Request redacted raw previews and activity
-            messages when the local ``[mcp]`` exposure opt-in is enabled.
-    """
-    page_path = _find_page_with_alias(page)
-    if not page_path:
-        return json.dumps({"error": "page not found"})
-
-    allow_raw_content = _mcp_raw_content_allowed(include_raw_content)
-    canonical_page_id = page_path.stem
-
-    page_mtime = datetime.fromtimestamp(page_path.stat().st_mtime)
-
-    # Read target page metadata once (was reread inside loop and again at return)
-    page_content = page_path.read_text()
-    page_fm = _parse_frontmatter(page_content)
-    page_title = page_fm.get("title")
-    page_title_lower = (
-        page_title.lower()
-        if isinstance(page_title, str)
-        else canonical_page_id.lower()
-    )
-    page_dehyphen = canonical_page_id.replace("-", " ")
-    page_updated = page_fm.get("updated", "unknown")
-    threshold = page_mtime + timedelta(minutes=30)
-
-    # Find raw files that might be the source.
-    # raw files are walked in mtime-descending order; once a file exceeds the
-    # threshold, every subsequent file also exceeds it, so we can break.
-    from chronovisor.core.raw_store import RawStore
-
-    raw_candidates = []
-    raw_store = RawStore(RAW_DIR)
-    candidates = []
-    for unit in raw_store.iter_units():
-        raw_mtime = (
-            datetime.fromisoformat(unit.captured_at).replace(tzinfo=None)
-            if unit.captured_at
-            else datetime.fromtimestamp(unit.path.stat().st_mtime)
-        )
-        candidates.append((raw_mtime, unit))
-    for raw_mtime, unit in sorted(candidates, key=lambda row: row[0], reverse=True):
-        if raw_mtime > threshold:
-            break
-        try:
-            raw_content = raw_store.read_text(unit)[:500]
-        except (OSError, UnicodeError):
-            continue
-        raw_lower = raw_content.lower()
-        if page_dehyphen in raw_lower or page_title_lower in raw_lower:
-            raw_candidates.append(
-                {
-                    "raw_file": unit.raw_id,
-                    "created": raw_mtime.isoformat(),
-                    "preview": raw_content[:200].strip(),
-                }
-            )
-
-    # Check log for ingest records
-    log_entries = []
-    for row in activity_log.iter_activity(ACTIVITY_FILE):
-        message = row["message"]
-        if canonical_page_id in message and "ingest" in message:
-            log_entries.append(message)
-
-    return json.dumps(
-        _mcp_project_response(
-            {
-                "page_id": canonical_page_id,
-                "page_updated": page_updated,
-                "page_mtime": page_mtime.isoformat(),
-                "raw_sources": raw_candidates[:5],
-                "log_entries": log_entries,
-            },
-            allow_raw_content=allow_raw_content,
-        ),
-        ensure_ascii=False,
-        default=str,
-    )
-
-
-@mcp.tool()
-def chronovisor_record(
-    content: str,
-    session_id: str | None = None,
-    keywords: list[str] | None = None,
-    trigger_ingest: bool = True,
-    idempotency_key: str | None = None,
-    ctx: Context = None,
-) -> str:
-    """Save raw session data to raw/ for later ingest.
-
-    This is the entry point for hooks to dump session logs.
-
-    Args:
-        content: Raw session content to save
-        session_id: Optional session identifier. Auto-generated if not provided.
-        keywords: Optional list of keywords carried into the ingest context.
-            Items are written to the raw frontmatter as ``raw_keywords: [...]``.
-            Keywords containing characters that would break inline-list
-            serialization (``,[]:#{}\\n\\r`` or control chars) or that are
-            empty/whitespace-only are rejected and kept out of the metadata
-            response.
-        trigger_ingest: When True, preserve the historical behavior of
-            running pending ingest immediately if the raw threshold is met.
-            Set False for hooks that must not block on local LLM ingestion.
-        idempotency_key: Optional stable transaction identity. Repeated calls
-            with the same key reuse the first atomically published raw.
-    """
-    result = record_raw(
-        content,
-        session_id=session_id,
-        keywords=keywords,
-        trigger_ingest=trigger_ingest,
-        idempotency_key=idempotency_key,
-    )
-    accepted = result.pop("accepted_keywords")
-
-    if ctx is not None:
-        try:
-            from chronovisor.recall.recall_field import record_mcp_content_activity
-
-            result["field_activity"] = record_mcp_content_activity(
-                host=_mcp_client_host(ctx),
-                session_id=session_id or "",
-                content="\n".join([*accepted, content]),
-            )
-        except Exception:
-            result["field_activity"] = {"status": "error"}
-
-    return json.dumps(
-        _mcp_project_response(result, metadata_only=True), ensure_ascii=False
-    )
-
-
-@mcp.tool()
-def chronovisor_tick() -> str:
-    """Run orchestration tick. Checks and triggers ingest/lint if needed.
-
-    Call this periodically or at session boundaries.
-    """
-    from chronovisor.ingest.orchestrator import tick
-
-    result = tick()
-    return json.dumps(result, ensure_ascii=False, default=str)
-
-
-def main():
-    """Run the ``chronovisor-mcp`` command-line entry point."""
-    with okf_runtime_operation(CHRONOVISOR_ROOT):
-        return _main_locked()
-
-
-def _main_locked():
-    init_chronovisor()
-    # job_store is in-memory: any current_job_id persisted from a previous
-    # process is, by definition, stale. Clear it so a crash mid-ingest
-    # doesn't permanently lock out run_pending_ingest.
-    try:
-        from chronovisor.ingest.orchestrator import reset_stale_lock
-
-        reset_stale_lock()
-    except Exception:
-        pass
-    # Warm both the page index and the BM25 cache on startup so the first
-    # tool call doesn't pay the full-scan cost. Failures are non-fatal —
-    # lazy refresh inside each tool will catch up on the next call.
+def main() -> None:
     with contextlib.suppress(Exception):
         get_store().refresh()
-    try:
-        from chronovisor.core.search import get_bm25
-
-        get_bm25().build()
-    except Exception:
-        pass
     mcp.run(transport="stdio")
 
 

@@ -1,144 +1,91 @@
+"""Keep historical archive readers after removing archive migration writers."""
+
 from __future__ import annotations
 
-import os
-from datetime import datetime
+import hashlib
+import io
+import json
+import tarfile
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import pytest
+import zstandard
 
 from chronovisor.core.legacy_archive import (
     iter_legacy_members,
-    migrate_processed_legacy,
     read_legacy_member,
     verify_legacy_manifest,
 )
 from chronovisor.core.raw_segment import RawSegmentCorrupt
 from chronovisor.core.raw_store import RawStore
-from chronovisor.raw.raw_archive import archive_status
 
 
-def _legacy_files(raw_dir: Path) -> tuple[Path, Path]:
-    raw_dir.mkdir(parents=True)
-    first = raw_dir / "save-old-one.md"
-    second = raw_dir / "save-old-日本語-two.md"
-    first.write_bytes(b"first byte-exact raw\n")
-    second.write_bytes("second 日本語 raw\n".encode())
-    old = datetime(2026, 7, 16, 12, tzinfo=ZoneInfo("Asia/Tokyo")).timestamp()
-    os.utime(first, (old, old))
-    os.utime(second, (old, old))
-    return first, second
-
-
-def test_legacy_shadow_archive_round_trips_and_flat_file_keeps_precedence(
-    tmp_path: Path,
-) -> None:
-    raw_dir = tmp_path / "raw"
-    first, second = _legacy_files(raw_dir)
-    original = {first.name: first.read_bytes(), second.name: second.read_bytes()}
-    processed = set(original)
-
-    preview = migrate_processed_legacy(
-        raw_dir,
-        processed_raw_ids=processed,
-        before="2026/07/18",
-        dry_run=True,
-        max_archive_bytes=1024,
+def archive_fixture(raw_dir: Path) -> tuple[Path, Path, dict[str, bytes]]:
+    values = {
+        "save-old-one.md": b"first byte-exact raw\n",
+        "save-old-日本語-two.md": "second 日本語 raw\n".encode(),
+    }
+    folder = raw_dir / "2026" / "07" / "16"
+    folder.mkdir(parents=True)
+    tar = io.BytesIO()
+    with tarfile.open(fileobj=tar, mode="w") as handle:
+        for name, content in values.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            handle.addfile(info, io.BytesIO(content))
+    compressed = zstandard.ZstdCompressor().compress(tar.getvalue())
+    archive = folder / "legacy-part-000001.tar.zst"
+    archive.write_bytes(compressed)
+    manifest = folder / "legacy-part-000001.manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema": "chronovisor.raw-legacy-archive.v1",
+                "archive": archive.name,
+                "captured_date": "2026/07/16",
+                "logical_bytes": sum(map(len, values.values())),
+                "compressed_bytes": len(compressed),
+                "compressed_sha256": hashlib.sha256(compressed).hexdigest(),
+                "members": [
+                    {
+                        "raw_id": name,
+                        "bytes": len(content),
+                        "sha256": hashlib.sha256(content).hexdigest(),
+                    }
+                    for name, content in values.items()
+                ],
+            }
+        )
     )
-    assert preview["members"] == 2
-    assert list(raw_dir.rglob("*.tar.zst")) == []
+    return archive, manifest, values
 
-    result = migrate_processed_legacy(
-        raw_dir,
-        processed_raw_ids=processed,
-        before="2026/07/18",
-        dry_run=False,
-        max_archive_bytes=1024,
-    )
-    assert result["members"] == 2
-    manifest = next(raw_dir.rglob("legacy-part-*.manifest.json"))
+
+def test_legacy_archive_byte_exact_reads_without_flat_sources(tmp_path):
+    _, manifest, values = archive_fixture(tmp_path)
     assert verify_legacy_manifest(manifest, full=True)["logical_bytes"] == sum(
-        map(len, original.values())
+        map(len, values.values())
     )
-    members = {member.raw_id: member for member in iter_legacy_members(raw_dir)}
     assert {
-        raw_id: read_legacy_member(member) for raw_id, member in members.items()
-    } == original
-    assert (
-        RawStore(raw_dir, mode="legacy").read_bytes(first.name) == original[first.name]
-    )
-    status = archive_status(raw_dir)
-    assert status["logical_bytes"] == sum(map(len, original.values()))
-    assert status["stored_bytes"] > status["logical_bytes"]
+        member.raw_id: read_legacy_member(member)
+        for member in iter_legacy_members(tmp_path)
+    } == values
+    store = RawStore(tmp_path)
+    for name, value in values.items():
+        assert store.read_bytes(name) == value
+        assert store.resolve(name).storage == "legacy_archive"
 
 
-def test_verified_shadow_can_remove_flat_sources_on_later_run(tmp_path: Path) -> None:
-    raw_dir = tmp_path / "raw"
-    first, second = _legacy_files(raw_dir)
-    processed = {first.name, second.name}
-    migrate_processed_legacy(
-        raw_dir,
-        processed_raw_ids=processed,
-        before="2026/07/18",
-        dry_run=False,
-    )
-
-    relocation_commits: list[Path] = []
-    result = migrate_processed_legacy(
-        raw_dir,
-        processed_raw_ids=processed,
-        before="2026/07/18",
-        dry_run=False,
-        remove_source=True,
-        before_source_delete=lambda path, _manifest: relocation_commits.append(path),
-    )
-
-    assert result["members"] == 2
-    assert not first.exists() and not second.exists()
-    store = RawStore(raw_dir)
-    assert store.read_bytes(first.name) == b"first byte-exact raw\n"
-    unit = store.resolve(first.name)
-    assert unit is not None
-    reference = store.materialize_ingest(unit, tmp_path / "runtime" / "parents")
-    assert store.resolve_reference(reference) == unit
-    assert len(relocation_commits) == 1
+def test_flat_file_keeps_precedence_over_legacy_archive(tmp_path):
+    _, _, values = archive_fixture(tmp_path)
+    name = next(iter(values))
+    (tmp_path / name).write_bytes(b"new flat bytes")
+    assert RawStore(tmp_path, mode="legacy").read_bytes(name) == b"new flat bytes"
 
 
-def test_legacy_archive_corruption_fails_closed(tmp_path: Path) -> None:
-    raw_dir = tmp_path / "raw"
-    first, _second = _legacy_files(raw_dir)
-    migrate_processed_legacy(
-        raw_dir,
-        processed_raw_ids={first.name},
-        before="2026/07/18",
-        dry_run=False,
-    )
-    archive = next(raw_dir.rglob("*.tar.zst"))
+def test_legacy_archive_corruption_fails_closed(tmp_path):
+    archive, manifest, _ = archive_fixture(tmp_path)
     damaged = bytearray(archive.read_bytes())
     damaged[len(damaged) // 2] ^= 1
     archive.write_bytes(damaged)
-
     with pytest.raises(RawSegmentCorrupt, match="digest"):
-        verify_legacy_manifest(next(raw_dir.rglob("*.manifest.json")), full=True)
-
-
-def test_legacy_migration_leaves_oversized_member_unmodified(tmp_path: Path) -> None:
-    raw_dir = tmp_path / "raw"
-    raw_dir.mkdir()
-    source = raw_dir / "save-too-large.md"
-    source.write_bytes(b"0123456789")
-    old = datetime(2026, 7, 16, 12, tzinfo=ZoneInfo("Asia/Tokyo")).timestamp()
-    os.utime(source, (old, old))
-
-    result = migrate_processed_legacy(
-        raw_dir,
-        processed_raw_ids={source.name},
-        before="2026/07/18",
-        dry_run=False,
-        max_archive_bytes=5,
-    )
-
-    assert result["members"] == 0
-    assert result["skipped"]["oversized"] == 1
-    assert source.read_bytes() == b"0123456789"
-    assert not list(raw_dir.rglob("*.tar.zst"))
+        verify_legacy_manifest(manifest, full=True)

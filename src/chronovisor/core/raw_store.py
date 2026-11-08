@@ -107,7 +107,7 @@ def raw_layout_mode(
         config_path = chronovisor_root.expanduser() / "config.toml"
         try:
             payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, tomllib.TOMLDecodeError):
+        except OSError, tomllib.TOMLDecodeError:
             payload = {}
         raw_config = payload.get("raw") if isinstance(payload, dict) else None
         if isinstance(raw_config, dict):
@@ -294,8 +294,11 @@ class RawStore:
         if not stat.S_ISREG(identity.st_mode):
             raise RawSegmentCorrupt("Raw segment index is not a regular file")
         return (
-            identity.st_dev, identity.st_ino, identity.st_size,
-            identity.st_mtime_ns, identity.st_ctime_ns,
+            identity.st_dev,
+            identity.st_ino,
+            identity.st_size,
+            identity.st_mtime_ns,
+            identity.st_ctime_ns,
         )
 
     def _read_segment_index(
@@ -323,10 +326,10 @@ class RawStore:
 
         base = self.raw_dir.parts
         parts = path.parts
-        if parts[:len(base)] != base:
+        if parts[: len(base)] != base:
             raise RawSegmentCorrupt("Raw segment index is outside Raw root")
         current = str(self.raw_dir)
-        for part in parts[len(base):]:
+        for part in parts[len(base) :]:
             current = os.path.join(current, part)
             if os.path.islink(current):
                 raise RawSegmentCorrupt("Raw segment index path is a symlink")
@@ -334,12 +337,8 @@ class RawStore:
     def _segment_snapshot_signature(self) -> SegmentSnapshotSignature:
         """Identify the two durable indexes that define segment membership."""
 
-        journal_pattern = (
-            "[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]/*.commits.jsonl"
-        )
-        manifest_pattern = (
-            "[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]/*.manifest.json"
-        )
+        journal_pattern = "[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]/*.commits.jsonl"
+        manifest_pattern = "[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]/*.manifest.json"
         paths = [*self.raw_dir.glob(journal_pattern)]
         paths.extend(
             path
@@ -422,7 +421,11 @@ class RawStore:
             with self._segment_snapshots_lock:
                 cached = self._segment_snapshots.get(self.raw_dir)
                 if cached is None or cached[0] != signature or cached[2] is None:
-                    self._segment_snapshots[self.raw_dir] = (signature, units, watermark)
+                    self._segment_snapshots[self.raw_dir] = (
+                        signature,
+                        units,
+                        watermark,
+                    )
                     self._segment_snapshots.move_to_end(self.raw_dir)
                     while len(self._segment_snapshots) > _SEGMENT_SNAPSHOT_CACHE_SIZE:
                         self._segment_snapshots.popitem(last=False)
@@ -459,7 +462,10 @@ class RawStore:
                                 None,
                             )
                             self._segment_snapshots.move_to_end(self.raw_dir)
-                            while len(self._segment_snapshots) > _SEGMENT_SNAPSHOT_CACHE_SIZE:
+                            while (
+                                len(self._segment_snapshots)
+                                > _SEGMENT_SNAPSHOT_CACHE_SIZE
+                            ):
                                 self._segment_snapshots.popitem(last=False)
                 self._segment_units_cache = units
         yield from self._segment_units_cache
@@ -478,9 +484,7 @@ class RawStore:
         for (storage, path), units in sorted(
             groups.items(), key=lambda item: (str(item[0][1]), item[0][0])
         ):
-            reader = (
-                read_open_range if storage == "segment_open" else read_sealed_range
-            )
+            reader = read_open_range if storage == "segment_open" else read_sealed_range
             if requested is None or storage == "segment_sealed":
                 logical_end = max(unit.offset + unit.length for unit in units)
                 segment = reader(path, 0, logical_end)
@@ -568,7 +572,9 @@ class RawStore:
             relative = unit.path.relative_to(self.raw_dir)
         except ValueError as exc:
             raise RawSegmentCorrupt("legacy Raw path is outside Raw root") from exc
-        if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        if not relative.parts or any(
+            part in {"", ".", ".."} for part in relative.parts
+        ):
             raise RawSegmentCorrupt("legacy Raw relative path is invalid")
         nofollow = getattr(os, "O_NOFOLLOW", None)
         directory = getattr(os, "O_DIRECTORY", None)
@@ -709,7 +715,7 @@ class RawStore:
             commit.validate()
             text = value.decode("utf-8")
             document = parse_document(value)
-        except (UnicodeDecodeError, CanonicalDocumentError, RawSegmentCorrupt):
+        except UnicodeDecodeError, CanonicalDocumentError, RawSegmentCorrupt:
             return False
         try:
             manifest_stat = manifest_path.lstat()
@@ -742,7 +748,7 @@ class RawStore:
                     manifest = verify_legacy_manifest(manifest_path, full=False)
                     manifest_after = manifest_path.lstat()
                     archive_after = archive_path.lstat()
-                except (OSError, RawSegmentCorrupt):
+                except OSError, RawSegmentCorrupt:
                     return False
                 after_identity = (
                     manifest_after.st_dev,
@@ -797,49 +803,10 @@ class RawStore:
             payload["legacy_byte_passthrough"] = True
         return payload
 
-    def materialize_ingest(self, unit: RawUnit, output_dir: Path) -> Path:
-        """Publish a small, deterministic logical-reference file for queues.
-
-        The file is intentionally not a copy of transcript bytes.  Existing
-        Path-oriented completion/defer ledgers can bind to it while the
-        semantic adapter resolves and verifies the authoritative segment.
-        """
-
-        if unit.storage == "legacy_file":
-            return unit.path
-        output_dir.mkdir(parents=True, exist_ok=True)
-        path = output_dir / unit.raw_id
-        payload = self.reference_payload(unit)
-        encoded = (
-            json.dumps(
-                payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-            )
-            + "\n"
-        ).encode("utf-8")
-        if path.exists():
-            if path.is_symlink():
-                raise RawSegmentCorrupt(
-                    f"logical Raw reference conflicts with segment: {unit.raw_id}"
-                )
-            if path.read_bytes() == encoded:
-                return path
-            existing = self.resolve_reference(path)
-            if existing is None or self.reference_payload(
-                existing
-            ) != self.reference_payload(unit):
-                raise RawSegmentCorrupt(
-                    f"logical Raw reference conflicts with segment: {unit.raw_id}"
-                )
-            return path
-        from chronovisor.core.link_fix import atomic_write
-
-        atomic_write(path, encoded.decode("utf-8"))
-        return path
-
     def resolve_reference(self, path: Path) -> RawUnit | None:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
+        except OSError, UnicodeError, json.JSONDecodeError:
             return None
         if not isinstance(payload, dict) or not schema_matches(
             payload.get("schema"), RAW_REFERENCE_SCHEMA
@@ -861,7 +828,12 @@ class RawStore:
                 ) from exc
             prefix = f"{commit.host}-{commit.session_key}"
             base = f"{prefix}-part-{commit.part:03d}"
-            day_dir = self.raw_dir / day.strftime("%Y") / day.strftime("%m") / day.strftime("%d")
+            day_dir = (
+                self.raw_dir
+                / day.strftime("%Y")
+                / day.strftime("%m")
+                / day.strftime("%d")
+            )
             sealed_path = day_dir / f"{base}.jsonl.zst"
             sealed_manifest = day_dir / f"{base}.manifest.json"
             open_path = day_dir / f"{base}.jsonl.open"
@@ -873,7 +845,11 @@ class RawStore:
                 and not sealed_manifest.is_symlink()
             ):
                 observed = next(
-                    (item for item in manifest_commits(sealed_manifest) if item.raw_id == raw_id),
+                    (
+                        item
+                        for item in manifest_commits(sealed_manifest)
+                        if item.raw_id == raw_id
+                    ),
                     None,
                 )
                 unit = RawUnit(
@@ -893,7 +869,11 @@ class RawStore:
                 and not open_journal.is_symlink()
             ):
                 observed = next(
-                    (item for item in read_commits(open_journal) if item.raw_id == raw_id),
+                    (
+                        item
+                        for item in read_commits(open_journal)
+                        if item.raw_id == raw_id
+                    ),
                     None,
                 )
                 unit = RawUnit(
@@ -910,7 +890,9 @@ class RawStore:
                 unit = None
                 observed = None
             if observed != commit:
-                raise RawSegmentCorrupt("logical Raw reference does not match its segment")
+                raise RawSegmentCorrupt(
+                    "logical Raw reference does not match its segment"
+                )
         else:
             # Legacy archive references historically carried only the logical
             # ID, byte length, and digest.  Resolving them through ``resolve``

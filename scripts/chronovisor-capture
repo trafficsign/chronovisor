@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+CHRONOVISOR_WRAPPER_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
+"$CHRONOVISOR_WRAPPER_DIR/chronovisor-background-jobs" retry --limit 8
+"$CHRONOVISOR_WRAPPER_DIR/chronovisor-session-sweeper" --limit 8

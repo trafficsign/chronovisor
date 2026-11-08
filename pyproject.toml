@@ -4,27 +4,13 @@ version = "0.2.0"
 description = "Chronovisor - provenance-first agentic memory for local AI systems"
 requires-python = ">=3.14,<3.15"
 dependencies = [
-    "certifi>=2026.10.19",
-    "cryptography>=50.0.0",
-    "httpx>=0.27.0",
-    "idna>=3.15",
-    "keyring>=25.6.0",
     "mcp>=1.30.0,<2",
     "numpy>=2.0.0",
-    "pydantic-settings>=2.14.2",
-    "pyjwt>=2.13.0",
-    "python-multipart>=0.0.31",
     "pyyaml>=6.0.3",
-    "starlette>=1.3.1",
     "zstandard>=0.23.0",
 ]
 
 [project.optional-dependencies]
-reranker = [
-    "setuptools>=83.0.0",
-    "torch>=2.2.0",
-    "transformers>=4.40.0",
-]
 semantic = [
     "setuptools>=83.0.0",
     "torch==2.13.0",
@@ -34,72 +20,22 @@ semantic = [
     "mlx==0.32.2; sys_platform == 'darwin'",
     "mlx-lm==0.31.3; sys_platform == 'darwin'",
 ]
-recall-lab = [
-    "colbert-ai==0.2.22",
-    "faiss-cpu>=1.14.0",
-    "gitpython>=3.1.58",
-    "coremltools==9.0; sys_platform == 'darwin'",
-]
-
 [project.scripts]
-chronovisor = "chronovisor.hosts.cli:main"
 chronovisor-mcp = "chronovisor.hosts.server:main"
 chronovisor-hook = "chronovisor.hosts.hook_dispatcher:main"
 chronovisor-codex-record = "chronovisor.hosts.codex_record:main"
 chronovisor-claude-code-record = "chronovisor.hosts.claude_code_record:main"
-chronovisor-ingest-drain = "chronovisor.ingest.ingest_drain:main"
-chronovisor-dashboard = "chronovisor.ops.dashboard:main"
-chronovisor-self-heal = "chronovisor.ops.self_heal:main"
-chronovisor-recall = "chronovisor.recall.recall_runtime:main"
-chronovisor-recall-audit = "chronovisor.recall.recall_auditor:main"
-chronovisor-recall-auto-apply = "chronovisor.recall.recall_auto_apply:main"
-chronovisor-recall-eval = "chronovisor.recall.recall_eval:main"
-chronovisor-recall-answer-eval = "chronovisor.recall.recall_answer_eval:main"
-chronovisor-recall-calibrate = "chronovisor.recall.recall_calibration:main"
-chronovisor-recall-improve = "chronovisor.recall.recall_improvement:main"
-chronovisor-content-correction = "chronovisor.recall.content_correction:main"
-chronovisor-content-correction-eval = "chronovisor.recall.content_correction_eval:main"
-chronovisor-eval = "chronovisor.search.search_eval:main"
-chronovisor-duplicate-review = "chronovisor.recall.duplicate_review:main"
-chronovisor-entities = "chronovisor.ops.entities:main"
-chronovisor-snapshot = "chronovisor.ops.snapshot:main"
-chronovisor-raw-replay = "chronovisor.raw.raw_replay:main"
-chronovisor-memory-integrity = "chronovisor.ops.memory_integrity:main"
-chronovisor-cofire = "chronovisor.search.cofire:main"
-chronovisor-prefetch = "chronovisor.search.prefetch:main"
-chronovisor-sleep = "chronovisor.ops.sleep_cycle:main"
-chronovisor-claims = "chronovisor.recall.claims:main"
-chronovisor-golden-expand = "chronovisor.ops.golden_expand:main"
-chronovisor-retention = "chronovisor.ops.retention:main"
-chronovisor-reflect = "chronovisor.ops.reflection:main"
-chronovisor-hubs = "chronovisor.ops.hubs:main"
-chronovisor-autonomy = "chronovisor.ops.autonomy:main"
-chronovisor-converge = "chronovisor.ops.converge_worker:main"
 chronovisor-session-sweeper = "chronovisor.ops.session_sweeper:main"
 chronovisor-background-jobs = "chronovisor.ops.background_jobs:main"
-chronovisor-lab = "chronovisor.lab.cli:main"
-chronovisor-page-normalize = "chronovisor.ops.page_normalize:main"
-chronovisor-metadata-backfill = "chronovisor.ops.metadata_backfill:main"
-chronovisor-distill = "chronovisor.ops.distill:main"
-chronovisor-oracle = "chronovisor.research.oracle:main"
-chronovisor-burn-monitor = "chronovisor.ops.burn_monitor:main"
-chronovisor-repair-runbook = "chronovisor.ops.repair_runbook:main"
-chronovisor-research-verify = "chronovisor.research.research_verification:main"
-chronovisor-research = "chronovisor.research.research_service:main"
 chronovisor-semantic-service = "chronovisor.search.semantic_service:main"
 chronovisor-reranker-service = "chronovisor.search.reranker_service:main"
-chronovisor-librarian = "chronovisor.librarian.librarian:main"
-chronovisor-librarian-merge = "chronovisor.librarian.librarian_merge:main"
-chronovisor-librarian-release = "chronovisor.librarian.librarian_release:main"
-chronovisor-link-anchor-repair = "chronovisor.librarian.link_anchor_repair:main"
-chronovisor-librarian-rollout = "chronovisor.librarian.librarian_rollout:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.hatch.build.targets.wheel.force-include]
-"tests/fixtures/research_holdout.jsonl" = "chronovisor/fixtures/research_holdout.jsonl"
+[tool.hatch.build.targets.wheel]
+packages = ["src/chronovisor"]
 
 [dependency-groups]
 dev = [
@@ -130,7 +66,7 @@ ignore = ["UP042", "SIM105", "SIM115", "SIM117"]
 "src/chronovisor/core/store.py" = ["UP037"]
 
 [tool.mypy]
-files = ["src/chronovisor/core", "src/chronovisor/knowledge_graph"]
+files = ["src/chronovisor/core"]
 strict = true
 show_error_codes = true
 warn_unused_configs = true
@@ -141,15 +77,7 @@ type = "forbidden"
 source_modules = ["chronovisor.core"]
 forbidden_modules = [
     "chronovisor.raw",
-    "chronovisor.ingest",
-    "chronovisor.knowledge_graph",
-    "chronovisor.recall",
     "chronovisor.search",
-    "chronovisor.classification",
-    "chronovisor.librarian",
-    "chronovisor.decision",
-    "chronovisor.research",
     "chronovisor.ops",
     "chronovisor.hosts",
-    "chronovisor.lab",
 ]

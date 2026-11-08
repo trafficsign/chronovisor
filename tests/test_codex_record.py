@@ -13,21 +13,10 @@ from types import SimpleNamespace
 import pytest
 
 from chronovisor.core import codex_transcript
-from chronovisor.core.save_transaction import make_save_transaction
 from chronovisor.core.store import RuntimeContext, init_chronovisor
 from chronovisor.core.transcript import CodexSaveError
 from chronovisor.hosts import codex_record
-from chronovisor.ingest.raw_semantic_projection import project_parent_raw
 from chronovisor.raw import codex_capture_delta, record_transaction
-
-
-@pytest.fixture(autouse=True)
-def _valid_okf_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    root = tmp_path / "wiki"
-    root.mkdir()
-    for name in ("index.md", "log.md", "schema.md"):
-        (root / name).write_text("legacy\n", encoding="utf-8")
-    monkeypatch.setattr(codex_record, "CHRONOVISOR_ROOT", root)
 
 
 def test_transcript_api_is_reexported_from_raw_modules() -> None:
@@ -72,14 +61,20 @@ def sample_session(path: Path) -> None:
                             "type": "input_text",
                             "text": "# AGENTS.md instructions for /tmp/project\nignore me",
                         },
-                        {"type": "input_text", "text": "<environment_context>\nignore me"},
+                        {
+                            "type": "input_text",
+                            "text": "<environment_context>\nignore me",
+                        },
                     ],
                 },
             },
             {
                 "timestamp": "2026-05-25T00:00:02Z",
                 "type": "response_item",
-                "payload": {"type": "function_call_output", "output": "large command output"},
+                "payload": {
+                    "type": "function_call_output",
+                    "output": "large command output",
+                },
             },
             {
                 "timestamp": "2026-05-25T00:00:03Z",
@@ -87,7 +82,12 @@ def sample_session(path: Path) -> None:
                 "payload": {
                     "type": "message",
                     "role": "user",
-                    "content": [{"type": "input_text", "text": "Codex 側の保存ハーネスを実装したい"}],
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Codex 側の保存ハーネスを実装したい",
+                        }
+                    ],
                 },
             },
             {
@@ -97,14 +97,18 @@ def sample_session(path: Path) -> None:
                     "type": "message",
                     "role": "assistant",
                     "phase": "final",
-                    "content": [{"type": "output_text", "text": "gpt-5.4-mini で要約します"}],
+                    "content": [
+                        {"type": "output_text", "text": "gpt-5.4-mini で要約します"}
+                    ],
                 },
             },
         ],
     )
 
 
-def args_for(session_file: Path, state_file: Path, *, ignore_state: bool = False) -> SimpleNamespace:
+def args_for(
+    session_file: Path, state_file: Path, *, ignore_state: bool = False
+) -> SimpleNamespace:
     return SimpleNamespace(
         session_id=None,
         cwd=None,
@@ -161,104 +165,6 @@ def test_extract_preserves_every_event_but_semantic_view_filters_transport(
     assert result.records[2].event_type == "function_call_output"
 
 
-def test_projection_omits_privileged_reasoning_and_tools_from_complete_raw(
-    tmp_path: Path,
-) -> None:
-    session = tmp_path / "complete-session.jsonl"
-    rows = [
-        {"type": "session_meta", "payload": {"id": "complete", "cwd": "/tmp/project"}},
-        {"type": "turn_context", "payload": {"private": "transport context"}},
-        {
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "role": "developer",
-                "content": [{"type": "input_text", "text": "privileged developer prompt"}],
-            },
-        },
-        {
-            "type": "response_item",
-            "payload": {
-                "type": "reasoning",
-                "summary": [{"type": "summary_text", "text": "private reasoning"}],
-                "encrypted_content": "opaque reasoning bytes",
-            },
-        },
-        {
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "role": "user",
-                "content": [{
-                    "type": "input_text",
-                    "text": "# AGENTS.md instructions\ninjected bytes",
-                }],
-            },
-        },
-        {
-            "type": "response_item",
-            "payload": {
-                "type": "function_call_output",
-                "call_id": "tool-1",
-                "output": "private tool output",
-            },
-        },
-        {
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": "visible user body"}],
-            },
-        },
-        {
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "visible assistant body"}],
-            },
-        },
-    ]
-    write_jsonl(session, rows)
-
-    extracted = codex_record.extract_transcript_slice(session)
-    serialized = codex_record.serialize_transcript_records(extracted.records)
-    serialized_events = [row["event"] for row in json.loads(serialized)]
-    assert [_canonical_json_bytes(event) for event in serialized_events] == [
-        _canonical_json_bytes(event) for event in rows
-    ]
-
-    transaction = make_save_transaction(
-        host="codex",
-        session_file=session,
-        session_id=extracted.session_id,
-        after_line=0,
-        until_line=extracted.scanned_until_line,
-    )
-    raw_path = tmp_path / f"save-{transaction.idempotency_key}.md"
-    raw_path.write_text(codex_record.build_raw_content(extracted, transaction=transaction))
-    projection = project_parent_raw(
-        raw_path, output_dir=tmp_path / "projection", max_child_bytes=4_000
-    )
-    projected = "\n".join(path.read_text() for path in projection.child_paths)
-
-    assert projection.record_count == len(rows)
-    assert projection.selected_record_count == 2
-    assert "visible user body" in projected
-    assert "visible assistant body" in projected
-    for transport_only in (
-        "transport context",
-        "privileged developer prompt",
-        "private reasoning",
-        "opaque reasoning bytes",
-        "injected bytes",
-        "private tool output",
-    ):
-        assert transport_only in serialized
-        assert transport_only not in projected
-
-
 def test_extract_preserves_image_file_and_tool_payloads(tmp_path: Path) -> None:
     session = tmp_path / "structured.jsonl"
     write_jsonl(
@@ -274,8 +180,15 @@ def test_extract_preserves_image_file_and_tool_payloads(tmp_path: Path) -> None:
                     "type": "message",
                     "role": "user",
                     "content": [
-                        {"type": "input_image", "image_url": "data:image/png;base64,AA=="},
-                        {"type": "input_file", "filename": "notes.pdf", "file_data": "AQ=="},
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,AA==",
+                        },
+                        {
+                            "type": "input_file",
+                            "filename": "notes.pdf",
+                            "file_data": "AQ==",
+                        },
                     ],
                 },
             },
@@ -309,146 +222,20 @@ def test_extract_transcript_slice_honors_after_line(tmp_path: Path) -> None:
 
     result = codex_record.extract_transcript_slice(session, after_line=4)
 
-    assert [(record.role, record.line) for record in result.records] == [("assistant", 5)]
+    assert [(record.role, record.line) for record in result.records] == [
+        ("assistant", 5)
+    ]
 
 
-def test_parse_writer_output_sanitizes_keywords() -> None:
-    output = json.dumps(
-        {
-            "should_save": True,
-            "content": "Body",
-            "keywords": ["Codex", "Codex", "bad,keyword", 123, "Chronovisor"],
-            "reason": "durable",
-            "evidence_quotes": ["Codex 側の保存ハーネスを実装したい"],
-        }
-    )
-
-    result = codex_record.parse_writer_output(output)
-
-    assert result.should_save is True
-    assert result.keywords == ["Codex", "Chronovisor"]
-    assert result.rejected_keywords == ["bad,keyword", "123"]
-    assert result.evidence_quotes == ["Codex 側の保存ハーネスを実装したい"]
-
-
-def test_parse_writer_output_requires_evidence_quotes_for_save() -> None:
-    output = json.dumps(
-        {
-            "should_save": True,
-            "content": "Body",
-            "keywords": ["Codex"],
-            "reason": "durable",
-            "evidence_quotes": [],
-        }
-    )
-
-    with pytest.raises(codex_record.CodexSaveError, match="must provide user evidence_quotes"):
-        codex_record.parse_writer_output(output)
-
-
-def test_writer_prompt_forbids_assistant_model_name_substitution(tmp_path: Path) -> None:
-    session = tmp_path / "session.jsonl"
-    sample_session(session)
-
-    prompt = codex_record.build_writer_prompt(
-        codex_record.extract_transcript_slice(session),
-        max_chars=codex_record.DEFAULT_MAX_CHARS,
-    )
-
-    assert "evidence_quotes" in codex_record.MEMORY_WRITER_SCHEMA["required"]
-    assert "exact substrings from USER messages only" in prompt
-    assert "do not replace Q-KUN with Qwen" in prompt
-    assert "appears only in ASSISTANT text, omit it" in prompt
-
-
-def test_user_evidence_validation_rejects_assistant_only_quote(tmp_path: Path) -> None:
-    session = tmp_path / "session.jsonl"
-    sample_session(session)
-    transcript_slice = codex_record.extract_transcript_slice(session)
-    valid = codex_record.WriterResult(
-        should_save=True,
-        content="Body",
-        keywords=["Codex"],
-        reason="durable",
-        rejected_keywords=[],
-        evidence_quotes=["Codex 側の保存ハーネスを実装したい"],
-    )
-    invalid = codex_record.WriterResult(
-        should_save=True,
-        content="Body",
-        keywords=["Codex"],
-        reason="durable",
-        rejected_keywords=[],
-        evidence_quotes=["gpt-5.4-mini で要約します"],
-    )
-
-    codex_record.validate_user_evidence_quotes(valid, transcript_slice)
-    with pytest.raises(codex_record.CodexSaveError, match="not found verbatim in USER"):
-        codex_record.validate_user_evidence_quotes(invalid, transcript_slice)
-
-
-def test_user_evidence_validation_rejects_normalized_model_and_capacity(
-    tmp_path: Path,
+def test_save_mode_updates_state_and_prevents_duplicate_save(
+    tmp_path: Path, monkeypatch
 ) -> None:
-    transcript_slice = codex_record.TranscriptSlice(
-        session_file=tmp_path / "session.jsonl",
-        scanned_until_line=2,
-        records=[
-            codex_record.TranscriptRecord(1, "user", "Q-KUNの32GPレビューを見た"),
-            codex_record.TranscriptRecord(2, "assistant", "Qwenの32GBレビューですね"),
-        ],
-    )
-    invalid = codex_record.WriterResult(
-        should_save=True,
-        content="ユーザーはQwenの32GBレビューを見た。",
-        keywords=["Qwen", "32GB"],
-        reason="durable",
-        rejected_keywords=[],
-        evidence_quotes=["Q-KUNの32GPレビューを見た"],
-    )
-    valid = codex_record.WriterResult(
-        should_save=True,
-        content="ユーザーはQ-KUNの32GPレビューを見た。",
-        keywords=["Q-KUN", "32GP"],
-        reason="durable",
-        rejected_keywords=[],
-        evidence_quotes=["Q-KUNの32GPレビューを見た"],
-    )
-    invalid_keyword = codex_record.WriterResult(
-        should_save=True,
-        content="ユーザーはQ-KUNの32GPレビューを見た。",
-        keywords=["Qwen"],
-        reason="durable",
-        rejected_keywords=[],
-        evidence_quotes=["Q-KUNの32GPレビューを見た"],
-    )
-
-    with pytest.raises(codex_record.CodexSaveError, match="ungrounded protected literal"):
-        codex_record.validate_user_evidence_quotes(invalid, transcript_slice)
-    with pytest.raises(codex_record.CodexSaveError, match="keywords"):
-        codex_record.validate_user_evidence_quotes(invalid_keyword, transcript_slice)
-    codex_record.validate_user_evidence_quotes(valid, transcript_slice)
-
-
-def test_run_memory_writer_is_retired_without_a_subprocess_surface() -> None:
-    assert not hasattr(codex_record, "subprocess")
-
-    with pytest.raises(codex_record.CodexSaveError, match="deterministic-lossless"):
-        codex_record.run_memory_writer("prompt")
-
-
-def test_save_mode_updates_state_and_prevents_duplicate_save(tmp_path: Path, monkeypatch) -> None:
     session = tmp_path / "session.jsonl"
     state = tmp_path / "state.json"
     sample_session(session)
     calls: list[dict] = []
 
     monkeypatch.setattr(record_transaction, "init_chronovisor", lambda: None)
-    monkeypatch.setattr(
-        codex_record,
-        "run_memory_writer",
-        lambda *args, **kwargs: pytest.fail("normal capture must not start a writer"),
-    )
 
     def fake_save_raw(
         content: str,
@@ -603,11 +390,14 @@ def test_runtime_context_keeps_v2_stop_capture_under_supplied_root(
         Path(save_result["path"]).is_relative_to(runtime.raw_dir)
         for save_result in save_results
     )
-    assert json.loads(runtime.codex_state_file.read_text())["files"][str(session)][
-        "last_saved_line"
-    ] == 5
-    assert runtime.pages_dir.is_dir()
-    assert runtime.system_dir.is_dir()
+    assert (
+        json.loads(runtime.codex_state_file.read_text())["files"][str(session)][
+            "last_saved_line"
+        ]
+        == 5
+    )
+    assert not runtime.pages_dir.exists()
+    assert not runtime.system_dir.exists()
     assert not forbidden_default.exists()
 
 
@@ -616,9 +406,7 @@ def test_explicit_default_state_file_remains_an_override(tmp_path: Path) -> None
     runtime = RuntimeContext(tmp_path / "runtime-context")
 
     assert parser.parse_args([]).state_file is None
-    explicit = parser.parse_args(
-        ["--state-file", str(codex_record.DEFAULT_STATE_FILE)]
-    )
+    explicit = parser.parse_args(["--state-file", str(codex_record.DEFAULT_STATE_FILE)])
     assert codex_record._resolve_state_file(explicit, context=runtime) == (
         codex_record.DEFAULT_STATE_FILE
     )
@@ -705,8 +493,9 @@ def test_one_stop_drains_every_bounded_transcript_chunk(
     monkeypatch.setattr(
         record_transaction,
         "save_raw",
-        lambda content, **_kwargs: calls.append(content)
-        or {"saved": f"raw-{len(calls)}.md"},
+        lambda content, **_kwargs: (
+            calls.append(content) or {"saved": f"raw-{len(calls)}.md"}
+        ),
     )
     monkeypatch.setattr(
         record_transaction, "validate_published_save_receipt", lambda **_kwargs: None
@@ -757,8 +546,10 @@ def test_oversized_first_record_is_reassemblable_and_commits_after_all_fragments
     monkeypatch.setattr(
         codex_record,
         "save_raw",
-        lambda content, **kwargs: calls.append({"content": content, **kwargs})
-        or {"saved": f"raw-{len(calls)}.md"},
+        lambda content, **kwargs: (
+            calls.append({"content": content, **kwargs})
+            or {"saved": f"raw-{len(calls)}.md"}
+        ),
     )
     monkeypatch.setattr(
         codex_record, "validate_published_save_receipt", lambda **_kwargs: None
@@ -824,36 +615,6 @@ def test_oversized_fragment_failure_never_advances_cursor(
     assert not state.exists()
 
 
-@pytest.mark.parametrize("mode", ["off", "invalid-mode"])
-def test_raw_capture_policy_fail_closed_without_cursor_or_model(
-    tmp_path: Path, monkeypatch, mode: str
-) -> None:
-    session = tmp_path / "session.jsonl"
-    state = tmp_path / "state.json"
-    sample_session(session)
-    state.write_text('{"version": 1, "files": {}}\n')
-    original_state = state.read_bytes()
-    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RAW_CAPTURE", mode)
-    monkeypatch.setattr(
-        record_transaction, "init_chronovisor", lambda: pytest.fail("policy gate must precede init")
-    )
-    monkeypatch.setattr(
-        record_transaction, "save_raw", lambda *_args, **_kwargs: pytest.fail("must not publish")
-    )
-    monkeypatch.setattr(
-        codex_record,
-        "run_memory_writer",
-        lambda *_args, **_kwargs: pytest.fail("must not start a model"),
-    )
-
-    result = codex_record.run(args_for(session, state))
-
-    assert result["status"] == "deferred"
-    assert result["model_calls"] == 0
-    assert result["decision_policy"]["mode"] == "off"
-    assert state.read_bytes() == original_state
-
-
 def test_retry_recovers_raw_published_before_state_commit(
     tmp_path: Path,
     monkeypatch,
@@ -861,7 +622,7 @@ def test_retry_recovers_raw_published_before_state_commit(
     session = tmp_path / "session.jsonl"
     state = tmp_path / "state.json"
     raw_dir = tmp_path / "wiki" / "raw"
-    raw_dir.mkdir()
+    raw_dir.mkdir(parents=True)
     sample_session(session)
     with session.open("a", encoding="utf-8") as handle:
         handle.write(
@@ -910,11 +671,6 @@ def test_retry_recovers_raw_published_before_state_commit(
             raise OSError("injected crash after raw publish")
         real_write_state(path, payload)
 
-    monkeypatch.setattr(
-        codex_record,
-        "run_memory_writer",
-        lambda *args, **kwargs: pytest.fail("recovery must not start a writer"),
-    )
     monkeypatch.setattr(record_transaction, "save_raw", durable_fake_save)
     monkeypatch.setattr(record_transaction, "write_state", fail_first_state_commit)
 
@@ -938,15 +694,10 @@ def test_corrupt_publisher_receipt_does_not_advance_cursor(
     session = tmp_path / "session.jsonl"
     state = tmp_path / "state.json"
     raw_dir = tmp_path / "wiki" / "raw"
-    raw_dir.mkdir()
+    raw_dir.mkdir(parents=True)
     sample_session(session)
     monkeypatch.setattr(record_transaction, "init_chronovisor", lambda: None)
     monkeypatch.setattr(record_transaction, "RAW_DIR", raw_dir)
-    monkeypatch.setattr(
-        codex_record,
-        "run_memory_writer",
-        lambda *args, **kwargs: pytest.fail("normal capture must not start a writer"),
-    )
 
     def corrupt_save(content: str, *, idempotency_key: str, **_kwargs):
         path = raw_dir / f"save-{idempotency_key}.md"
@@ -1016,16 +767,13 @@ def test_concurrent_stop_workers_publish_delta_exactly_once(
             duplicate_save_entered.set()
         return {"saved": "raw.md"}
 
-    monkeypatch.setattr(
-        codex_record,
-        "run_memory_writer",
-        lambda *args, **kwargs: pytest.fail("normal capture must not start a writer"),
-    )
     monkeypatch.setattr(record_transaction, "save_raw", fake_save)
     monkeypatch.setattr(
         record_transaction, "validate_published_save_receipt", lambda **_kwargs: None
     )
-    monkeypatch.setattr(codex_record, "save_transaction_lock", instrumented_transaction_lock)
+    monkeypatch.setattr(
+        codex_record, "save_transaction_lock", instrumented_transaction_lock
+    )
     second_started = threading.Event()
 
     def second_worker():
@@ -1058,11 +806,6 @@ def test_save_captures_user_and_assistant_text_without_writer(
     state = tmp_path / "state.json"
     sample_session(session)
     monkeypatch.setattr(record_transaction, "init_chronovisor", lambda: None)
-    monkeypatch.setattr(
-        codex_record,
-        "run_memory_writer",
-        lambda *args, **kwargs: pytest.fail("normal capture must not start a writer"),
-    )
     saved: list[str] = []
     monkeypatch.setattr(
         record_transaction,

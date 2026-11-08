@@ -73,7 +73,7 @@ def test_bundled_plist_rejects_wrong_label_and_relative_program(tmp_path: Path) 
 def test_retired_experiments_are_not_bundled() -> None:
     module = _module()
     assert set(module.RETIRED_SUFFIXES).isdisjoint(module.SERVICE_SUFFIXES)
-    assert "search-label-drain" in module.SERVICE_SUFFIXES
+    assert set(module.SERVICE_SUFFIXES) == {"semantic", "reranker"}
     assert set(module.RETIRED_SUFFIXES) == {
         "librarian-rollout",
         "library-evidence",
@@ -206,12 +206,16 @@ def test_refresh_registers_new_service_when_app_lacks_previous_plist(
         return "search-label-drain.plist", "search-label-drain.managed-v2"
 
     monkeypatch.setattr(module, "_managed_service", managed_service)
-    monkeypatch.setattr(module, "build_app", lambda *_args: events.append("build") or {})
+    monkeypatch.setattr(
+        module, "build_app", lambda *_args: events.append("build") or {}
+    )
     monkeypatch.setattr(
         module,
         "_manager",
-        lambda _app, command, *_args: events.append(command)
-        or SimpleNamespace(returncode=0, stdout="", stderr=""),
+        lambda _app, command, *_args: (
+            events.append(command)
+            or SimpleNamespace(returncode=0, stdout="", stderr="")
+        ),
     )
     monkeypatch.setattr(module, "_verify_managed_service", lambda *_args: None)
     monkeypatch.setattr(module, "_retire_legacy_service", lambda *_args: None)
@@ -277,7 +281,9 @@ def test_refresh_retires_standalone_legacy_service_after_managed_registration(
                 stderr="",
             )
         return SimpleNamespace(
-            returncode=0 if command[-1].rsplit("/", 1)[-1] in legacy_registered else 113,
+            returncode=0
+            if command[-1].rsplit("/", 1)[-1] in legacy_registered
+            else 113,
             stdout=(
                 "state = not running\n"
                 if command[-1].rsplit("/", 1)[-1] in legacy_registered

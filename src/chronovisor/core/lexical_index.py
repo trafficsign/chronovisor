@@ -162,12 +162,12 @@ class LexicalIndex:
 
     def close(self) -> None:
         """Checkpoint and close the disposable projection deterministically."""
-        from chronovisor.core.page_mutation import _reentrant_exclusive_lock
+        from chronovisor.core.durable_state import reentrant_exclusive_lock
 
         publication_lock = (
             nullcontext()
             if os.environ.get("CHRONOVISOR_READ_ONLY") == "1"
-            else _reentrant_exclusive_lock(self.path.parent / "writer.lock")
+            else reentrant_exclusive_lock(self.path.parent / "writer.lock")
         )
         with publication_lock, self._lock:
             if self._connection is None:
@@ -182,13 +182,25 @@ class LexicalIndex:
     @staticmethod
     def _initialize(connection: sqlite3.Connection) -> bool:
         current = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        objects = {str(row[0]) for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type IN ('table', 'index')"
-        )}
-        if current == SCHEMA_VERSION and {
-            "pages", "anchors", "terms", "postings", "projection_meta",
-            "anchors_page_idx", "postings_page_idx",
-        }.issubset(objects) and not objects.intersection({"documents", "term_stats"}):
+        objects = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'index')"
+            )
+        }
+        if (
+            current == SCHEMA_VERSION
+            and {
+                "pages",
+                "anchors",
+                "terms",
+                "postings",
+                "projection_meta",
+                "anchors_page_idx",
+                "postings_page_idx",
+            }.issubset(objects)
+            and not objects.intersection({"documents", "term_stats"})
+        ):
             return False
         legacy_projection = bool(
             connection.execute(
@@ -337,7 +349,7 @@ class LexicalIndex:
                 for page_id, entry in metadata._entries.items()
                 if entry.status == "stable"
             }
-        except (OSError, RuntimeError, ValueError):
+        except OSError, RuntimeError, ValueError:
             return False, None, None
         return True, generation, stable_entries
 
@@ -396,7 +408,7 @@ class LexicalIndex:
             return False, None
         try:
             generation = int(str(value))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return False, None
         return (True, generation) if generation > 0 else (False, None)
 
@@ -413,7 +425,15 @@ class LexicalIndex:
             except FileNotFoundError:
                 values.extend((-1,) * 5)
             else:
-                values.extend((stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+                values.extend(
+                    (
+                        stat.st_dev,
+                        stat.st_ino,
+                        stat.st_size,
+                        stat.st_mtime_ns,
+                        stat.st_ctime_ns,
+                    )
+                )
         return tuple(values)
 
     def _quick_check_key(self) -> tuple[dict[str, object], tuple[int, ...]] | None:
@@ -423,7 +443,9 @@ class LexicalIndex:
             for path in (self.path, Path(f"{self.path}-wal")):
                 try:
                     with path.open("rb") as stream:
-                        digests.append(hashlib.file_digest(stream, "sha256").hexdigest())
+                        digests.append(
+                            hashlib.file_digest(stream, "sha256").hexdigest()
+                        )
                 except FileNotFoundError:
                     digests.append(None)
             if signature != self._quick_check_signature() or digests[0] is None:
@@ -440,7 +462,7 @@ class LexicalIndex:
     def _quick_check_cached(self, key: dict[str, object]) -> bool:
         try:
             value = json.loads(self.path.with_suffix(".quick-check.json").read_bytes())
-        except (OSError, ValueError):
+        except OSError, ValueError:
             return False
         return bool(value == {"source": key, "quick_check": "ok"})
 
@@ -499,7 +521,10 @@ class LexicalIndex:
                 self._snapshot_generation = None
                 self._snapshot_signature = signature
                 return False
-            if expected_generation is not None and writer_generation != expected_generation:
+            if (
+                expected_generation is not None
+                and writer_generation != expected_generation
+            ):
                 self._snapshot_available = False
                 self._snapshot_error = "snapshot_generation_mismatch"
                 self._snapshot_generation = None
@@ -519,7 +544,10 @@ class LexicalIndex:
                     # Bind validation to one SQLite read snapshot. A writer
                     # racing the content digest invalidates cache reuse below.
                     connection.execute("BEGIN")
-                    if int(connection.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
+                    if (
+                        int(connection.execute("PRAGMA user_version").fetchone()[0])
+                        != SCHEMA_VERSION
+                    ):
                         raise sqlite3.DatabaseError("schema mismatch")
                     cached_check = bool(
                         checked_content is not None
@@ -548,9 +576,15 @@ class LexicalIndex:
                     )
                     if not projection_valid:
                         raise sqlite3.DatabaseError("projection generation missing")
-                    if writer_generation is not None and projection_generation != writer_generation:
+                    if (
+                        writer_generation is not None
+                        and projection_generation != writer_generation
+                    ):
                         raise sqlite3.DatabaseError("generation mismatch")
-                    if expected_generation is not None and projection_generation != expected_generation:
+                    if (
+                        expected_generation is not None
+                        and projection_generation != expected_generation
+                    ):
                         raise sqlite3.DatabaseError("generation mismatch")
                     page_rows = connection.execute(
                         "SELECT page_id, mtime_ns, size, content_sha256, page_uid, "
@@ -607,7 +641,7 @@ class LexicalIndex:
                     )
                     if cached_check and not stable_content:
                         self._run_quick_check(connection)
-            except (OSError, sqlite3.DatabaseError):
+            except OSError, sqlite3.DatabaseError:
                 self._snapshot_available = False
                 self._snapshot_error = "snapshot_missing_or_invalid"
                 self._snapshot_generation = None
@@ -637,14 +671,14 @@ class LexicalIndex:
             return self._snapshot_error
 
     def build(self, *, force: bool = False) -> None:
-        from chronovisor.core.page_mutation import _reentrant_exclusive_lock
+        from chronovisor.core.durable_state import reentrant_exclusive_lock
 
         # Metadata publication and every lexical writer share this lease.
         # Acquire it before in-process locks; nested writer refreshes reenter.
         publication_lock = (
             nullcontext()
             if os.environ.get("CHRONOVISOR_READ_ONLY") == "1"
-            else _reentrant_exclusive_lock(self.path.parent / "writer.lock")
+            else reentrant_exclusive_lock(self.path.parent / "writer.lock")
         )
         with publication_lock, self._lock:
             connection = self._open()
@@ -739,7 +773,7 @@ class LexicalIndex:
                         path=path.relative_to(namespace_root).as_posix(),
                         require_stable=True,
                     )
-                except (OSError, UnicodeDecodeError, CanonicalDocumentError):
+                except OSError, UnicodeDecodeError, CanonicalDocumentError:
                     ineligible_ids.append(page_id)
                     continue
                 frontmatter = document.metadata
@@ -800,9 +834,7 @@ class LexicalIndex:
                         ),
                         (
                             frontmatter.get("classification_status")
-                            if isinstance(
-                                frontmatter.get("classification_status"), str
-                            )
+                            if isinstance(frontmatter.get("classification_status"), str)
                             else "unclassified"
                         ),
                     )
@@ -986,7 +1018,10 @@ class LexicalIndex:
                 check_same_thread=False,
                 timeout=0.05,
             ) as connection:
-                if int(connection.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
+                if (
+                    int(connection.execute("PRAGMA user_version").fetchone()[0])
+                    != SCHEMA_VERSION
+                ):
                     return []
                 rows = self._query_connection(
                     connection,
@@ -994,7 +1029,7 @@ class LexicalIndex:
                     top_n=top_n,
                     include_reference=include_reference,
                 )
-        except (OSError, sqlite3.DatabaseError):
+        except OSError, sqlite3.DatabaseError:
             return []
         # A writer may publish a new metadata generation between the
         # validation above and this short-lived SQLite read.  Do not return
@@ -1016,9 +1051,7 @@ class LexicalIndex:
             return []
         terms = list(query_counts)
         placeholders = ",".join("?" for _ in terms)
-        reference_clause = (
-            "" if include_reference else "AND p.page_type != 'reference'"
-        )
+        reference_clause = "" if include_reference else "AND p.page_type != 'reference'"
         try:
             corpus = connection.execute(
                 "SELECT COUNT(*), COALESCE(AVG(doc_len), 1.0) FROM pages"
@@ -1136,7 +1169,10 @@ class LexicalIndex:
                 check_same_thread=False,
                 timeout=0.05,
             ) as connection:
-                if int(connection.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
+                if (
+                    int(connection.execute("PRAGMA user_version").fetchone()[0])
+                    != SCHEMA_VERSION
+                ):
                     return []
                 rows = connection.execute(
                     f"""
@@ -1152,7 +1188,7 @@ class LexicalIndex:
                     """,
                     (*terms, max(1, top_n)),
                 ).fetchall()
-        except (OSError, sqlite3.DatabaseError):
+        except OSError, sqlite3.DatabaseError:
             return []
         if self._snapshot_files_signature() != validated_signature:
             return []

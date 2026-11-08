@@ -44,14 +44,6 @@ def test_nemotron_provider_failure_does_not_fall_back_to_bm25(monkeypatch) -> No
         search.semantic_search("query")
 
 
-def test_nemotron_verify_failure_is_not_hidden(monkeypatch) -> None:
-    monkeypatch.setattr(search, "load_search_embedding_config", lambda: _config())
-    monkeypatch.setattr(semantic_client, "verify", lambda *args, **kwargs: 1 / 0)
-
-    with pytest.raises(ZeroDivisionError):
-        search.semantic_verify("query", ["p"])
-
-
 def test_nemotron_updates_are_durable_jobs(monkeypatch) -> None:
     monkeypatch.setattr(search, "load_search_embedding_config", lambda: _config())
     monkeypatch.setattr("chronovisor.core.store.find_page", lambda _page_id: None)
@@ -77,3 +69,24 @@ def test_disabled_semantic_search_is_the_explicit_bm25_only_mode(monkeypatch) ->
     )
     assert search.semantic_search("query") == []
     assert search.update_embeddings() == 0
+
+
+def test_search_preserves_semantic_failure_instead_of_silent_fallback(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(search, "load_search_embedding_config", lambda: _config())
+    monkeypatch.setattr(
+        search,
+        "get_bm25",
+        lambda: SimpleNamespace(build=lambda: None, query=lambda *a, **k: []),
+    )
+
+    def unavailable(*args, **kwargs):
+        raise semantic_client.SemanticServiceUnavailable("service down")
+
+    monkeypatch.setattr(search, "semantic_search", unavailable)
+    with pytest.raises(
+        semantic_client.SemanticServiceUnavailable, match="service down"
+    ):
+        search.search("query")
+    assert search.search("query", semantic=False) == ([], "bm25")

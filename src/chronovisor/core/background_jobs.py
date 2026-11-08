@@ -13,13 +13,12 @@ import sys
 import tempfile
 import uuid
 from datetime import UTC, datetime, timedelta
-from functools import partial
 from pathlib import Path
 from typing import Any
 
 from chronovisor.core.durable_state import exclusive_text_file_lock
 from chronovisor.core.llm_security import build_child_process_env
-from chronovisor.core.store import CHRONOVISOR_ROOT, okf_runtime_operation
+from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.core.timeutil import utc_now as _now
 
 SECRET_PATTERNS = [
@@ -43,6 +42,7 @@ def _redact_match(match: re.Match[str]) -> str:
         return f"{match.group(1)}[REDACTED]"
     return "[REDACTED]"
 
+
 JOB_DIR = CHRONOVISOR_ROOT / "runtime" / "background-jobs"
 STATE_FILE = JOB_DIR / "state.json"
 LOCK_FILE = JOB_DIR / "state.lock"
@@ -60,26 +60,38 @@ _SESSION_ID_KEYS = frozenset(
 _SESSION_PATH_KEYS = frozenset(
     {"session_file", "sessionFile", "transcript_path", "transcriptPath"}
 )
-_JOB_ENV_NAMES = frozenset(
+CAPTURE_MODULES = frozenset(
     {
-        "CHRONOVISOR_CONTENT_CORRECTION_ENABLED",
-        "CHRONOVISOR_RECALL_ANSWER_CAPTURE_ENABLED",
-        "CHRONOVISOR_RESEARCH_RUN_ID",
-        "CLAUDE_CODE_CHRONOVISOR_RECORD_ENABLED",
-        "CODEX_CHRONOVISOR_RECORD_ENABLED",
-        "HERMES_CHRONOVISOR_RECORD_ENABLED",
-        "OLLAMA_CALIBRATION_FILE",
-        "OLLAMA_HOST",
-        "OLLAMA_RESOURCE_LOCK",
-        "OLLAMA_URL",
+        "chronovisor.hosts.codex_record",
+        "chronovisor.hosts.claude_code_record",
+        "chronovisor.raw.codex_record",
+        "chronovisor.raw.claude_code_record",
     }
 )
+_JOB_ENV_NAMES = frozenset(
+    {
+        "CLAUDE_CODE_CHRONOVISOR_RECORD_ENABLED",
+        "CODEX_CHRONOVISOR_RECORD_ENABLED",
+    }
+)
+
+
+def _retire(job: dict[str, Any]) -> None:
+    job.update(
+        status="cancelled",
+        reason="retired_module",
+        next_retry_at=None,
+        updated_at=_iso(),
+        stdin="",
+        on_success=[],
+    )
+    job.pop("owner_pid", None)
 
 
 def _is_capture_job(name: str) -> bool:
     """Return whether a job captures a mutable host transcript by session."""
 
-    return name.endswith("-save") or name.endswith("-capture")
+    return name in {"codex-save", "claude-code-save"}
 
 
 def _fixed_job_env(env: Any) -> dict[str, str]:
@@ -94,13 +106,14 @@ def _iso(value: datetime | None = None) -> str:
     return (value or _now()).isoformat(timespec="seconds")
 
 
-_lock = partial(exclusive_text_file_lock, LOCK_FILE)
+def _lock() -> contextlib.AbstractContextManager[Any]:
+    return exclusive_text_file_lock(LOCK_FILE)
 
 
 def _load() -> dict[str, Any]:
     try:
         value = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         value = {}
     if not isinstance(value, dict) or not isinstance(value.get("jobs"), dict):
         return {"schema_version": 1, "jobs": {}}
@@ -125,7 +138,7 @@ def _save(state: dict[str, Any]) -> None:
 def _pid_alive(pid: Any) -> bool:
     try:
         os.kill(int(pid), 0)
-    except (TypeError, ValueError, ProcessLookupError):
+    except TypeError, ValueError, ProcessLookupError:
         return False
     except PermissionError:
         return True
@@ -143,7 +156,9 @@ def _prune_terminal(state: dict[str, Any]) -> int:
         if isinstance(job, dict) and str(job.get("status") or "") in TERMINAL_STATUSES
     ]
     terminal.sort(
-        key=lambda item: str(item[1].get("updated_at") or item[1].get("created_at") or ""),
+        key=lambda item: str(
+            item[1].get("updated_at") or item[1].get("created_at") or ""
+        ),
         reverse=True,
     )
     removed = 0
@@ -151,7 +166,9 @@ def _prune_terminal(state: dict[str, Any]) -> int:
         jobs.pop(job_id, None)
         removed += 1
     if removed:
-        state["pruned_terminal_total"] = int(state.get("pruned_terminal_total") or 0) + removed
+        state["pruned_terminal_total"] = (
+            int(state.get("pruned_terminal_total") or 0) + removed
+        )
     return removed
 
 
@@ -165,11 +182,18 @@ def repair_stale(*, quarantine_pending: bool = False) -> dict[str, Any]:
             if not isinstance(job, dict):
                 continue
             status = str(job.get("status") or "")
+            if job.get("module") not in CAPTURE_MODULES and status in {
+                "queued",
+                "retry_wait",
+            }:
+                _retire(job)
+                repaired += 1
+                continue
             abandoned = status == "running" and not _pid_alive(job.get("owner_pid"))
             pending_incident = quarantine_pending and status in {"queued", "retry_wait"}
             if not abandoned and not pending_incident:
                 continue
-            capture_job = _is_capture_job(str(job.get("name") or ""))
+            capture_job = job.get("module") in CAPTURE_MODULES
             if abandoned and capture_job and not quarantine_pending:
                 job["status"] = "queued"
                 job["attempts"] = 0
@@ -215,7 +239,7 @@ def _find_payload_string(value: Any, keys: frozenset[str]) -> str | None:
 def _capture_session_identity(stdin_text: str) -> str | None:
     try:
         payload = json.loads(stdin_text)
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError, TypeError:
         return None
     session_id = _find_payload_string(payload, _SESSION_ID_KEYS)
     if session_id:
@@ -252,7 +276,6 @@ def enqueue_job(
     args: list[str],
     env: dict[str, str],
     stdin_text: str,
-    on_success: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     session_identity = (
         _capture_session_identity(stdin_text) if _is_capture_job(name) else None
@@ -283,12 +306,13 @@ def enqueue_job(
         for existing in state["jobs"].values():
             if not isinstance(existing, dict):
                 continue
-            if existing.get("dedupe_key") != dedupe or existing.get("status") not in ACTIVE_STATUSES:
+            if (
+                existing.get("dedupe_key") != dedupe
+                or existing.get("status") not in ACTIVE_STATUSES
+            ):
                 continue
             existing["stdin"] = stdin_text
             existing["env"] = _fixed_job_env(env)
-            if on_success is not None:
-                existing["on_success"] = list(on_success)
             existing["updated_at"] = _iso()
             existing["coalesced_count"] = int(existing.get("coalesced_count") or 0) + 1
             if existing.get("status") == "running":
@@ -317,7 +341,6 @@ def enqueue_job(
             "next_retry_at": None,
             "exit_code": None,
             "output_tail": "",
-            "on_success": list(on_success or []),
         }
         state["jobs"][job_id] = job
         _prune_terminal(state)
@@ -325,119 +348,20 @@ def enqueue_job(
         return {**job, "enqueued": True, "coalesced": False}
 
 
-def start_self_heal_background(packet_path: Path) -> dict[str, Any] | None:
-    """Durably queue routine self-heal without detaching a Python worker."""
-
-    if os.environ.get("CHRONOVISOR_SELF_HEAL_AUTORUN", "1") in {
-        "0",
-        "false",
-        "False",
-    }:
-        return None
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        return None
-    resolved = packet_path.expanduser().resolve(strict=False)
-    return enqueue_job(
-        name="self-heal",
-        module="chronovisor.ops.self_heal",
-        args=["--packet", str(resolved)],
-        env={},
-        stdin_text="",
-    )
-
-
-def cancel_matching_jobs(
-    *,
-    name: str,
-    module: str,
-    args: list[str],
-    reason: str,
-    stdin_text: str = "",
-) -> dict[str, Any]:
-    """Cancel exact active ledger entries without terminating their process.
-
-    Callers must first make the underlying work item durably non-executable.
-    A worker may already have been claimed between packet and ledger commits;
-    preserving ``cancelled`` in :func:`_finish` then prevents that harmless
-    cached/no-op worker from resurrecting the queue entry.
-    """
-
-    normalized_args = [str(value) for value in args]
-    normalized_reason = str(reason).strip() or "superseded"
-    dedupe = _dedupe_key(name, module, normalized_args, stdin_text)
-    cancelled: list[str] = []
-    prior_statuses: dict[str, str] = {}
-    matched_job_ids: list[str] = []
-    with _lock():
-        state = _load()
-        for job_id, job in state["jobs"].items():
-            if not isinstance(job, dict) or job.get("dedupe_key") != dedupe:
-                continue
-            matched_job_ids.append(str(job_id))
-            status = str(job.get("status") or "")
-            prior_statuses[str(job_id)] = status
-            if status not in ACTIVE_STATUSES:
-                continue
-            job["status"] = "cancelled"
-            job["cancelled_at"] = _iso()
-            job["cancellation_reason"] = normalized_reason
-            job["next_retry_at"] = None
-            job["updated_at"] = _iso()
-            job["stdin"] = ""
-            job.pop("rerun_requested", None)
-            cancelled.append(str(job_id))
-        tombstones = state.setdefault("cancellation_tombstones", {})
-        if not isinstance(tombstones, dict):
-            tombstones = {}
-            state["cancellation_tombstones"] = tombstones
-        prior_tombstone = tombstones.get(dedupe)
-        prior_tombstone = (
-            prior_tombstone if isinstance(prior_tombstone, dict) else {}
-        )
-        tombstone = {
-            "name": name,
-            "module": module,
-            "args": normalized_args,
-            "cancelled_at": prior_tombstone.get("cancelled_at") or _iso(),
-            "reason": normalized_reason,
-            "last_job_id": (
-                cancelled[-1]
-                if cancelled
-                else prior_tombstone.get("last_job_id")
-                or (matched_job_ids[-1] if matched_job_ids else None)
-            ),
-        }
-        tombstone_changed = prior_tombstone != tombstone
-        tombstones[dedupe] = tombstone
-        ordered_tombstones = sorted(
-            tombstones.items(),
-            key=lambda item: str(item[1].get("cancelled_at") or "")
-            if isinstance(item[1], dict)
-            else "",
-            reverse=True,
-        )
-        for stale_key, _value in ordered_tombstones[MAX_CANCELLATION_TOMBSTONES:]:
-            tombstones.pop(stale_key, None)
-        pruned = _prune_terminal(state)
-        if cancelled or pruned or tombstone_changed:
-            _save(state)
-    return {
-        "status": "ok",
-        "matched": len(prior_statuses),
-        "cancelled": len(cancelled),
-        "cancelled_job_ids": cancelled,
-        "prior_statuses": prior_statuses,
-        "dedupe_key": dedupe,
-        "tombstoned": True,
-    }
-
-
 def _claim(job_id: str) -> dict[str, Any] | None:
     with _lock():
         state = _load()
         job = state["jobs"].get(job_id)
-        if not isinstance(job, dict) or job.get("status") not in {"queued", "retry_wait"}:
+        if not isinstance(job, dict) or job.get("status") not in {
+            "queued",
+            "retry_wait",
+        }:
             return None
+        if job.get("module") not in CAPTURE_MODULES:
+            _retire(job)
+            _save(state)
+            return dict(job)
+        job.pop("on_success", None)
         retry_at = job.get("next_retry_at")
         if isinstance(retry_at, str):
             try:
@@ -465,138 +389,6 @@ def _claim(job_id: str) -> dict[str, Any] | None:
         return dict(job)
 
 
-def _enqueue_followups_locked(
-    state: dict[str, Any],
-    *,
-    parent_job_id: str,
-    parent: dict[str, Any],
-    output_statuses: set[str],
-    output_by_status: dict[str, str],
-) -> list[str]:
-    specs = parent.get("on_success")
-    if not isinstance(specs, list):
-        return []
-    parent_stdin = str(parent.get("stdin") or "")
-    enqueued: list[str] = []
-    for spec in specs:
-        if not isinstance(spec, dict):
-            continue
-        required_status = spec.get("when_output_status")
-        required_statuses = spec.get("when_output_statuses")
-        if (
-            isinstance(required_status, str)
-            and required_status not in output_statuses
-        ):
-            continue
-        if isinstance(required_statuses, list) and not any(
-            isinstance(value, str) and value in output_statuses
-            for value in required_statuses
-        ):
-            continue
-        stdin_text = parent_stdin
-        if spec.get("stdin_from_output") is True:
-            candidates = (
-                [value for value in required_statuses if isinstance(value, str)]
-                if isinstance(required_statuses, list)
-                else [required_status]
-                if isinstance(required_status, str)
-                else sorted(output_statuses)
-            )
-            stdin_text = next(
-                (output_by_status[value] for value in candidates if value in output_by_status),
-                "",
-            )
-            if not stdin_text:
-                continue
-        name = str(spec.get("name") or "").strip()
-        module = str(spec.get("module") or "").strip()
-        args = [str(value) for value in spec.get("args", [])]
-        env_value = spec.get("env")
-        env = _fixed_job_env(
-            {str(key): str(value) for key, value in env_value.items()}
-            if isinstance(env_value, dict)
-            else {}
-        )
-        if not name or not module:
-            continue
-        dedupe = _dedupe_key(name, module, args, stdin_text)
-        existing_job_id = ""
-        for candidate_id, candidate in state["jobs"].items():
-            if not isinstance(candidate, dict):
-                continue
-            if (
-                candidate.get("dedupe_key") == dedupe
-                and candidate.get("status") in ACTIVE_STATUSES
-            ):
-                candidate["stdin"] = stdin_text
-                candidate["env"] = env
-                candidate["updated_at"] = _iso()
-                candidate["coalesced_count"] = int(
-                    candidate.get("coalesced_count") or 0
-                ) + 1
-                if candidate.get("status") == "running":
-                    candidate["rerun_requested"] = True
-                else:
-                    candidate["status"] = "queued"
-                    candidate["attempts"] = 0
-                    candidate["next_retry_at"] = None
-                existing_job_id = str(candidate_id)
-                break
-        if existing_job_id:
-            enqueued.append(existing_job_id)
-            continue
-        followup_id = uuid.uuid4().hex
-        state["jobs"][followup_id] = {
-            "job_id": followup_id,
-            "name": name,
-            "module": module,
-            "args": args,
-            "env": env,
-            "stdin": stdin_text,
-            "dedupe_key": dedupe,
-            "lane_key": name,
-            "status": "queued",
-            "attempts": 0,
-            "created_at": _iso(),
-            "updated_at": _iso(),
-            "next_retry_at": None,
-            "exit_code": None,
-            "output_tail": "",
-            "on_success": [],
-            "parent_job_id": parent_job_id,
-        }
-        enqueued.append(followup_id)
-    return enqueued
-
-
-def _last_json_status(output: str) -> str | None:
-    """Return the last object status emitted by a background command."""
-
-    for line in reversed(output.splitlines()):
-        try:
-            payload = json.loads(line)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        status = payload.get("status") if isinstance(payload, dict) else None
-        if isinstance(status, str):
-            return status
-    return None
-
-
-def _last_json_status_line(output: str) -> tuple[str, str] | None:
-    """Return the exact final JSON receipt line and its declared status."""
-
-    for line in reversed(output.splitlines()):
-        try:
-            payload = json.loads(line)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        status = payload.get("status") if isinstance(payload, dict) else None
-        if isinstance(status, str):
-            return status, line
-    return None
-
-
 def _finish(job_id: str, *, exit_code: int, output: str) -> dict[str, Any]:
     with _lock():
         state = _load()
@@ -609,15 +401,6 @@ def _finish(job_id: str, *, exit_code: int, output: str) -> dict[str, Any]:
             job["next_retry_at"] = None
             job["stdin"] = ""
         elif rerun_requested:
-            rerun_receipt = _last_json_status_line(output) if exit_code == 0 else None
-            if rerun_receipt:
-                rerun_status, receipt_line = rerun_receipt
-                deferred = job.setdefault("deferred_success_statuses", [])
-                if isinstance(deferred, list) and rerun_status not in deferred:
-                    deferred.append(rerun_status)
-                deferred_outputs = job.setdefault("deferred_success_outputs", {})
-                if isinstance(deferred_outputs, dict):
-                    deferred_outputs[rerun_status] = receipt_line
             job["status"] = "queued"
             job["attempts"] = 0
             job["next_retry_at"] = None
@@ -627,42 +410,6 @@ def _finish(job_id: str, *, exit_code: int, output: str) -> dict[str, Any]:
         elif exit_code == 0:
             job["status"] = "completed"
             job["next_retry_at"] = None
-            output_statuses = {
-                status
-                for status in [
-                    _last_json_status(output),
-                    *(
-                        job.get("deferred_success_statuses", [])
-                        if isinstance(job.get("deferred_success_statuses"), list)
-                        else []
-                    ),
-                ]
-                if isinstance(status, str) and status
-            }
-            output_by_status = {
-                str(key): str(value)
-                for key, value in (
-                    job.get("deferred_success_outputs", {}).items()
-                    if isinstance(job.get("deferred_success_outputs"), dict)
-                    else []
-                )
-            }
-            current_receipt = _last_json_status_line(output)
-            if current_receipt is not None:
-                output_by_status[current_receipt[0]] = current_receipt[1]
-            if not job.get("followups_enqueued_at"):
-                followup_ids = _enqueue_followups_locked(
-                    state,
-                    parent_job_id=job_id,
-                    parent=job,
-                    output_statuses=output_statuses,
-                    output_by_status=output_by_status,
-                )
-                if followup_ids:
-                    job["followup_job_ids"] = followup_ids
-                    job["followups_enqueued_at"] = _iso()
-            job.pop("deferred_success_statuses", None)
-            job.pop("deferred_success_outputs", None)
             job["stdin"] = ""
         elif attempts >= MAX_ATTEMPTS:
             job["status"] = "quarantined"
@@ -681,16 +428,15 @@ def _finish(job_id: str, *, exit_code: int, output: str) -> dict[str, Any]:
 
 
 def run_job(job_id: str) -> dict[str, Any]:
-    with okf_runtime_operation(CHRONOVISOR_ROOT):
-        return _run_job_locked(job_id)
-
-
-def _run_job_locked(job_id: str) -> dict[str, Any]:
     job = _claim(job_id)
     if job is None:
         return {"status": "not_due", "job_id": job_id}
+    if job.get("reason") == "retired_module":
+        return job
     env = build_child_process_env()
     env.update(_fixed_job_env(job.get("env", {})))
+    env["CHRONOVISOR_ROOT"] = str(CHRONOVISOR_ROOT)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
     cmd = [
         sys.executable,
         "-m",
@@ -710,7 +456,16 @@ def _run_job_locked(job_id: str) -> dict[str, Any]:
         result = _finish(job_id, exit_code=completed.returncode, output=output)
     except Exception as exc:
         result = _finish(job_id, exit_code=1, output=exc.__class__.__name__)
-    print(json.dumps({"job_id": job_id, "status": result["status"], "exit_code": result.get("exit_code")}, ensure_ascii=False))
+    print(
+        json.dumps(
+            {
+                "job_id": job_id,
+                "status": result["status"],
+                "exit_code": result.get("exit_code"),
+            },
+            ensure_ascii=False,
+        )
+    )
     if result.get("output_tail"):
         print(result["output_tail"])
     return result
@@ -723,7 +478,10 @@ def retry_due(*, limit: int = 8) -> dict[str, Any]:
         now = _now()
         due: list[tuple[str, str]] = []
         for job_id, job in state["jobs"].items():
-            if not isinstance(job, dict) or job.get("status") not in {"queued", "retry_wait"}:
+            if not isinstance(job, dict) or job.get("status") not in {
+                "queued",
+                "retry_wait",
+            }:
                 continue
             retry_at = job.get("next_retry_at")
             try:
@@ -739,9 +497,12 @@ def retry_due(*, limit: int = 8) -> dict[str, Any]:
 
 
 def snapshot() -> dict[str, Any]:
-    repair_stale()
-    with _lock():
-        jobs = _load()["jobs"]
+    """Read capture job status without taking a writer lock or repairing state."""
+    jobs = {
+        key: job
+        for key, job in _load()["jobs"].items()
+        if isinstance(job, dict) and job.get("module") in CAPTURE_MODULES
+    }
     counts: dict[str, int] = {}
     oldest_pending: str | None = None
     quarantined_24h = 0
@@ -786,23 +547,6 @@ def snapshot() -> dict[str, Any]:
     }
 
 
-def get_job(job_id: str) -> dict[str, Any] | None:
-    """Return one durable job without exposing the full ledger."""
-
-    repair_stale()
-    with _lock():
-        job = _load()["jobs"].get(job_id)
-    return dict(job) if isinstance(job, dict) else None
-
-
-def recent_jobs(*, limit: int = 10) -> list[dict[str, Any]]:
-    repair_stale()
-    with _lock():
-        jobs = [dict(row) for row in _load()["jobs"].values() if isinstance(row, dict)]
-    jobs.sort(key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""), reverse=True)
-    return jobs[: max(0, limit)]
-
-
 def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-background-jobs`` command-line entry point."""
     parser = argparse.ArgumentParser()
@@ -815,17 +559,6 @@ def main(argv: list[str] | None = None) -> int:
     repair_p = sub.add_parser("repair")
     repair_p.add_argument("--quarantine-pending", action="store_true")
     args = parser.parse_args(argv)
-    from chronovisor.core.okf_cutover import OKFStartupBlocked
-
-    try:
-        with okf_runtime_operation(CHRONOVISOR_ROOT):
-            return _main_locked(args)
-    except OKFStartupBlocked:
-        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
-        return 75
-
-
-def _main_locked(args: argparse.Namespace) -> int:
     if args.command == "run":
         result = run_job(args.job_id)
     elif args.command == "retry":
@@ -834,8 +567,7 @@ def _main_locked(args: argparse.Namespace) -> int:
         result = repair_stale(quarantine_pending=args.quarantine_pending)
     else:
         result = snapshot()
-    if args.command != "run":
-        print(json.dumps(result, ensure_ascii=False))
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 

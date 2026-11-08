@@ -1,1 +1,1 @@
-"""Chronovisor package."""
+"""Chronovisor capture and search package."""

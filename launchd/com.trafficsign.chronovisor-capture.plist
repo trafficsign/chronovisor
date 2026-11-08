@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>@@LAUNCHD_LABEL_PREFIX@@capture</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>@@HOME@@/.chronovisor/bin/chronovisor-capture</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>@@PROJECT_ROOT@@</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>@@HOME@@</string>
+		<key>PATH</key>
+		<string>@@PATH@@</string>
+		<key>CHRONOVISOR_UVX</key>
+		<string>@@UVX@@</string>
+		<key>CHRONOVISOR_PYTHON</key>
+		<string>@@PYTHON@@</string>
+		<key>CHRONOVISOR_REPO_ROOT</key>
+		<string>@@PROJECT_ROOT@@</string>
+	</dict>
+	<key>StartInterval</key>
+	<integer>120</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>StandardOutPath</key>
+	<string>@@HOME@@/.chronovisor/logs/capture.launchd.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>@@HOME@@/.chronovisor/logs/capture.launchd.err.log</string>
+</dict>
+</plist>

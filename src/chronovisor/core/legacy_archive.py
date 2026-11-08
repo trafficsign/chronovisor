@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import io
 import json
-import os
 import re
 import tarfile
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any, TypeGuard
 
@@ -17,8 +14,7 @@ import zstandard as zstd
 
 from chronovisor.core.hashutil import sha256_bytes as _sha256
 from chronovisor.core.hashutil import sha256_file as _sha256_path
-from chronovisor.core.link_fix import atomic_write
-from chronovisor.core.raw_segment import CAPTURE_TIMEZONE, RawSegmentCorrupt
+from chronovisor.core.raw_segment import RawSegmentCorrupt
 from chronovisor.core.sealed_artifact_decoder import schema_matches
 
 LEGACY_ARCHIVE_SCHEMA = "chronovisor.raw-legacy-archive.v1"
@@ -36,10 +32,6 @@ class LegacyArchiveMember:
     captured_date: str
 
 
-
-
-
-
 def _safe_raw_id(value: object) -> TypeGuard[str]:
     """Accept historical Unicode basenames without weakening path safety."""
 
@@ -53,14 +45,6 @@ def _safe_raw_id(value: object) -> TypeGuard[str]:
         and Path(value).name == value
         and all(ord(char) >= 32 and ord(char) != 127 for char in value)
     )
-
-
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 def load_legacy_manifest(path: Path) -> dict[str, Any]:
@@ -209,255 +193,3 @@ def verify_legacy_manifest(path: Path, *, full: bool = False) -> dict[str, Any]:
         if observed_logical_bytes != payload["logical_bytes"]:
             raise RawSegmentCorrupt("legacy archive logical byte total mismatch")
     return payload
-
-
-def write_legacy_archive(
-    paths: list[Path],
-    *,
-    archive_path: Path,
-    captured_date: str,
-    compression_level: int = 9,
-) -> dict[str, Any]:
-    if not paths:
-        raise ValueError("legacy archive needs at least one source")
-    archive_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path = archive_path.with_name(
-        archive_path.name.removesuffix(".tar.zst") + ".manifest.json"
-    )
-    if manifest_path.exists():
-        return verify_legacy_manifest(manifest_path, full=True)
-    source_rows: list[tuple[Path, bytes, dict[str, Any]]] = []
-    for path in sorted(paths, key=lambda item: item.name):
-        if not path.is_file() or path.is_symlink() or Path(path.name).name != path.name:
-            raise RawSegmentCorrupt(f"legacy source is missing or unsafe: {path}")
-        value = path.read_bytes()
-        source_rows.append(
-            (
-                path,
-                value,
-                {"raw_id": path.name, "bytes": len(value), "sha256": _sha256(value)},
-            )
-        )
-    temporary = archive_path.with_name(f".{archive_path.name}.{os.getpid()}.tmp")
-    try:
-        with temporary.open("xb") as target:
-            with zstd.ZstdCompressor(level=compression_level).stream_writer(
-                target, closefd=False
-            ) as compressor, tarfile.open(fileobj=compressor, mode="w|") as archive:
-                for path, value, _row in source_rows:
-                    info = tarfile.TarInfo(path.name)
-                    info.size = len(value)
-                    info.mode = 0o600
-                    info.mtime = 0
-                    archive.addfile(info, io.BytesIO(value))
-            target.flush()
-            os.fsync(target.fileno())
-        os.replace(temporary, archive_path)
-        _fsync_directory(archive_path.parent)
-        manifest = {
-            "schema": LEGACY_ARCHIVE_SCHEMA,
-            "archive": archive_path.name,
-            "captured_date": captured_date,
-            "logical_bytes": sum(row[2]["bytes"] for row in source_rows),
-            "compressed_bytes": archive_path.stat().st_size,
-            "compressed_sha256": _sha256_path(archive_path),
-            "compression": {
-                "container": "tar",
-                "codec": "zstd",
-                "level": compression_level,
-            },
-            "members": [row[2] for row in source_rows],
-            "created_at": datetime.now(CAPTURE_TIMEZONE).isoformat(),
-        }
-        atomic_write(
-            manifest_path,
-            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        )
-        _fsync_directory(archive_path.parent)
-        verify_legacy_manifest(manifest_path, full=True)
-        return manifest
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def migrate_processed_legacy(
-    raw_dir: Path,
-    *,
-    processed_raw_ids: set[str],
-    before: str | None = None,
-    dry_run: bool = True,
-    remove_source: bool = False,
-    max_archive_bytes: int = DEFAULT_ARCHIVE_BYTES,
-    compression_level: int = 9,
-    before_source_delete: Callable[[Path, dict[str, Any]], None] | None = None,
-) -> dict[str, Any]:
-    """Archive completed flat Raw units; shadow mode keeps every source."""
-
-    raw_dir = raw_dir.expanduser().resolve(strict=False)
-    if (
-        isinstance(max_archive_bytes, bool)
-        or not isinstance(max_archive_bytes, int)
-        or not 0 < max_archive_bytes <= DEFAULT_ARCHIVE_BYTES
-    ):
-        raise ValueError(f"max_archive_bytes must be within 1..{DEFAULT_ARCHIVE_BYTES}")
-    cutoff = before or datetime.now(CAPTURE_TIMEZONE).strftime("%Y/%m/%d")
-    datetime.strptime(cutoff, "%Y/%m/%d")
-    archived_members = {
-        member.raw_id: member for member in iter_legacy_members(raw_dir)
-    }
-    by_date: dict[str, list[Path]] = {}
-    preexisting_removals: list[Path] = []
-    skipped = {
-        "not_processed": 0,
-        "today_or_newer": 0,
-        "already_archived": 0,
-        "oversized": 0,
-    }
-    candidates = tuple(raw_dir.glob("*.md")) + tuple(raw_dir.glob("semantic-*.json"))
-    for path in sorted(candidates, key=lambda item: item.name):
-        if not path.is_file() or path.is_symlink():
-            continue
-        if path.name not in processed_raw_ids:
-            skipped["not_processed"] += 1
-            continue
-        captured = datetime.fromtimestamp(
-            path.stat().st_mtime, tz=CAPTURE_TIMEZONE
-        ).strftime("%Y/%m/%d")
-        if captured >= cutoff:
-            skipped["today_or_newer"] += 1
-            continue
-        if path.stat().st_size > max_archive_bytes:
-            skipped["oversized"] += 1
-            continue
-        archived = archived_members.get(path.name)
-        if archived is not None:
-            if remove_source:
-                source = path.read_bytes()
-                if len(source) != archived.length or _sha256(source) != archived.sha256:
-                    raise RawSegmentCorrupt(
-                        f"legacy pre-delete restore mismatch: {path.name}"
-                    )
-                preexisting_removals.append(path)
-            else:
-                skipped["already_archived"] += 1
-            continue
-        by_date.setdefault(captured, []).append(path)
-
-    planned: list[tuple[str, list[Path], int]] = []
-    for captured, paths in sorted(by_date.items()):
-        day_dir = raw_dir / captured
-        existing_parts = [
-            int(match.group(1))
-            for path in day_dir.glob("legacy-part-*.manifest.json")
-            if (
-                match := re.fullmatch(r"legacy-part-(\d{3})\.manifest\.json", path.name)
-            )
-        ]
-        part = max(existing_parts, default=0) + 1
-        batch: list[Path] = []
-        batch_bytes = 0
-        for path in paths:
-            size = path.stat().st_size
-            if batch and batch_bytes + size > max_archive_bytes:
-                planned.append((captured, batch, part))
-                part += 1
-                batch = []
-                batch_bytes = 0
-            batch.append(path)
-            batch_bytes += size
-        if batch:
-            planned.append((captured, batch, part))
-
-    results: list[dict[str, Any]] = []
-    if preexisting_removals:
-        results.append(
-            {
-                "archive": "existing_verified_archives",
-                "members": len(preexisting_removals),
-                "logical_bytes": sum(
-                    path.stat().st_size for path in preexisting_removals
-                ),
-                "action": "would_remove_verified_sources"
-                if dry_run
-                else "removed_verified_sources",
-            }
-        )
-        if not dry_run:
-            verified_manifests: dict[Path, dict[str, Any]] = {}
-            for path in preexisting_removals:
-                manifest_path = archived_members[path.name].manifest_path
-                if manifest_path not in verified_manifests:
-                    verified_manifests[manifest_path] = verify_legacy_manifest(
-                        manifest_path, full=True
-                    )
-            for manifest_path, manifest in sorted(verified_manifests.items()):
-                if before_source_delete is not None:
-                    before_source_delete(manifest_path, manifest)
-            for path in preexisting_removals:
-                path.unlink()
-            _fsync_directory(raw_dir)
-    for captured, paths, part in planned:
-        archive_path = raw_dir / captured / f"legacy-part-{part:03d}.tar.zst"
-        if dry_run:
-            results.append(
-                {
-                    "archive": str(archive_path),
-                    "members": len(paths),
-                    "logical_bytes": sum(path.stat().st_size for path in paths),
-                    "action": "would_archive",
-                }
-            )
-            continue
-        manifest = write_legacy_archive(
-            paths,
-            archive_path=archive_path,
-            captured_date=captured,
-            compression_level=compression_level,
-        )
-        if remove_source:
-            members = {
-                str(row["raw_id"]): (int(row["bytes"]), str(row["sha256"]))
-                for row in manifest["members"]
-            }
-            for path in paths:
-                source = path.read_bytes()
-                evidence = members.get(path.name)
-                if (
-                    evidence is None
-                    or len(source) != evidence[0]
-                    or _sha256(source) != evidence[1]
-                ):
-                    raise RawSegmentCorrupt(
-                        f"legacy pre-delete restore mismatch: {path.name}"
-                    )
-            if before_source_delete is not None:
-                before_source_delete(
-                    archive_path.with_name(
-                        archive_path.name.removesuffix(".tar.zst") + ".manifest.json"
-                    ),
-                    manifest,
-                )
-            for path in paths:
-                path.unlink()
-            _fsync_directory(raw_dir)
-        results.append(
-            {
-                "archive": str(archive_path),
-                "members": len(paths),
-                "logical_bytes": manifest["logical_bytes"],
-                "compressed_bytes": manifest["compressed_bytes"],
-                "action": "archived_and_removed"
-                if remove_source
-                else "shadow_archived",
-            }
-        )
-    return {
-        "status": "dry_run" if dry_run else "ok",
-        "before": cutoff,
-        "archives": len(planned),
-        "members": sum(len(paths) for _captured, paths, _part in planned)
-        + len(preexisting_removals),
-        "remove_source": remove_source,
-        "skipped": skipped,
-        "results": results,
-    }

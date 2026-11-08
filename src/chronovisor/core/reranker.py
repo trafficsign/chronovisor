@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-import threading
 import time
-from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -20,11 +18,8 @@ from chronovisor.core.llm_runtime import (
     SAFE_FAILURE_CATEGORIES,
     LLMRuntime,
     LLMRuntimeError,
-    RerankItem,
     RerankRequest,
-    RerankResult,
     ResolvedRerankRoute,
-    RouteLocation,
     SourceDataClass,
     SourceDataClassification,
     SourceSensitivity,
@@ -56,8 +51,6 @@ _SYSTEM_SOURCE = SourceDataClassification(
     SourceDataClass.SYSTEM,
     SourceSensitivity.HIGH,
 )
-_MODEL_CACHE: dict[tuple[str, str, str, str], Any] = {}
-_MODEL_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -127,7 +120,7 @@ def resolve_rerank_candidate(
                 [asdict(item) for item in values],
                 page_id=page_id,
             )
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
 
     if isinstance(candidate, ScoredPage):
@@ -184,7 +177,7 @@ def resolve_rerank_candidate(
         data = path.read_bytes()
         document = parse_document(data)
         body = document.body.decode("utf-8").strip()
-    except (CanonicalDocumentError, OSError, RuntimeError, UnicodeDecodeError):
+    except CanonicalDocumentError, OSError, RuntimeError, UnicodeDecodeError:
         return invalid
     source_digest = hashlib.sha256(data).hexdigest()
     if (
@@ -203,12 +196,12 @@ def resolve_rerank_candidate(
         else:
             try:
                 source_uid = normalize_page_uid(raw_source_uid)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 return invalid
         if isinstance(candidate, ScoredPage) and candidate.uid:
             try:
                 candidate_uid = normalize_page_uid(candidate.uid)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 return invalid
             if candidate_uid != source_uid:
                 return invalid
@@ -259,175 +252,6 @@ def resolve_rerank_candidate(
             hashlib.sha256(data).hexdigest(),
         ),
     )
-
-
-def _select_torch_device(torch_mod: Any, requested: str) -> str:
-    if requested:
-        return requested
-    if (
-        getattr(torch_mod.backends, "mps", None)
-        and torch_mod.backends.mps.is_available()
-    ):
-        return "mps"
-    if torch_mod.cuda.is_available():
-        return "cuda"
-    return "cpu"
-
-
-def _torch_dtype(torch_mod: Any, requested: str) -> Any:
-    dtype = {
-        "float16": torch_mod.float16,
-        "float32": torch_mod.float32,
-        "bfloat16": torch_mod.bfloat16,
-    }.get(requested)
-    if dtype is None:
-        raise RuntimeError("unsupported reranker dtype")
-    return dtype
-
-
-def _load_transformer_components(
-    config: RerankerConfig,
-    tokenizer_cls: Any,
-    model_cls: Any,
-) -> tuple[Any, Any]:
-    """Prefer a complete local snapshot, then allow first-install download."""
-
-    try:
-        tokenizer = tokenizer_cls.from_pretrained(config.model, local_files_only=True)
-        model = model_cls.from_pretrained(config.model, local_files_only=True)
-    except (OSError, ValueError):
-        tokenizer = tokenizer_cls.from_pretrained(config.model)
-        model = model_cls.from_pretrained(config.model)
-    return tokenizer, model
-
-
-def _transformer_scores(
-    query: str, passages: list[str], config: RerankerConfig
-) -> list[float]:
-    try:
-        import torch  # type: ignore[import-not-found, unused-ignore]
-        from transformers import (  # type: ignore[import-not-found, unused-ignore]
-            AutoModelForSequenceClassification,
-            AutoTokenizer,
-        )
-    except Exception as exc:  # pragma: no cover - exercised via missing-dep tests
-        raise RuntimeError(f"transformers backend unavailable: {exc}") from exc
-
-    device = _select_torch_device(torch, config.device)
-    key = ("transformers", config.model, device, config.dtype)
-    # Hugging Face's default path performs remote metadata checks even when
-    # all weights are cached. Prefer the complete local snapshot and only use
-    # the network on the first installation of a model.
-    with _MODEL_LOCK:
-        cached = _MODEL_CACHE.get(key)
-        if cached is None:
-            tokenizer, model = _load_transformer_components(
-                config,
-                AutoTokenizer,
-                AutoModelForSequenceClassification,
-            )
-            model.to(device=device, dtype=_torch_dtype(torch, config.dtype))
-            model.eval()
-            cached = (tokenizer, model)
-            _MODEL_CACHE[key] = cached
-        tokenizer, model = cached
-
-        # Serialize MPS inference with startup warmup. Otherwise an immediate
-        # first search can race the warmup thread on the same model instance.
-        scores: list[float] = []
-        batch_size = max(1, config.batch_size)
-        with torch.no_grad():
-            for i in range(0, len(passages), batch_size):
-                batch = passages[i : i + batch_size]
-                encoded = tokenizer(
-                    [query] * len(batch),
-                    batch,
-                    padding=True,
-                    truncation=True,
-                    max_length=max(1, config.max_length),
-                    return_tensors="pt",
-                )
-                encoded = {name: value.to(device) for name, value in encoded.items()}
-                logits = model(**encoded).logits
-                if len(logits.shape) == 2 and logits.shape[1] > 1:
-                    values = logits[:, -1]
-                else:
-                    values = logits.reshape(-1)
-                scores.extend(
-                    float(value) for value in values.detach().float().cpu().tolist()
-                )
-    return scores
-
-
-def _flagembedding_scores(
-    query: str, passages: list[str], config: RerankerConfig
-) -> list[float]:
-    try:
-        from FlagEmbedding import FlagReranker  # type: ignore[import-not-found]
-    except Exception as exc:  # pragma: no cover - exercised via missing-dep tests
-        raise RuntimeError(f"FlagEmbedding backend unavailable: {exc}") from exc
-
-    key = ("flagembedding", config.model, config.device, "float16")
-    reranker = _MODEL_CACHE.get(key)
-    if reranker is None:
-        kwargs: dict[str, Any] = {}
-        if config.device:
-            kwargs["devices"] = [config.device]
-        reranker = FlagReranker(config.model, use_fp16=True, **kwargs)
-        _MODEL_CACHE[key] = reranker
-    pairs = [[query, passage] for passage in passages]
-    try:
-        raw_scores = reranker.compute_score(
-            pairs,
-            batch_size=max(1, config.batch_size),
-            max_length=max(1, config.max_length),
-        )
-    except TypeError:
-        raw_scores = reranker.compute_score(pairs)
-    if isinstance(raw_scores, (float, int)):
-        return [float(raw_scores)]
-    return [float(score) for score in raw_scores]
-
-
-def _score_impl(
-    config: RerankerConfig,
-) -> Callable[[str, list[str], RerankerConfig], list[float]]:
-    backend = config.backend.lower()
-    if backend == "transformers":
-        return _transformer_scores
-    if backend == "flagembedding":
-        return _flagembedding_scores
-    raise RuntimeError(f"unsupported reranker backend: {config.backend}")
-
-
-class LocalRerankBackend:
-    """Local Transformers/FlagEmbedding implementation of RerankBackend."""
-
-    provider = "local-reranker"
-    location = RouteLocation.LOCAL
-
-    def __init__(self, config: RerankerConfig) -> None:
-        self.config = config
-
-    def rerank(self, request: RerankRequest, *, model: str) -> RerankResult:
-        config = (
-            self.config
-            if model == self.config.model
-            else replace(self.config, model=model)
-        )
-        scores = _score_impl(config)(request.query, list(request.candidates), config)
-        items = sorted(
-            (
-                RerankItem(index=index, score=float(score))
-                for index, score in enumerate(scores)
-            ),
-            key=lambda item: (-item.score, item.index),
-        )
-        return RerankResult(
-            items=tuple(items),
-            provider=self.provider,
-            model=model,
-        )
 
 
 def warm_reranker(
@@ -512,9 +336,7 @@ def apply_reranker_scores(
     raw_by_page = {page.page_id: score for page, score in reranked}
     score_details: list[RerankScore] = []
     for index, (page, raw_score) in enumerate(reranked):
-        next_score = (
-            reranked[index + 1][1] if index + 1 < len(reranked) else raw_score
-        )
+        next_score = reranked[index + 1][1] if index + 1 < len(reranked) else raw_score
         score_details.append(
             RerankScore(
                 page_id=page.page_id,
@@ -543,10 +365,7 @@ def apply_reranker_scores(
         original_rank[page.page_id] != rerank_rank[page.page_id] for page in head
     )
     max_rank_delta = max(
-        (
-            abs(original_rank[page.page_id] - rerank_rank[page.page_id])
-            for page in head
-        ),
+        (abs(original_rank[page.page_id] - rerank_rank[page.page_id]) for page in head),
         default=0,
     )
     serialized_scores = [

@@ -13,15 +13,11 @@ import hashlib
 import json
 import os
 import sys
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from chronovisor.core import codex_transcript as _codex_transcript
-from chronovisor.core.evidence_grounding import (
-    ProtectedLiteralGroundingError,
-    validate_protected_literals,
-)
 from chronovisor.core.save_transaction import (
     SaveTransaction,
     attach_save_transaction_marker,
@@ -31,19 +27,13 @@ from chronovisor.core.save_transaction import (
     validate_published_save_receipt,
 )
 from chronovisor.core.store import (
-    CHRONOVISOR_ROOT,
     DEFAULT_CONTEXT,
     RuntimeContext,
-    okf_runtime_operation,
-    okf_startup_status,
 )
 from chronovisor.raw.agent_save_base import (
-    extract_json_object,
     load_state,  # noqa: F401 - re-exported for session sweeper callers
-    sanitize_keywords,
     save_raw,
     saved_line_for,  # noqa: F401 - re-exported for session sweeper callers
-    trim_middle,
     update_state,
     write_state,
 )
@@ -91,233 +81,6 @@ HOOK_ENABLE_ENV = "CODEX_CHRONOVISOR_RECORD_ENABLED"
 
 TURN_INTERVAL = 10
 COOLDOWN_SECONDS = 900
-
-MEMORY_WRITER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["should_save", "content", "keywords", "reason", "evidence_quotes"],
-    "properties": {
-        "should_save": {"type": "boolean"},
-        "content": {"type": "string"},
-        "keywords": {
-            "type": "array",
-            "items": {"type": "string"},
-            "minItems": 0,
-            "maxItems": 20,
-        },
-        "reason": {"type": "string"},
-        "evidence_quotes": {
-            "type": "array",
-            "items": {"type": "string", "minLength": 1, "maxLength": 500},
-            "minItems": 0,
-            "maxItems": 8,
-        },
-    },
-}
-
-
-@dataclass(frozen=True)
-class WriterResult:
-    should_save: bool
-    content: str
-    keywords: list[str]
-    reason: str
-    rejected_keywords: list[str]
-    evidence_quotes: list[str] = field(default_factory=list)
-
-
-def build_writer_prompt(transcript_slice: TranscriptSlice, *, max_chars: int) -> str:
-    transcript = trim_middle(format_transcript(transcript_slice.records), max_chars)
-    metadata = {
-        "source": "codex",
-        "session_id": transcript_slice.session_id,
-        "cwd": transcript_slice.cwd,
-        "originator": transcript_slice.originator,
-        "cli_version": transcript_slice.cli_version,
-        "session_file": str(transcript_slice.session_file),
-        "after_line": transcript_slice.after_line,
-        "scanned_until_line": transcript_slice.scanned_until_line,
-    }
-    return (
-        "You are the memory-writer subagent for Chronovisor.\n"
-        "Read the Codex session delta and decide whether it contains durable memory.\n"
-        "Durable memory includes user preferences, project decisions, implementation outcomes, "
-        "environment facts, debugging findings, or lessons likely to help future sessions.\n"
-        "Ignore transient command output unless it supports a durable fact.\n"
-        "Do not use tools, browse the web, or modify files.\n\n"
-        "Return JSON only, matching this shape:\n"
-        '{"should_save": true, "content": "...", "keywords": ["..."], '
-        '"reason": "...", "evidence_quotes": ["exact USER quote"]}\n\n'
-        "Rules:\n"
-        "- Prefer Japanese when the source conversation is Japanese.\n"
-        "- Preserve exact dates, paths, commands, model names, and decisions.\n"
-        "- Mention that the source is Codex when relevant.\n"
-        "- If there is no durable memory, set should_save=false, content=\"\", keywords=[].\n"
-        "- Use 10 to 20 specific keywords when saving; avoid generic words by themselves.\n"
-        "- Keywords must not contain commas, brackets, colons, braces, or newlines.\n"
-        "- A saved memory MUST be grounded in one or more evidence_quotes copied verbatim from USER text.\n"
-        "- evidence_quotes must contain exact substrings from USER messages only; never quote ASSISTANT text.\n"
-        "- If should_save=false, set evidence_quotes=[].\n"
-        "- Treat ASSISTANT text only as secondary execution context, never as authority for what the user named.\n"
-        "- Preserve model names, product names, versions, and spellings exactly as stated in USER evidence.\n"
-        "- Never normalize, correct, expand, translate, supplement, or replace a USER-stated model/product name "
-        "from ASSISTANT context (for example, do not replace Q-KUN with Qwen).\n"
-        "- If a model/product identity appears only in ASSISTANT text, omit it from the memory.\n"
-        "- Do not invent facts beyond the transcript.\n\n"
-        "Session metadata:\n"
-        f"{json.dumps(metadata, ensure_ascii=False, indent=2)}\n\n"
-        "Transcript delta:\n"
-        f"{transcript}\n"
-    )
-
-
-def run_memory_writer(
-    prompt: str,
-    *,
-    model: str = DEFAULT_MEMORY_MODEL,
-    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
-    timeout: int = DEFAULT_TIMEOUT_SECONDS,
-) -> WriterResult:
-    """Reject the retired frontier writer without starting any process.
-
-    Raw session persistence is deliberately deterministic and lossless.  This
-    compatibility function remains so older callers fail with a useful error
-    instead of silently reintroducing a routine ``codex exec`` path.
-    """
-    del prompt, model, reasoning_effort, timeout
-    raise CodexSaveError(
-        "memory writer is disabled; session saves use deterministic-lossless capture"
-    )
-
-
-def parse_writer_output(output: str) -> WriterResult:
-    parsed = extract_json_object(output)
-    if not isinstance(parsed, dict):
-        raise CodexSaveError("memory writer did not return a JSON object")
-
-    should_save = parsed.get("should_save")
-    content = parsed.get("content")
-    keywords = parsed.get("keywords")
-    reason = parsed.get("reason")
-    evidence_quotes = parsed.get("evidence_quotes")
-
-    if not isinstance(should_save, bool):
-        raise CodexSaveError("memory writer JSON missing boolean should_save")
-    if not isinstance(content, str):
-        raise CodexSaveError("memory writer JSON missing string content")
-    if not isinstance(keywords, list):
-        raise CodexSaveError("memory writer JSON missing keyword list")
-    if not isinstance(reason, str):
-        raise CodexSaveError("memory writer JSON missing string reason")
-    if not isinstance(evidence_quotes, list):
-        raise CodexSaveError("memory writer JSON missing evidence_quotes list")
-
-    cleaned_quotes = _validate_evidence_quote_shape(evidence_quotes)
-    if should_save and not cleaned_quotes:
-        raise CodexSaveError("memory writer must provide user evidence_quotes when should_save=true")
-
-    accepted, rejected = sanitize_keywords(keywords)
-    return WriterResult(
-        should_save=should_save,
-        content=content.strip(),
-        keywords=accepted,
-        reason=reason.strip(),
-        rejected_keywords=rejected,
-        evidence_quotes=cleaned_quotes,
-    )
-
-
-def _validate_evidence_quote_shape(values: list[Any], *, limit: int = 8) -> list[str]:
-    """Validate the structured-output quote field without changing quote text."""
-    if len(values) > limit:
-        raise CodexSaveError(f"memory writer returned more than {limit} evidence quotes")
-    quotes: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        if not isinstance(value, str):
-            raise CodexSaveError("memory writer evidence_quotes must contain only strings")
-        quote = value
-        if not quote.strip():
-            raise CodexSaveError("memory writer evidence_quotes must not contain empty strings")
-        if len(quote) > 500:
-            raise CodexSaveError("memory writer evidence quote exceeds 500 characters")
-        if quote not in seen:
-            quotes.append(quote)
-            seen.add(quote)
-    return quotes
-
-
-def validate_user_evidence_quotes(
-    writer: WriterResult,
-    transcript_slice: TranscriptSlice,
-) -> None:
-    """Fail closed unless every save citation exists verbatim in a USER record."""
-    if not writer.should_save:
-        return
-    if not writer.evidence_quotes:
-        raise CodexSaveError("memory writer save is missing user evidence quotes")
-    user_texts = [record.text for record in transcript_slice.records if record.role == "user"]
-    if not user_texts:
-        raise CodexSaveError("memory writer save has no USER transcript evidence")
-    missing = [
-        quote
-        for quote in writer.evidence_quotes
-        if not any(quote in user_text for user_text in user_texts)
-    ]
-    if missing:
-        preview = ", ".join(repr(quote[:120]) for quote in missing[:3])
-        raise CodexSaveError(
-            "memory writer evidence quote was not found verbatim in USER messages: " + preview
-        )
-    assistant_texts = [
-        record.text for record in transcript_slice.records if record.role == "assistant"
-    ]
-    try:
-        validate_protected_literals(
-            {"content": writer.content, "keywords": writer.keywords},
-            evidence_quotes=writer.evidence_quotes,
-            context_texts=assistant_texts,
-            trusted_literals=("Codex", "Chronovisor"),
-        )
-    except ProtectedLiteralGroundingError as exc:
-        raise CodexSaveError(f"memory writer {exc}") from exc
-
-
-def run_grounded_memory_writer(
-    prompt: str,
-    transcript_slice: TranscriptSlice,
-    *,
-    model: str,
-    reasoning_effort: str,
-    timeout: int,
-) -> WriterResult:
-    """Validate a legacy writer result; the default writer is disabled."""
-    effective_prompt = prompt
-    last_error: CodexSaveError | None = None
-    for attempt in range(2):
-        writer = run_memory_writer(
-            effective_prompt,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            timeout=timeout,
-        )
-        try:
-            validate_user_evidence_quotes(writer, transcript_slice)
-            return writer
-        except CodexSaveError as exc:
-            last_error = exc
-            if attempt:
-                break
-            effective_prompt = (
-                prompt
-                + "\n\nYour previous structured answer was rejected by the deterministic grounding gate:\n"
-                + str(exc)
-                + "\nRegenerate the full JSON. Copy evidence_quotes character-for-character from USER text. "
-                "Remove any content or keyword literal that is not explicitly present in those exact quotes. "
-                "Do not paraphrase quotes. If no grounded durable memory remains, return should_save=false.\n"
-            )
-    assert last_error is not None
-    raise last_error
 
 
 def _oversized_fragment_transaction(
@@ -403,7 +166,9 @@ def _capture_oversized_record(
     record_bytes = _serialized_records_bytes([record])
     limit = args.max_chars
     record_sha256 = hashlib.sha256(record_bytes).hexdigest()
-    fragments = [record_bytes[i : i + limit] for i in range(0, len(record_bytes), limit)]
+    fragments = [
+        record_bytes[i : i + limit] for i in range(0, len(record_bytes), limit)
+    ]
     metadata = {
         **base_result,
         "capture_mode": "deterministic-lossless",
@@ -537,7 +302,9 @@ def resolve_session_file(args: argparse.Namespace, hints: dict[str, str]) -> Pat
     return find_session_file(
         session_id=session_id,
         cwd=cwd,
-        sessions_root=Path(args.sessions_root).expanduser() if args.sessions_root else None,
+        sessions_root=Path(args.sessions_root).expanduser()
+        if args.sessions_root
+        else None,
     )
 
 
@@ -595,15 +362,15 @@ def run(
     cannot publish the same delta.
     """
     state_file = _resolve_state_file(args, context=context)
-    session_hint = Path(args.session_file).expanduser() if args.session_file else Path(".")
+    session_hint = (
+        Path(args.session_file).expanduser() if args.session_file else Path(".")
+    )
     with save_transaction_lock(
         host="codex",
         session_file=session_hint,
         state_file=state_file,
     ):
-        first = _run_save_transaction(
-            args, stdin_text=stdin_text, context=context
-        )
+        first = _run_save_transaction(args, stdin_text=stdin_text, context=context)
         if (
             first.get("status") != "saved"
             or not args.save
@@ -641,7 +408,9 @@ def run(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Save Codex sessions into Chronovisor raw entries.")
+    parser = argparse.ArgumentParser(
+        description="Save Codex sessions into Chronovisor raw entries."
+    )
     parser.add_argument("--session-id")
     parser.add_argument("--cwd")
     parser.add_argument("--session-file")
@@ -660,11 +429,29 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_TIMEOUT_SECONDS,
         help=argparse.SUPPRESS,
     )
-    parser.add_argument("--dry-run", action="store_true", help="Build deterministic raw data but do not save it.")
-    parser.add_argument("--save", action="store_true", help="Write to chronovisor_record and update state.")
-    parser.add_argument("--extract-only", action="store_true", help="Only parse and serialize the transcript.")
-    parser.add_argument("--ignore-state", action="store_true", help="Read the whole session instead of the delta.")
-    parser.add_argument("--hook", action="store_true", help="Read Codex hook JSON from stdin.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build deterministic raw data but do not save it.",
+    )
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        help="Write to chronovisor_record and update state.",
+    )
+    parser.add_argument(
+        "--extract-only",
+        action="store_true",
+        help="Only parse and serialize the transcript.",
+    )
+    parser.add_argument(
+        "--ignore-state",
+        action="store_true",
+        help="Read the whole session instead of the delta.",
+    )
+    parser.add_argument(
+        "--hook", action="store_true", help="Read Codex hook JSON from stdin."
+    )
     parser.add_argument(
         "--trigger-ingest",
         action="store_true",
@@ -674,24 +461,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the ``chronovisor-codex-record`` command-line entry point."""
-    from chronovisor.core.okf_cutover import OKFStartupBlocked
-    try:
-        with okf_runtime_operation(CHRONOVISOR_ROOT):
-            return _main_locked(argv)
-    except OKFStartupBlocked:
-        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
-        return 75
-
-
-def _main_locked(argv: list[str] | None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if not okf_startup_status(CHRONOVISOR_ROOT).allowed:
-        print(
-            json.dumps({"status": "blocked", "category": "okf_startup_blocked"})
-        )
-        return 75
     stdin_text = sys.stdin.read() if args.hook else None
     try:
         result = run(args, stdin_text=stdin_text)

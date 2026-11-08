@@ -4,24 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import socket
 import threading
 import time
-from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from chronovisor.core.decision_mlx import (
-    ANSWER_AXES,
-    JUDGE_ANSWER_AXES,
-    JUDGE_CERTIFICATE,
-    JUDGE_ROLE_BY_KIND,
-    JUDGE_UTILITY,
-    decision_fingerprint,
-    decision_route,
-)
 from chronovisor.core.llm_runtime import SAFE_FAILURE_CATEGORIES
 from chronovisor.core.reranker import (
     RERANK_RUNTIME_ROLE,
@@ -182,133 +171,6 @@ def _expected_route() -> dict[str, str]:
         "model": route.model,
         "location": route.location.value,
     }
-
-
-def recall_filter(
-    query: str,
-    context: str,
-    texts: list[str],
-    *,
-    config: RerankerConfig,
-    timeout_ms: int | None = None,
-) -> list[float]:
-    """Decision-model logit P(yes) per exact recall text, in order."""
-
-    expected_route = _expected_route()
-    response = request(
-        {"method": "recall_filter", "query": query, "context": context, "texts": texts},
-        config,
-        timeout_ms=timeout_ms,
-    )
-    # The recall threshold is fitted to one model: a drifted route is unusable.
-    if response.get("route") != expected_route:
-        raise RerankerServiceUnavailable("backend_contract_error")
-    scores = response.get("scores")
-    if (
-        not isinstance(scores, list)
-        or len(scores) != len(texts)
-        or not all(
-            isinstance(score, int | float)
-            and not isinstance(score, bool)
-            and math.isfinite(score)
-            for score in scores
-        )
-    ):
-        raise RerankerServiceUnavailable("invalid_response")
-    return [float(score) for score in scores]
-
-
-def decision_judge(
-    kind: str,
-    fields: Mapping[str, Any],
-    *,
-    role: str,
-    config: RerankerConfig,
-    timeout_ms: int | None = None,
-    priority: int | None = None,
-) -> dict[str, Any]:
-    """Call one fixed decision-judge contract on the resident service."""
-
-    if JUDGE_ROLE_BY_KIND.get(kind) != role:
-        raise RerankerServiceUnavailable("request_invalid")
-    if priority is not None and (isinstance(priority, bool) or priority not in {0, 1}):
-        raise RerankerServiceUnavailable("request_invalid")
-    try:
-        expected = decision_route(role)
-    except Exception as exc:
-        raise RerankerServiceUnavailable(safe_reranker_error(exc)) from exc
-    expected_route = {
-        "role": expected.role,
-        "provider": expected.provider,
-        "model": expected.model,
-        "location": expected.location,
-    }
-    expected_fingerprint = decision_fingerprint(expected)
-    payload = {"method": "judge", "kind": kind, "role": role, **dict(fields)}
-    if priority is not None:
-        payload["priority"] = priority
-    response = request(payload, config, timeout_ms=timeout_ms)
-    if response.get("route") != expected_route:
-        raise RerankerServiceUnavailable("backend_contract_error")
-    if response.get("decision_fingerprint") != expected_fingerprint:
-        raise RerankerServiceUnavailable("backend_contract_error")
-    _validate_judge_response(kind, response)
-    return response
-
-
-def _finite_unit(value: object) -> bool:
-    return (
-        isinstance(value, int | float)
-        and not isinstance(value, bool)
-        and math.isfinite(float(value))
-        and 0.0 <= float(value) <= 1.0
-    )
-
-
-def _finite_score(value: object) -> bool:
-    return (
-        isinstance(value, int | float)
-        and not isinstance(value, bool)
-        and math.isfinite(float(value))
-    )
-
-
-def _validate_judge_response(kind: str, response: Mapping[str, Any]) -> None:
-    if kind == JUDGE_ANSWER_AXES:
-        scores = response.get("scores")
-        if (
-            not isinstance(scores, Mapping)
-            or set(scores) != set(ANSWER_AXES)
-            or not all(_finite_unit(scores[axis]) for axis in ANSWER_AXES)
-        ):
-            raise RerankerServiceUnavailable("invalid_response")
-        return
-    if kind == JUDGE_CERTIFICATE:
-        verdicts = response.get("verdicts")
-        if not isinstance(verdicts, list) or not 1 <= len(verdicts) <= 2:
-            raise RerankerServiceUnavailable("invalid_response")
-        page_ids: set[str] = set()
-        for verdict in verdicts:
-            if (
-                not isinstance(verdict, Mapping)
-                or set(verdict) != {"page_id", "decision", "confidence", "reason"}
-                or not isinstance(verdict.get("page_id"), str)
-                or not verdict["page_id"]
-                or verdict["page_id"] in page_ids
-                or verdict.get("decision") not in {"pass", "reject", "uncertain"}
-                or not _finite_unit(verdict.get("confidence"))
-                or not isinstance(verdict.get("reason"), str)
-                or not 0 < len(verdict["reason"]) <= 120
-            ):
-                raise RerankerServiceUnavailable("invalid_response")
-            page_ids.add(verdict["page_id"])
-        return
-    if kind == JUDGE_UTILITY:
-        # Pointwise: one answer, one logit P(answer is grounded and answers).
-        if not _finite_score(response.get("logit")):
-            raise RerankerServiceUnavailable("invalid_response")
-        return
-    raise RerankerServiceUnavailable("invalid_response")
 
 
 def rerank(

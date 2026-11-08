@@ -10,8 +10,6 @@ from typing import Any, Protocol
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.raw.record_raw import record_raw
 
-_RAW_KEYWORD_FORBIDDEN_CHARS = frozenset(",[]:#{}\n\r")
-
 
 class TranscriptSliceProtocol(Protocol):
     """The state fields shared by both host-specific transcript slices."""
@@ -21,77 +19,6 @@ class TranscriptSliceProtocol(Protocol):
     session_id: str | None
     cwd: str | None
     has_file_changes: bool
-
-
-def trim_middle(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    if max_chars < 1_000:
-        return text[-max_chars:]
-    head_len = max_chars // 5
-    tail_len = max_chars - head_len
-    return (
-        text[:head_len]
-        + "\n\n[... transcript trimmed for memory-writer budget ...]\n\n"
-        + text[-tail_len:]
-    )
-
-
-def extract_json_object(output: str) -> Any:
-    text = output.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if len(lines) >= 2 and lines[0].startswith("```") and lines[-1].startswith(
-            "```"
-        ):
-            text = "\n".join(lines[1:-1]).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        return None
-    try:
-        return json.loads(text[start : end + 1])
-    except json.JSONDecodeError:
-        return None
-
-
-def validate_raw_keyword(keyword: str) -> bool:
-    if not keyword:
-        return False
-    for character in keyword:
-        if character in _RAW_KEYWORD_FORBIDDEN_CHARS:
-            return False
-        if ord(character) < 0x20:
-            return False
-    return True
-
-
-def sanitize_keywords(
-    values: list[Any], *, limit: int = 20
-) -> tuple[list[str], list[str]]:
-    accepted: list[str] = []
-    rejected: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        if not isinstance(value, str):
-            rejected.append(repr(value))
-            continue
-        keyword = value.strip()
-        if not validate_raw_keyword(keyword):
-            rejected.append(value)
-            continue
-        key = keyword.casefold()
-        if key in seen:
-            continue
-        accepted.append(keyword)
-        seen.add(key)
-        if len(accepted) >= limit:
-            break
-    return accepted, rejected
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -116,19 +43,6 @@ def saved_line_for(state: dict[str, Any], session_file: Path) -> int:
         return 0
     value = entry.get("last_saved_line", 0)
     return value if isinstance(value, int) and value > 0 else 0
-
-
-def last_saved_at(state: dict[str, Any], session_file: Path) -> datetime | None:
-    entry = state.get("files", {}).get(str(session_file))
-    if not isinstance(entry, dict):
-        return None
-    timestamp = entry.get("last_saved_at")
-    if not isinstance(timestamp, str):
-        return None
-    try:
-        return datetime.fromisoformat(timestamp)
-    except (ValueError, TypeError):
-        return None
 
 
 def should_process(

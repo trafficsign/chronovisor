@@ -12,11 +12,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 RUNTIME_COMMAND = 'chronovisor_exec_uvx --python "$CHRONOVISOR_PYTHON"'
 UVX_WRAPPERS = (
-    "chronovisor-dashboard",
-    "chronovisor-ingest-drain",
-    "chronovisor-library-evidence",
-    "chronovisor-librarian-review",
-    "chronovisor-recall-local-daily",
+    "chronovisor-hook",
+    "chronovisor-mcp",
+    "chronovisor-background-jobs",
+    "chronovisor-session-sweeper",
     "chronovisor-reranker-service",
     "chronovisor-semantic-service",
 )
@@ -71,14 +70,20 @@ def test_shared_runtime_resolver_uses_safe_portable_defaults() -> None:
     assert "/Users/" not in resolver
 
 
-@pytest.mark.parametrize("wrapper,revision,refresh", [
-    ("chronovisor-dashboard", "", True),
-    ("chronovisor-recall-local-daily", "", True),
-    ("chronovisor-recall-local-daily", "@main", True),
-    ("chronovisor-recall-local-daily", "@" + "a" * 40, False),
-])
+@pytest.mark.parametrize(
+    "wrapper,revision,refresh",
+    [
+        ("chronovisor-mcp", "", True),
+        ("chronovisor-hook", "", True),
+        ("chronovisor-hook", "@main", True),
+        ("chronovisor-hook", "@" + "a" * 40, True),
+    ],
+)
 def test_shared_runtime_resolver_reads_configured_source(
-    tmp_path: Path, wrapper: str, revision: str, refresh: bool,
+    tmp_path: Path,
+    wrapper: str,
+    revision: str,
+    refresh: bool,
 ) -> None:
     home = tmp_path / "home"
     root = home / ".chronovisor with spaces"
@@ -96,7 +101,11 @@ def test_shared_runtime_resolver_reads_configured_source(
     )
     uvx.chmod(0o755)
     constraints = root / f"runtime/dependency-constraints/{wrapper}.txt"
-    for use_constraints, override in ((False, None), (True, None), (True, "custom.txt")):
+    for use_constraints, override in (
+        (False, None),
+        (True, None),
+        (True, "custom.txt"),
+    ):
         if use_constraints:
             constraints.parent.mkdir(parents=True, exist_ok=True)
             constraints.write_text("anyio==4.14.2\n", encoding="utf-8")
@@ -129,13 +138,6 @@ def test_shared_runtime_resolver_reads_configured_source(
         assert result["constraints"] == override
 
 
-def test_library_evidence_invokes_canonical_module_directly() -> None:
-    wrapper = _text("chronovisor-library-evidence")
-
-    assert "python -m chronovisor.lab.classification_library_pilot" in wrapper
-    assert "chronovisor-lab classification-library-pilot" not in wrapper
-
-
 def test_shared_runtime_rejects_other_versions_and_disabled_gil(tmp_path: Path) -> None:
     python = tmp_path / "python"
     for version, gil_enabled in (((3, 13), True), ((3, 14), False)):
@@ -148,7 +150,7 @@ def test_shared_runtime_rejects_other_versions_and_disabled_gil(tmp_path: Path) 
         )
         python.chmod(0o755)
         result = subprocess.run(
-            [str(SCRIPTS / "chronovisor-dashboard")],
+            [str(SCRIPTS / "chronovisor-mcp")],
             capture_output=True,
             text=True,
             env={
@@ -169,20 +171,3 @@ def test_uvx_wrappers_remain_executable() -> None:
 
     for name in UVX_WRAPPERS:
         assert (SCRIPTS / name).stat().st_mode & executable_bits == executable_bits
-
-
-def test_searxng_uses_resolved_python_314_and_annif_keeps_supported_runtime() -> None:
-    assert "chronovisor-searxng" not in UVX_WRAPPERS
-    assert RUNTIME_COMMAND not in _text("chronovisor-searxng")
-    installer = _text("install-searxng")
-    assert '. "$SCRIPT_DIR/chronovisor-runtime-env"' in installer
-    assert '--python "$CHRONOVISOR_PYTHON" "$VENV"' in installer
-    assert 'readonly VENV="$RUNTIME_ROOT/.venv-3.14"' in installer
-    assert 'readonly VENV="$RUNTIME_ROOT/.venv-3.14"' in _text("chronovisor-searxng")
-    assert "dependency-constraints/chronovisor-searxng.txt" in installer
-
-    annif = (ROOT / "src/chronovisor/lab/classification_annif.py").read_text(
-        encoding="utf-8"
-    )
-    assert 'ANNIF_PYTHON = "3.13"' in annif
-    assert 'ANNIF_PYTHON = "3.14"' not in annif

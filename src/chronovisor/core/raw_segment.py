@@ -110,7 +110,11 @@ class RawSegmentCommit:
     def to_dict(self) -> dict[str, Any]:
         # Normal receipts are scalar; preserve asdict's deep copy for unusual callers.
         value = {name: getattr(self, name) for name in self.__dataclass_fields__}
-        return value if all(type(item) in (str, int, type(None)) for item in value.values()) else asdict(self)
+        return (
+            value
+            if all(type(item) in (str, int, type(None)) for item in value.values())
+            else asdict(self)
+        )
 
 
 @dataclass(frozen=True)
@@ -373,7 +377,7 @@ def find_commit(raw_dir: Path, raw_id: str) -> RawSegmentReceipt | None:
     for path in sorted(_manifest_candidates(raw_dir, prefix=prefix)):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except OSError, json.JSONDecodeError:
             continue
         if not isinstance(payload, dict) or not schema_matches(
             payload.get("schema"), MANIFEST_SCHEMA
@@ -410,24 +414,21 @@ def append_capture(
 ) -> RawSegmentReceipt:
     """Append one exact source interval and publish its durable commit receipt."""
 
-    from chronovisor.core.store import okf_runtime_operation
-
-    with okf_runtime_operation(raw_dir.parent):
-        return _append_capture_operation(
-            raw_dir=raw_dir,
-            raw_id=raw_id,
-            idempotency_key=idempotency_key,
-            host=host,
-            session_key=session_key,
-            session_id=session_id,
-            source_file=source_file,
-            after_line=after_line,
-            until_line=until_line,
-            source_bytes=source_bytes,
-            record_count=record_count,
-            now=now,
-            max_part_bytes=max_part_bytes,
-        )
+    return _append_capture_operation(
+        raw_dir=raw_dir,
+        raw_id=raw_id,
+        idempotency_key=idempotency_key,
+        host=host,
+        session_key=session_key,
+        session_id=session_id,
+        source_file=source_file,
+        after_line=after_line,
+        until_line=until_line,
+        source_bytes=source_bytes,
+        record_count=record_count,
+        now=now,
+        max_part_bytes=max_part_bytes,
+    )
 
 
 def _append_capture_operation(
@@ -664,8 +665,6 @@ def seal_segment(
 ) -> dict[str, Any]:
     """Seal one open segment without changing any logical Raw identity."""
 
-    from chronovisor.core.store import okf_runtime_operation
-
     if len(data_path.parents) < 5:
         raise ValueError("segment path must be below raw/YYYY/MM/DD")
     raw_dir = data_path.parents[3]
@@ -676,12 +675,11 @@ def seal_segment(
         not part.isdigit() for part in relative.parts[:3]
     ):
         raise ValueError("segment path must be below raw/YYYY/MM/DD")
-    with okf_runtime_operation(raw_dir.parent):
-        return _seal_segment_locked(
-            data_path,
-            compression_level=compression_level,
-            remove_open=remove_open,
-        )
+    return _seal_segment_locked(
+        data_path,
+        compression_level=compression_level,
+        remove_open=remove_open,
+    )
 
 
 def _seal_segment_locked(

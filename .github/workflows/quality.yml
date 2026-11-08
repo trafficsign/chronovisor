@@ -28,15 +28,6 @@ jobs:
       - run: uv run --frozen ruff check --no-cache src scripts tests
       - run: uv run --frozen mypy
       - run: uv run --frozen lint-imports --no-cache
-      - name: Architecture and refactor contracts
-        run: |
-          uv run --frozen python scripts/architecture_baseline.py \
-            --check docs/refactoring/architecture-baseline.json
-          uv run --frozen pytest -q \
-            tests/test_architecture_baseline.py \
-            tests/test_large_function_policy.py \
-            tests/test_module_layout.py \
-            tests/test_refactor_inventory.py
       - run: uv run --frozen python -m compileall -q src scripts
       - name: Check changed-file whitespace
         env:

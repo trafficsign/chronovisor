@@ -20,7 +20,7 @@ from collections.abc import Iterable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from chronovisor.core.canonical_document import (
     CanonicalDocumentError,
@@ -28,20 +28,12 @@ from chronovisor.core.canonical_document import (
     resolve_internal_markdown_links,
     validate_canonical_document,
 )
-from chronovisor.core.durable_state import (
-    okf_writer_lease_is_exclusive,
-    open_directory_nofollow,
-)
 from chronovisor.core.link_fix import atomic_write
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     PAGES_DIR,
     SYSTEM_DIR,
-    okf_runtime_operation,
 )
-
-if TYPE_CHECKING:
-    from chronovisor.core.okf_cutover import OKFRebuildGate
 
 SCHEMA_VERSION = 12  # canonical YAML, exact link identities, and lifecycle eligibility
 INDEX_DIR = CHRONOVISOR_ROOT / ".index"
@@ -112,7 +104,7 @@ def contained_file(path: Path, root: Path) -> Path | None:
         root_resolved = root.resolve(strict=True)
         resolved = path.resolve(strict=True)
         resolved.relative_to(root_resolved)
-    except (OSError, RuntimeError, ValueError):
+    except OSError, RuntimeError, ValueError:
         return None
     # The final layout is direct: reject leaf and descendant symlinks, including
     # links that currently happen to resolve back inside the namespace.
@@ -174,7 +166,7 @@ def canonical_document_path(
             path=relative_path,
             require_stable=require_stable,
         )
-    except (CanonicalDocumentError, OSError, RuntimeError, ValueError):
+    except CanonicalDocumentError, OSError, RuntimeError, ValueError:
         return None
     return resolved
 
@@ -223,9 +215,7 @@ def canonical_document_paths(
                 if resolved is not None:
                     paths.append(resolved)
                 elif strict:
-                    raise CanonicalDocumentError(
-                        f"invalid canonical document: {path}"
-                    )
+                    raise CanonicalDocumentError(f"invalid canonical document: {path}")
         except (OSError, RuntimeError) as exc:
             if strict:
                 raise CanonicalDocumentError(
@@ -262,7 +252,11 @@ def stable_indexed_document_path(
         ),
         require_stable=True,
     )
-    return resolved if resolved is not None and resolved == Path(metadata["path"]) else None
+    return (
+        resolved
+        if resolved is not None and resolved == Path(metadata["path"])
+        else None
+    )
 
 
 def canonical_document_path_for_id(
@@ -282,7 +276,7 @@ def canonical_document_path_for_id(
         return None
     try:
         page_candidates = list(pages_dir.rglob(f"{page_id}.md"))
-    except (OSError, RuntimeError):
+    except OSError, RuntimeError:
         page_candidates = []
     candidates: list[tuple[Path, Path, Namespace, frozenset[str]]] = [
         *(
@@ -408,9 +402,7 @@ class PageEntry:
             ),
             classification_status=(
                 d.get("classification_status", "unclassified")
-                if isinstance(
-                    d.get("classification_status", "unclassified"), str
-                )
+                if isinstance(d.get("classification_status", "unclassified"), str)
                 else "unclassified"
             ),
             outlinks=list(d.get("outlinks", [])),
@@ -538,7 +530,7 @@ class IndexStore:
             # UTF-8 decode for these multi-megabyte snapshots.
             pages_doc = json.loads(self._pages_index_file.read_bytes())
             backlinks_doc = json.loads(self._backlinks_index_file.read_bytes())
-        except (OSError, UnicodeError, json.JSONDecodeError):
+        except OSError, UnicodeError, json.JSONDecodeError:
             return False
         if not isinstance(pages_doc, dict) or not isinstance(backlinks_doc, dict):
             return False
@@ -664,7 +656,7 @@ class IndexStore:
                 ):
                     return False
                 backlinks[target] = list(refs)
-        except (KeyError, TypeError, ValueError, AttributeError):
+        except KeyError, TypeError, ValueError, AttributeError:
             return False
         self._entries = entries
         self._rebuild_canonical_entries()
@@ -812,9 +804,7 @@ class IndexStore:
                 continue
             for path in sorted(root.rglob("*.md")):
                 reserved = (
-                    SYSTEM_RESERVED_FILENAMES
-                    if is_system
-                    else PAGE_RESERVED_FILENAMES
+                    SYSTEM_RESERVED_FILENAMES if is_system else PAGE_RESERVED_FILENAMES
                 )
                 if path.name in reserved:
                     continue
@@ -836,34 +826,15 @@ class IndexStore:
         Cheap when nothing changed (one stat per page, no parsing).
         Persists only when entries or backlinks actually changed.
         """
-        with okf_runtime_operation(self._root):
-            self._refresh_locked()
-
-    def _refresh_under_external_gate(self, gate: OKFRebuildGate) -> None:
-        """Refresh while an offline coordinator holds the exclusive root gate."""
-
-        source_root = gate.source_root.expanduser().absolute()
-        if self._root.expanduser().absolute() != source_root:
-            raise RuntimeError("OKF rebuild gate root does not match IndexStore")
-        allowed_index_dirs = {
-            source_root / ".index",
-            gate.workspace.expanduser().absolute() / "derived-rebuild" / "index",
-        }
-        if self._index_dir.expanduser().absolute() not in allowed_index_dirs:
-            raise RuntimeError("IndexStore projection is outside the OKF rebuild gate")
-        if not okf_writer_lease_is_exclusive(source_root):
-            raise RuntimeError("OKF rebuild gate is not active")
-        with open_directory_nofollow(self._index_dir):
-            pass
         self._refresh_locked()
 
     def _refresh_locked(self) -> None:
-        from chronovisor.core.page_mutation import _reentrant_exclusive_lock
+        from chronovisor.core.durable_state import reentrant_exclusive_lock
 
         publication_lock = (
             nullcontext()
             if os.environ.get("CHRONOVISOR_READ_ONLY") == "1"
-            else _reentrant_exclusive_lock(self._index_dir / "writer.lock")
+            else reentrant_exclusive_lock(self._index_dir / "writer.lock")
         )
         with publication_lock, self._lock:
             if not self._loaded:
@@ -1100,14 +1071,14 @@ class IndexStore:
                 f"page ids cannot be removed and upserted together: {sorted(overlap)}"
             )
 
-        from chronovisor.core.page_mutation import _reentrant_exclusive_lock
+        from chronovisor.core.durable_state import reentrant_exclusive_lock
 
         publication_lock = (
             nullcontext()
             if os.environ.get("CHRONOVISOR_READ_ONLY") == "1"
-            else _reentrant_exclusive_lock(self._index_dir / "writer.lock")
+            else reentrant_exclusive_lock(self._index_dir / "writer.lock")
         )
-        with okf_runtime_operation(self._root), publication_lock, self._lock:
+        with publication_lock, self._lock:
             # Another writer may have published since ensure_loaded(). Merge
             # this receipt into that snapshot rather than dropping its changes.
             if self._cache_files_signature() != self._cache_signature:
@@ -1238,7 +1209,7 @@ class IndexStore:
                 source_namespace=namespace,
                 source_path=relative_path,
             )
-        except (CanonicalDocumentError, OSError, RuntimeError, ValueError):
+        except CanonicalDocumentError, OSError, RuntimeError, ValueError:
             return None
         fm = document.metadata
         title_value = fm.get("title")
@@ -1287,9 +1258,7 @@ class IndexStore:
             ),
             classification_status=(
                 fm.get("classification_status", "unclassified")
-                if isinstance(
-                    fm.get("classification_status", "unclassified"), str
-                )
+                if isinstance(fm.get("classification_status", "unclassified"), str)
                 else "unclassified"
             ),
             outlinks=outlinks,
@@ -1334,7 +1303,9 @@ class IndexStore:
                     continue
                 if target_entry is not None and target_entry.status != "stable":
                     continue
-                target_pid = target_entry.page_id if target_entry is not None else target
+                target_pid = (
+                    target_entry.page_id if target_entry is not None else target
+                )
                 src_set = seen.setdefault(target_pid, set())
                 if source_pid in src_set:
                     continue
@@ -1440,8 +1411,7 @@ class IndexStore:
                     f"{PurePosixPath(entry.relative_path).with_suffix('').as_posix()}"
                 )
                 for entry in self._entries.values()
-                if entry.status == "stable"
-                and (include_system or not entry.is_system)
+                if entry.status == "stable" and (include_system or not entry.is_system)
             }
 
     def raw_keywords(self, page_id: str) -> list[str]:
@@ -1477,9 +1447,7 @@ class IndexStore:
         with self._lock:
             seen: set[str] = set()
             for entry in self._entries.values():
-                if entry.status != "stable" or (
-                    not include_system and entry.is_system
-                ):
+                if entry.status != "stable" or (not include_system and entry.is_system):
                     continue
                 seen.update(entry.tags)
             return sorted(seen)
@@ -1517,8 +1485,7 @@ class IndexStore:
             items = [
                 entry
                 for entry in self._entries.values()
-                if entry.status == "stable"
-                and (include_system or not entry.is_system)
+                if entry.status == "stable" and (include_system or not entry.is_system)
             ]
             items.sort(key=lambda e: e.mtime_ns, reverse=True)
             return [

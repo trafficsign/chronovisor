@@ -1,10 +1,9 @@
 """Wiki link 抽出・正規化・fuzzy match のユーティリティ。
 
-server.py / lint.py / scripts/fix_broken_links.py から共通で利用される。
+Canonical documents and capture state share these helpers.
 """
 
 import contextlib
-import difflib
 import os
 import re
 import tempfile
@@ -21,8 +20,6 @@ WIKI_LINK_RE = re.compile(r"\[\[([^\[\]\n]+?)\]\]")
 _FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
 # inline code (`...`)
 _INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
-
-FUZZY_THRESHOLD = 0.88
 
 
 def normalize_link_target(link: str) -> str:
@@ -72,28 +69,6 @@ def fenced_code_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
-def protected_spans(text: str) -> list[tuple[int, int]]:
-    """Return frontmatter / fenced-code / inline-code spans to leave untouched."""
-    spans: list[tuple[int, int]] = []
-    _meta, body = parse_frontmatter(text)
-    if body != text:
-        spans.append((0, len(text) - len(body)))
-    spans.extend(fenced_code_spans(text))
-    spans.extend(m.span() for m in _INLINE_CODE_RE.finditer(text))
-    spans.sort()
-    return spans
-
-
-def position_in_spans(pos: int, spans: list[tuple[int, int]]) -> bool:
-    """True if ``pos`` lies within one of the sorted spans."""
-    for start, end in spans:
-        if pos < start:
-            return False
-        if pos < end:
-            return True
-    return False
-
-
 def extract_wiki_links(text: str, strip: bool = True) -> list[str]:
     """``[[...]]`` の中身をそのまま抽出 (``id|label`` / ``id#sec`` 形式を含む)。
 
@@ -103,44 +78,6 @@ def extract_wiki_links(text: str, strip: bool = True) -> list[str]:
     """
     body = strip_fences_and_frontmatter(text) if strip else text
     return WIKI_LINK_RE.findall(body)
-
-
-def extract_targets(text: str, strip: bool = True) -> list[str]:
-    """``[[...]]`` を normalize し、target page_id のリストで返す。
-
-    重複は保持 (一ページ内での複数参照をカウント可能にするため)。
-    """
-    return [normalize_link_target(link) for link in extract_wiki_links(text, strip=strip)]
-
-
-def find_fuzzy_match(
-    target: str, all_ids: set[str], threshold: float = FUZZY_THRESHOLD
-) -> str | None:
-    """target page_id に近い実在の page_id を返す (prefix-aware)。
-
-    優先順位:
-    1. target + "-..." で candidate にマッチ (target が省略形、candidate が拡張版)
-    2. candidate + "-..." で target にマッチ (逆)
-    3. strict ratio (>= threshold) でマッチ
-    """
-    candidates = difflib.get_close_matches(target, all_ids, n=5, cutoff=0.6)
-    if not candidates:
-        return None
-
-    # Case 1: target ⊂ candidate (e.g., "lazarus" → "lazarus-refactor")
-    for c in candidates:
-        if c == target + "-" or c.startswith(target + "-"):
-            return c
-    # Case 2: candidate ⊂ target (e.g., "lazarus-refactor" → "lazarus")
-    for c in candidates:
-        if target == c + "-" or target.startswith(c + "-"):
-            return c
-    # Case 3: strict ratio
-    top = candidates[0]
-    ratio = difflib.SequenceMatcher(None, target, top).ratio()
-    if ratio >= threshold:
-        return top
-    return None
 
 
 def atomic_write(path: Path, content: str) -> None:

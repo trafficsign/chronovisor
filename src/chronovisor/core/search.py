@@ -1,28 +1,15 @@
 """Core search engine with BM25 and semantic RRF fusion."""
 
 import contextlib
-import hashlib
-import heapq
-import json
-import math
 import os
 import re
 import threading
-from collections import deque
-from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
 from chronovisor.core.lexical_index import LexicalIndex
-from chronovisor.core.negative_feedback import apply_penalties, penalties_for_query
-from chronovisor.core.pipeline import (
-    PipelineDependencies,
-    production_pipeline_config,
-    run_search_pipeline,
-)
 from chronovisor.core.runtime_config import (
-    load_negative_feedback_config,
     load_search_embedding_config,
 )
 from chronovisor.core.search_types import ScoredPage, merge_evidence
@@ -113,7 +100,7 @@ def _folder_from_meta(meta: dict[str, Any]) -> str:
         parent = Path(meta["path"]).parent
         if parent != PAGES_DIR:
             return parent.name
-    except (KeyError, TypeError):
+    except KeyError, TypeError:
         pass
     return ""
 
@@ -129,14 +116,6 @@ def _meta_sensitivity(meta: dict[str, Any], *, folder: str = "") -> str:
 def _refresh_store_for_search(store: object) -> None:
     """Share a short read snapshot while preserving injected-store compatibility."""
 
-    if getattr(_GRAPH_QUERY, "read_only_snapshot", False):
-        load_existing = getattr(store, "load_existing", None)
-        if callable(load_existing):
-            if not load_existing():
-                from chronovisor.core.semantic_client import SemanticServiceUnavailable
-
-                raise SemanticServiceUnavailable("metadata snapshot unavailable")
-            return
     refresh_if_stale = getattr(store, "refresh_if_stale", None)
     if callable(refresh_if_stale):
         refresh_if_stale()
@@ -190,35 +169,6 @@ def get_bm25() -> BM25Index:
             if _BM25_SINGLETON is None:
                 _BM25_SINGLETON = BM25Index()
     return _BM25_SINGLETON
-
-
-def search_existing_bm25(query: str, *, top_n: int = 20) -> list[ScoredPage]:
-    """Read the existing lexical projection without refresh, build, or writes."""
-
-    return apply_filters(get_bm25().query_existing(query, top_n=top_n))
-
-
-def search_existing_anchors(query: str, *, top_n: int = 20) -> list[ScoredPage]:
-    """Read exact-anchor matches without refreshing, building, or writing."""
-
-    return apply_filters(get_bm25().anchor_query_existing(query, top_n=top_n))
-
-
-def search_existing_lexical(
-    query: str, *, top_n: int = 20
-) -> tuple[list[ScoredPage], list[ScoredPage]]:
-    """Return read-only ``(anchor, BM25)`` candidates from one projection."""
-
-    index = get_bm25()
-    anchors = apply_filters(index.anchor_query_existing(query, top_n=top_n))
-    generation = getattr(index, "snapshot_generation", None)
-    lexical = apply_filters(index.query_existing(query, top_n=top_n))
-    consistent = generation == getattr(index, "snapshot_generation", None) and getattr(index, "snapshot_available", True)
-    _SEARCH_TRACE.value = {
-        "snapshot_generation": str(getattr(index, "snapshot_generation", "") or ""),
-        "snapshot_error": str(getattr(index, "snapshot_error", "") or ("" if consistent else "snapshot_generation_changed")),
-    }
-    return (anchors, lexical) if consistent else ([], [])
 
 
 # Semantic document projection shared by the immutable service index.
@@ -380,157 +330,20 @@ def semantic_search(
     )
 
 
-def semantic_verify(
-    query: str,
-    page_ids: list[str],
-    *,
-    timeout_ms: int | None = None,
-) -> list[ScoredPage]:
-    """Run full-dimensional verification for graph-generated candidates."""
-
-    config = load_search_embedding_config()
-    if not page_ids or not config.enabled:
-        return []
-    from chronovisor.core import semantic_client
-
-    if not semantic_client.selected_for_rollout(query, config):
-        return []
-    rows = semantic_client.verify(
-        query,
-        page_ids,
-        config=config,
-        timeout_ms=timeout_ms,
-    )
-    return [page for page in rows if float(page.score) >= float(config.min_top_score)]
-
-
-def context_seed_results(query: str, *, limit: int = 4) -> list[ScoredPage]:
-    """Use recalled exposure as a weak independent entrance."""
-
-    try:
-        from chronovisor.core.index_store import get_store
-        from chronovisor.core.prefetch import prefetch_page_ids
-
-        page_ids = prefetch_page_ids(
-            host="",
-            cwd="",
-            queries=[query],
-            prompt=query,
-            limit=max(1, min(8, limit)),
-            positive_weight=0,
-            exposure_weight=1,
-        )
-        if not page_ids:
-            return []
-        store = get_store()
-        _refresh_store_for_search(store)
-    except Exception:
-        return []
-    out: list[ScoredPage] = []
-    for rank, page_id in enumerate(page_ids):
-        meta = store.meta(page_id)
-        if meta is None or _normalize_lifecycle_status(meta.get("status")) != "stable":
-            continue
-        folder = _folder_from_meta(meta)
-        out.append(
-            ScoredPage(
-                page_id=page_id,
-                title=str(meta.get("title") or page_id),
-                folder=folder,
-                updated=str(meta.get("updated") or ""),
-                score=1.0 / (1.0 + rank),
-                status=_normalize_lifecycle_status(meta.get("status")),
-                superseded_by=(
-                    str(meta.get("superseded_by") or "")
-                    if isinstance(meta.get("superseded_by"), str)
-                    else ""
-                ),
-                page_type=_meta_page_type(meta, folder=folder),
-                sensitivity=_meta_sensitivity(meta, folder=folder),
-            )
-        )
-    return out
-
-
 # ---------------------------------------------------------------------------
 # RRF Fusion + Filter + Sort
 # ---------------------------------------------------------------------------
 
 DEFAULT_FUSION_WEIGHTS: dict[str, float] = {
-    "anchor": 0.9,
     "bm25": 1.0,
     "semantic": 0.6,
-    "graph": 0.3,
-    "context": 0.25,
-    "usage_prior": 0.0,
     "bm25_score_bonus": 0.005,
     "bm25_rank_bonus": 0.006,
     "bm25_rank_decay": 0.006,
     "semantic_min_top_score": 0.45,
     "semantic_min_margin": 0.002,
     "semantic_low_confidence_weight": 0.25,
-    "usage_prior_decay": 0.98,
-    "usage_prior_cap": 3.0,
-    "retention_prior": 0.015,
 }
-
-ACTIVE_SEARCH_POLICY_FILE = CHRONOVISOR_ROOT / "recall" / "search-policy.json"
-
-
-def load_active_fusion_weights(path: Path | None = None) -> dict[str, float]:
-    """Load the validated search policy, falling back safely to defaults.
-
-    The artifact is deliberately separate from user configuration: evaluation
-    can atomically replace it after holdout validation, while malformed or
-    stale artifacts can never make production search unusable.
-    """
-    policy_path = path or ACTIVE_SEARCH_POLICY_FILE
-    try:
-        payload = json.loads(policy_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return dict(DEFAULT_FUSION_WEIGHTS)
-    if (
-        not isinstance(payload, dict)
-        or payload.get("version") != 1
-        or payload.get("source") != "search_eval.self_tune"
-        or not isinstance(payload.get("holdout"), dict)
-    ):
-        return dict(DEFAULT_FUSION_WEIGHTS)
-    raw = payload.get("weights")
-    if not isinstance(raw, dict) or set(raw) != set(DEFAULT_FUSION_WEIGHTS):
-        return dict(DEFAULT_FUSION_WEIGHTS)
-    weights: dict[str, float] = {}
-    for key, value in raw.items():
-        if isinstance(value, bool):
-            return dict(DEFAULT_FUSION_WEIGHTS)
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError):
-            return dict(DEFAULT_FUSION_WEIGHTS)
-        if not math.isfinite(numeric) or numeric < 0:
-            return dict(DEFAULT_FUSION_WEIGHTS)
-        weights[key] = numeric
-    if not any(
-        weights[channel] > 0
-        for channel in (
-            "anchor",
-            "bm25",
-            "semantic",
-            "graph",
-            "context",
-            "usage_prior",
-        )
-    ):
-        return dict(DEFAULT_FUSION_WEIGHTS)
-    for bounded in (
-        "semantic_min_top_score",
-        "semantic_min_margin",
-        "semantic_low_confidence_weight",
-        "usage_prior_decay",
-    ):
-        if weights[bounded] > 1:
-            return dict(DEFAULT_FUSION_WEIGHTS)
-    return weights
 
 
 def _semantic_reliability_multiplier(
@@ -554,13 +367,8 @@ def _semantic_reliability_multiplier(
 def fuse_results(
     bm25_results: list[ScoredPage],
     semantic_results: list[ScoredPage],
-    graph_results: list[ScoredPage] | None = None,
-    usage_results: list[ScoredPage] | None = None,
     k: int = 60,
     weights: dict[str, float] | None = None,
-    *,
-    anchor_results: list[ScoredPage] | None = None,
-    context_results: list[ScoredPage] | None = None,
 ) -> list[ScoredPage]:
     """Weighted Reciprocal Rank Fusion of result lists."""
     scores: dict[str, float] = {}
@@ -601,26 +409,8 @@ def fuse_results(
                     evidence = tuple(e for e in evidence if e.page_uid == previous.uid)
                 meta[page.page_id] = replace(previous, evidence=evidence)
 
-    add_results(anchor_results or [], "anchor")
     add_results(bm25_results, "bm25")
     add_results(semantic_results, "semantic")
-    add_results(graph_results or [], "graph")
-    add_results(context_results or [], "context")
-    add_results(usage_results or [], "usage_prior")
-
-    retention_weight = max(0.0, float(weights.get("retention_prior", 0.0)))
-    if retention_weight:
-        try:
-            from chronovisor.core.retention import retention_score
-
-            for page_id in list(scores):
-                prior = retention_score(page_id)
-                if prior > 0:
-                    scores[page_id] = scores.get(page_id, 0.0) + (
-                        retention_weight * prior
-                    )
-        except Exception:
-            pass
 
     fused = []
     for pid, score in scores.items():
@@ -629,305 +419,6 @@ def fuse_results(
 
     fused.sort(key=lambda x: x.score, reverse=True)
     return fused
-
-
-_GRAPH_TRACE = threading.local()
-_GRAPH_QUERY = threading.local()
-_GRAPH_ROLLOUT = threading.local()
-
-
-def graph_expansion_trace() -> dict[str, dict[str, object]]:
-    return dict(getattr(_GRAPH_TRACE, "paths", {}))
-
-
-@contextlib.contextmanager
-def graph_query_context(query: str, *, rollout_key: str = "") -> Iterator[None]:
-    previous_query = getattr(_GRAPH_QUERY, "value", "")
-    previous_rollout = getattr(_GRAPH_ROLLOUT, "value", "")
-    _GRAPH_QUERY.value = query
-    _GRAPH_ROLLOUT.value = rollout_key
-    try:
-        yield
-    finally:
-        _GRAPH_QUERY.value = previous_query
-        _GRAPH_ROLLOUT.value = previous_rollout
-
-
-def graph_expand_results(
-    results: list[ScoredPage], *, decay: float = 0.5, limit: int = 50
-) -> list[ScoredPage]:
-    """Bounded two-hop associative spreading from independently found seeds."""
-
-    _GRAPH_TRACE.paths = {}
-    if decay <= 0 or not results:
-        return []
-    from chronovisor.core.index_store import get_store
-    from chronovisor.core.knowledge_graph_retrieval import (
-        classify_query,
-        community_candidates,
-    )
-
-    store = get_store()
-    _refresh_store_for_search(store)
-    seeds = results[:20]
-    seed_ids = {result.page_id for result in seeds}
-    output_limit = min(max(1, limit), 50)
-    best_activation: dict[str, float] = {
-        result.page_id: 1.0 / (1.0 + (rank * 0.25)) for rank, result in enumerate(seeds)
-    }
-    frontier: list[tuple[float, int, str, tuple[str, ...], str]] = []
-    for _rank, result in enumerate(seeds):
-        activation = best_activation[result.page_id]
-        heapq.heappush(
-            frontier,
-            (-activation, 0, result.page_id, (result.page_id,), "seed"),
-        )
-
-    expanded: dict[str, ScoredPage] = {}
-    trace: dict[str, dict[str, Any]] = {}
-    visited_states = 0
-    from chronovisor.core.graph_edges import typed_neighbors
-
-    query = str(getattr(_GRAPH_QUERY, "value", ""))
-    rollout_key = str(getattr(_GRAPH_ROLLOUT, "value", ""))
-    query_plan = classify_query(query)
-
-    if query_plan == "global":
-        for candidate in community_candidates(
-            [result.page_id for result in seeds],
-            query=query,
-            rollout_key=rollout_key,
-            limit=output_limit,
-        ):
-            if candidate.page_id in seed_ids or len(expanded) >= output_limit:
-                continue
-            meta = store.meta(candidate.page_id)
-            if (
-                meta is None
-                or _normalize_lifecycle_status(meta.get("status")) != "stable"
-            ):
-                continue
-            folder = _folder_from_meta(meta)
-            expanded[candidate.page_id] = ScoredPage(
-                page_id=candidate.page_id,
-                title=str(meta.get("title") or candidate.page_id),
-                folder=folder,
-                updated=str(meta.get("updated") or ""),
-                score=candidate.score * decay,
-                status=_normalize_lifecycle_status(meta.get("status")),
-                superseded_by=(
-                    str(meta.get("superseded_by") or "")
-                    if isinstance(meta.get("superseded_by"), str)
-                    else ""
-                ),
-                page_type=_meta_page_type(meta, folder=folder),
-                sensitivity=_meta_sensitivity(meta, folder=folder),
-            )
-            trace[candidate.page_id] = {
-                "path": [candidate.page_id],
-                "path_id": "path_"
-                + hashlib.sha256(
-                    "|".join(
-                        [
-                            candidate.community_id,
-                            candidate.page_id,
-                            *candidate.relation_ids,
-                        ]
-                    ).encode()
-                ).hexdigest()[:24],
-                "hops": 0,
-                "signal": "typed_community",
-                "activation": round(candidate.score, 6),
-                "community_id": candidate.community_id,
-                "relation_ids": list(candidate.relation_ids),
-                "source_digests": list(candidate.source_digests),
-                "summary_sha256": candidate.summary_sha256,
-            }
-
-    while frontier and visited_states < 200:
-        negative, hop, page_id, path, incoming_signal = heapq.heappop(frontier)
-        activation = -negative
-        if activation + 1e-12 < best_activation.get(page_id, 0.0):
-            continue
-        visited_states += 1
-        if hop >= 2:
-            continue
-        for edge in typed_neighbors(
-            store,
-            page_id,
-            limit=12,
-            include_typed_relations=query_plan in {"local", "mixed"},
-            rollout_key=rollout_key,
-        ):
-            target = edge.target
-            edge_weight = edge.weight
-            signal = (
-                f"{edge.edge_type}:{edge.supervision}"
-                if edge.supervision
-                else edge.edge_type
-            )
-            next_hop = hop + 1
-            next_activation = activation * edge_weight * (0.72**next_hop)
-            if next_activation < 0.005:
-                continue
-            if next_activation <= best_activation.get(target, 0.0):
-                continue
-            if (
-                target not in seed_ids
-                and target not in expanded
-                and len(expanded) >= output_limit
-            ):
-                continue
-            meta = store.meta(target)
-            if (
-                meta is None
-                or _normalize_lifecycle_status(meta.get("status")) != "stable"
-            ):
-                continue
-            best_activation[target] = next_activation
-            next_path = (*path, target)
-            prior_trace = trace.get(page_id)
-            prior_relation_ids = (
-                list(prior_trace.get("relation_ids") or [])
-                if isinstance(prior_trace, dict)
-                else []
-            )
-            prior_relations = (
-                list(prior_trace.get("relations") or [])
-                if isinstance(prior_trace, dict)
-                else []
-            )
-            relation_ids = [
-                *prior_relation_ids,
-                *([edge.relation_id] if edge.relation_id else []),
-            ]
-            relation_steps = [
-                *prior_relations,
-                *(
-                    [
-                        {
-                            "relation_id": edge.relation_id,
-                            "predicate": edge.predicate,
-                            "direction": edge.direction,
-                            "lifecycle": edge.lifecycle,
-                            "evidence_refs": list(edge.evidence_refs),
-                            "weight_components": {
-                                "edge": round(edge_weight, 6),
-                                "hop_decay": round(0.72**next_hop, 6),
-                                "source_activation": round(activation, 6),
-                            },
-                        }
-                    ]
-                    if edge.relation_id
-                    else []
-                ),
-            ]
-            heapq.heappush(
-                frontier,
-                (-next_activation, next_hop, target, next_path, signal),
-            )
-            if target in seed_ids:
-                continue
-            folder = _folder_from_meta(meta)
-            expanded[target] = ScoredPage(
-                page_id=target,
-                title=str(meta.get("title") or target),
-                folder=folder,
-                updated=str(meta.get("updated") or ""),
-                score=next_activation * decay,
-                status=_normalize_lifecycle_status(meta.get("status")),
-                superseded_by=(
-                    str(meta.get("superseded_by") or "")
-                    if isinstance(meta.get("superseded_by"), str)
-                    else ""
-                ),
-                page_type=_meta_page_type(meta, folder=folder),
-                sensitivity=_meta_sensitivity(meta, folder=folder),
-            )
-            trace[target] = {
-                "path": list(next_path),
-                "path_id": "path_"
-                + hashlib.sha256(
-                    "|".join([*next_path, *relation_ids]).encode()
-                ).hexdigest()[:24],
-                "hops": next_hop,
-                "signal": signal or incoming_signal,
-                "activation": round(next_activation, 6),
-                "relation_id": edge.relation_id,
-                "predicate": edge.predicate,
-                "direction": edge.direction,
-                "lifecycle": edge.lifecycle,
-                "evidence_refs": list(edge.evidence_refs),
-                "relation_ids": relation_ids,
-                "relations": relation_steps,
-            }
-    _GRAPH_TRACE.paths = trace
-    _GRAPH_TRACE.query_plan = query_plan
-    return sorted(expanded.values(), key=lambda page: page.score, reverse=True)[
-        :output_limit
-    ]
-
-
-def usage_prior_results(
-    candidate_ids: set[str],
-    *,
-    limit: int = 50,
-    decay: float = 0.98,
-    cap: float = 3.0,
-) -> list[ScoredPage]:
-    if not candidate_ids:
-        return []
-    feedback_file = CHRONOVISOR_ROOT / "recall" / "feedback.jsonl"
-    try:
-        with feedback_file.open(encoding="utf-8") as f:
-            lines = deque(f, maxlen=1000)
-    except OSError:
-        return []
-    scores: dict[str, float] = {}
-    decay = max(0.0, min(1.0, float(decay)))
-    cap = max(0.0, float(cap))
-    for age, line in enumerate(reversed(lines)):
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(record, dict) or record.get("kind") != "injection_used":
-            continue
-        weight = decay**age
-        for page_id in record.get("expected_pages", []) or record.get(
-            "injected_pages", []
-        ):
-            if isinstance(page_id, str) and page_id in candidate_ids:
-                scores[page_id] = min(cap, scores.get(page_id, 0.0) + weight)
-    if not scores:
-        return []
-    from chronovisor.core.index_store import get_store
-
-    store = get_store()
-    _refresh_store_for_search(store)
-    out: list[ScoredPage] = []
-    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)[:limit]
-    for page_id, score in ranked:
-        meta = store.meta(page_id)
-        if meta is None or _normalize_lifecycle_status(meta.get("status")) != "stable":
-            continue
-        folder = _folder_from_meta(meta)
-        out.append(
-            ScoredPage(
-                page_id=page_id,
-                title=meta["title"],
-                folder=folder,
-                updated=meta["updated"],
-                score=float(score),
-                status=_normalize_lifecycle_status(meta.get("status")),
-                superseded_by=meta.get("superseded_by", "")
-                if isinstance(meta.get("superseded_by", ""), str)
-                else "",
-                page_type=_meta_page_type(meta, folder=folder),
-                sensitivity=_meta_sensitivity(meta, folder=folder),
-            )
-        )
-    return out
 
 
 def apply_filters(
@@ -979,23 +470,6 @@ def last_search_trace() -> dict[str, object]:
     return dict(getattr(_SEARCH_TRACE, "value", {}))
 
 
-def _pipeline_dependencies() -> PipelineDependencies:
-    return PipelineDependencies(
-        get_bm25=get_bm25,
-        context_seed_results=context_seed_results,
-        semantic_search=semantic_search,
-        semantic_verify=semantic_verify,
-        graph_expand_results=graph_expand_results,
-        usage_prior_results=usage_prior_results,
-        fuse_results=fuse_results,
-        apply_filters=apply_filters,
-        apply_sort=apply_sort,
-        load_negative_feedback_config=load_negative_feedback_config,
-        penalties_for_query=penalties_for_query,
-        apply_penalties=apply_penalties,
-    )
-
-
 def search(
     query: str,
     top_n: int = 20,
@@ -1006,86 +480,41 @@ def search(
     semantic: bool = True,
     fusion_weights: dict[str, float] | None = None,
     semantic_timeout_ms: int | None = None,
-    rollout_key: str = "",
-    read_only_snapshot: bool = False,
 ) -> tuple[list[ScoredPage], str]:
-    """Run search and return (results, search_mode)."""
-    weights = (
-        {**DEFAULT_FUSION_WEIGHTS, **fusion_weights}
-        if fusion_weights is not None
-        else load_active_fusion_weights()
-    )
-    search_embedding = load_search_embedding_config()
-    if (
-        fusion_weights is None
-        and search_embedding.enabled
-    ):
-        from chronovisor.core.semantic_client import selected_for_rollout
-
-        if selected_for_rollout(query, search_embedding):
-            weights.update(
-                {
-                    "semantic": search_embedding.fusion_weight,
-                    "semantic_min_top_score": search_embedding.min_top_score,
-                    "semantic_min_margin": search_embedding.min_margin,
-                    "semantic_low_confidence_weight": (
-                        search_embedding.low_confidence_weight
-                    ),
-                }
-            )
-    _GRAPH_QUERY.value = query
-    _GRAPH_QUERY.read_only_snapshot = read_only_snapshot
-    _GRAPH_ROLLOUT.value = rollout_key
-    stage_timings_ms: dict[str, int] = {}
-    _SEARCH_TRACE.value = {"stage_timings_ms": stage_timings_ms}
-    try:
-        result = run_search_pipeline(
-            query,
-            config=production_pipeline_config(
-                top_n=top_n,
-                folder=folder,
-                updated_after=updated_after,
-                updated_before=updated_before,
-                sort_by=sort_by,
-                semantic=semantic,
-                fusion_weights=weights,
-                include_reference=folder is not None,
-                semantic_timeout_ms=semantic_timeout_ms,
-                read_only_snapshot=read_only_snapshot,
-            ),
-            deps=_pipeline_dependencies(),
-            stage_timings_ms=stage_timings_ms,
+    """Retrieve BM25 and semantic candidates with the existing weighted RRF."""
+    weights = {**DEFAULT_FUSION_WEIGHTS, **(fusion_weights or {})}
+    config = load_search_embedding_config()
+    if fusion_weights is None and config.enabled:
+        weights.update(
+            semantic=config.fusion_weight,
+            semantic_min_top_score=config.min_top_score,
+            semantic_min_margin=config.min_margin,
+            semantic_low_confidence_weight=config.low_confidence_weight,
         )
-    except BaseException:
-        _SEARCH_TRACE.value = {"stage_timings_ms": dict(stage_timings_ms)}
-        raise
-    finally:
-        _GRAPH_QUERY.value = ""
-        _GRAPH_QUERY.read_only_snapshot = False
-        _GRAPH_ROLLOUT.value = ""
-    graph_ids = {page.page_id for page in result.graph_results}
-    semantic_ids = {page.page_id for page in result.semantic_results}
+    fetch_n = max(top_n * 5, 100)
+    index = get_bm25()
+    index.build()
+    lexical = index.query(query, top_n=fetch_n, include_reference=folder is not None)
+    semantic_results = []
+    if semantic:
+        semantic_results = semantic_search(
+            query,
+            top_n=fetch_n,
+            include_reference=folder is not None,
+            timeout_ms=semantic_timeout_ms,
+        )
+    results = (
+        fuse_results(lexical, semantic_results, weights=weights)
+        if semantic_results
+        else lexical
+    )
+    results = apply_filters(results, folder, updated_after, updated_before)
     _SEARCH_TRACE.value = {
-        "strategy": "multi_seed_associative",
-        "budgets": {
-            "anchor": 20,
-            "lexical": max(top_n * 5, 100),
-            "semantic": max(top_n * 5, 100),
-            "context": 4,
-            "graph_hops": 2,
-            "graph_nodes": 50,
-        },
         "channels": {
-            "anchor": [page.page_id for page in result.anchor_results],
-            "lexical": [page.page_id for page in result.bm25_results],
-            "semantic": [page.page_id for page in result.semantic_results],
-            "context": [page.page_id for page in result.context_results],
-            "graph": [page.page_id for page in result.graph_results],
+            "lexical": [p.page_id for p in lexical[:5]],
+            "semantic": [p.page_id for p in semantic_results[:5]],
         },
-        "verified_graph": sorted(graph_ids & semantic_ids),
-        "paths": graph_expansion_trace(),
-        "query_plan": getattr(_GRAPH_TRACE, "query_plan", "direct"),
-        "stage_timings_ms": dict(result.stage_timings_ms or {}),
-        "snapshot_generation": result.snapshot_generation,
     }
-    return result.results, result.search_mode
+    return apply_sort(results, sort_by)[
+        :top_n
+    ], "hybrid" if semantic_results else "bm25"

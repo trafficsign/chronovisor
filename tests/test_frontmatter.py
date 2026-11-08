@@ -26,6 +26,7 @@ from chronovisor.core.legacy_frontmatter import parse as parse_legacy
 # parse() — empty / no frontmatter
 # ---------------------------------------------------------------------------
 
+
 def test_parse_empty_returns_empty_meta_and_text():
     meta, body = parse("")
     assert meta == {}
@@ -49,6 +50,7 @@ def test_parse_unclosed_frontmatter_fails_closed():
 # parse() — scalar values
 # ---------------------------------------------------------------------------
 
+
 def test_parse_scalar_basic():
     text = "---\ntitle: Hello\nupdated: 2026-05-08\n---\nbody text\n"
     meta, body = parse(text)
@@ -57,7 +59,7 @@ def test_parse_scalar_basic():
 
 
 def test_parse_scalar_with_quotes():
-    text = '---\ntitle: "Hello, World"\nauthor: \'Alice\'\n---\nbody\n'
+    text = "---\ntitle: \"Hello, World\"\nauthor: 'Alice'\n---\nbody\n"
     meta, _ = parse(text)
     assert meta == {"title": "Hello, World", "author": "Alice"}
 
@@ -84,6 +86,7 @@ def test_parse_skips_blank_lines_and_lines_without_colon():
 # parse() — inline list
 # ---------------------------------------------------------------------------
 
+
 def test_parse_inline_list():
     text = "---\nraw_keywords: [Anthropic, NVIDIA, Groq]\n---\nbody\n"
     meta, _ = parse(text)
@@ -97,7 +100,7 @@ def test_parse_inline_list_empty():
 
 
 def test_parse_inline_list_with_quoted_items():
-    text = '---\nraw_keywords: ["Hello, World", \'Alice\']\n---\n'
+    text = "---\nraw_keywords: [\"Hello, World\", 'Alice']\n---\n"
     meta, _ = parse(text)
     assert meta == {"raw_keywords": ["Hello, World", "Alice"]}
 
@@ -106,28 +109,15 @@ def test_parse_inline_list_with_quoted_items():
 # parse() — block list
 # ---------------------------------------------------------------------------
 
+
 def test_parse_block_list():
-    text = (
-        "---\n"
-        "raw_keywords:\n"
-        "  - Anthropic\n"
-        "  - NVIDIA\n"
-        "  - Groq\n"
-        "---\n"
-        "body\n"
-    )
+    text = "---\nraw_keywords:\n  - Anthropic\n  - NVIDIA\n  - Groq\n---\nbody\n"
     meta, _ = parse(text)
     assert meta == {"raw_keywords": ["Anthropic", "NVIDIA", "Groq"]}
 
 
 def test_parse_block_list_quoted_items():
-    text = (
-        "---\n"
-        "tags:\n"
-        '  - "with, comma"\n'
-        "  - 'with quotes'\n"
-        "---\n"
-    )
+    text = "---\ntags:\n  - \"with, comma\"\n  - 'with quotes'\n---\n"
     meta, _ = parse(text)
     assert meta == {"tags": ["with, comma", "with quotes"]}
 
@@ -152,14 +142,9 @@ def test_parse_mixed_scalar_and_list():
 # parse() — preserve unknown keys
 # ---------------------------------------------------------------------------
 
+
 def test_parse_preserves_unknown_keys():
-    text = (
-        "---\n"
-        "title: X\n"
-        "custom_field: custom value\n"
-        "another: 42\n"
-        "---\n"
-    )
+    text = "---\ntitle: X\ncustom_field: custom value\nanother: 42\n---\n"
     meta, _ = parse(text)
     assert meta == {"title": "X", "custom_field": "custom value", "another": 42}
 
@@ -167,6 +152,7 @@ def test_parse_preserves_unknown_keys():
 # ---------------------------------------------------------------------------
 # patch() — basic add / replace / delete
 # ---------------------------------------------------------------------------
+
 
 def test_patch_add_to_empty():
     text = "body only\n"
@@ -203,8 +189,7 @@ def test_canonicalize_preserves_body_and_full_yaml_values():
         "---\n"
         'title: "Agents-A1: Model Analysis"\n'
         'recall_questions: ["What changed?", "Why now?"]\n'
-        "---\n"
-        + body
+        "---\n" + body
     )
 
     normalized = canonicalize(legacy)
@@ -258,6 +243,7 @@ def test_patch_no_frontmatter_no_changes_returns_body():
 # round-trip
 # ---------------------------------------------------------------------------
 
+
 def test_round_trip_scalar_and_list():
     text = (
         "---\n"
@@ -285,8 +271,7 @@ def test_full_yaml_parse_patch_and_canonicalize_preserve_body():
         "description: |-\n"
         "  first line\n"
         "  second: line\n"
-        "---\n"
-        + body
+        "---\n" + body
     )
 
     meta, parsed_body = parse(text)
@@ -320,22 +305,13 @@ def test_unhashable_yaml_key_is_normalized_to_canonical_document_error() -> None
 
 
 def test_parse_legacy_retains_historical_raw_keyword_strings():
-    text = (
-        "---\n"
-        "raw_keywords: [historical, 2026, true, 2026-08-11]\n"
-        "---\n"
-        "body\n"
-    )
+    text = "---\nraw_keywords: [historical, 2026, true, 2026-08-11]\n---\nbody\n"
 
     legacy, legacy_body = parse_legacy(text)
     canonical, canonical_body = parse(text)
 
-    assert legacy == {
-        "raw_keywords": ["historical", "2026", "true", "2026-08-11"]
-    }
-    assert canonical == {
-        "raw_keywords": ["historical", 2026, True, date(2026, 8, 11)]
-    }
+    assert legacy == {"raw_keywords": ["historical", "2026", "true", "2026-08-11"]}
+    assert canonical == {"raw_keywords": ["historical", 2026, True, date(2026, 8, 11)]}
     assert legacy_body == canonical_body == "body\n"
 
 
@@ -517,11 +493,7 @@ def test_yaml_set_serialization_and_review_receipt_ignore_hash_seed() -> None:
 def test_legacy_frontmatter_imports_are_limited_to_raw_and_offline_migration():
     source_root = Path(__file__).parents[1] / "src"
     allowed = {
-        "chronovisor/core/okf_prepare.py",
         "chronovisor/core/raw_store.py",
-        "chronovisor/ingest/orchestrator.py",
-        "chronovisor/ingest/raw_replay.py",
-        "chronovisor/ops/memory_integrity.py",
         "chronovisor/raw/record_raw.py",
     }
     importers: set[str] = set()
