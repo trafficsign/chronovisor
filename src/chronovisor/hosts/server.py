@@ -10,6 +10,7 @@ try:
 except ModuleNotFoundError:
     from mcp.server.mcpserver import MCPServer as FastMCP
 
+from chronovisor.core import capture_status
 from chronovisor.core.background_jobs import snapshot
 from chronovisor.core.frontmatter import parse as _frontmatter_parse
 from chronovisor.core.index_store import (
@@ -530,6 +531,9 @@ def chronovisor_status() -> str:
             "indexes": indexes,
             "services": services,
             "capture_jobs": snapshot(),
+            "capture_status": capture_status.snapshot(
+                capture_status.status_path(CHRONOVISOR_ROOT)
+            ),
         },
         ensure_ascii=False,
     )

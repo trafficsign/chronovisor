@@ -1055,3 +1055,52 @@ def test_retired_dashboard_routes_are_absent_and_errors_do_not_disclose(
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_capture_snapshot_reads_capture_status_instead_of_job_timestamps(
+    tmp_path, monkeypatch
+):
+    from chronovisor.core import capture_status
+
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
+    state = tmp_path / "runtime/background-jobs/state.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps(
+            {
+                "jobs": {
+                    "old": {
+                        "module": "chronovisor.hosts.codex_record",
+                        "status": "completed",
+                        "exit_code": 0,
+                        "updated_at": "2026-11-01T00:00:00+00:00",
+                    }
+                }
+            }
+        )
+    )
+    capture_status.write(
+        capture_status.status_path(tmp_path),
+        {
+            "last_attempt_at": "2026-11-08T12:00:00+00:00",
+            "last_success_at": "2026-11-08T12:00:00+00:00",
+            "last_commit_at": "2026-11-08T11:59:00+00:00",
+            "oldest_pending_at": "2026-11-08T11:00:00+00:00",
+            "pending": 4,
+            "failed": 2,
+            "last_error": "permanent_failure",
+        },
+    )
+
+    capture = dashboard._capture_snapshot()
+
+    assert capture["pending"] == 4
+    assert capture["queued"] == 4
+    assert capture["failed"] == 2
+    assert capture["last_error"] == "permanent_failure"
+    assert capture["last_success_at"] == "2026-11-08T12:00:00Z"
+    assert capture["status_available"] is True
+    assert capture["by_status"] == {"completed": 1}
+    assert capture["last_run"]["timestamp"] == (
+        dashboard._dashboard_local_datetime("2026-11-01T00:00:00+00:00").isoformat()
+    )

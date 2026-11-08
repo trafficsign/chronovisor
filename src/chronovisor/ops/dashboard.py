@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from chronovisor.core import index_store
+from chronovisor.core import capture_status, index_store
 from chronovisor.core.background_jobs import CAPTURE_MODULES, _pid_alive
 from chronovisor.core.raw_segment import CAPTURE_TIMEZONE
 from chronovisor.core.raw_store import RawStore
@@ -380,9 +380,27 @@ def _capture_snapshot() -> dict[str, Any]:
                 }
             )
     runs.sort(key=lambda run: run["timestamp"])
+    observed = capture_status.snapshot(
+        capture_status.status_path(CHRONOVISOR_ROOT)
+    )
+    if observed.get("available"):
+        pending = observed["pending"]
+        failed = observed["failed"]
+        last_error = observed["last_error"]
+        last_success_at = observed["last_success_at"]
+    else:
+        pending = sum(counts.get(key, 0) for key in ("queued", "retry_wait"))
+        failed = sum(counts.get(key, 0) for key in ("failed", "quarantined"))
+        last_error = "none" if not failed else "capture_failed"
+        last_success_at = None
     return {
         "by_status": counts,
-        "queued": sum(counts.get(key, 0) for key in ("queued", "retry_wait")),
+        "queued": pending,
+        "pending": pending,
+        "failed": failed,
+        "last_error": last_error,
+        "last_success_at": last_success_at,
+        "status_available": observed.get("available", False),
         "last_run": runs[-1] if runs else None,
         "events": events,
     }

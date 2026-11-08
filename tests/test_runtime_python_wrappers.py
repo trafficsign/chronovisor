@@ -17,6 +17,7 @@ UVX_WRAPPERS = (
     "chronovisor-mcp",
     "chronovisor-background-jobs",
     "chronovisor-session-sweeper",
+    "chronovisor-capture",
     "chronovisor-reranker-service",
     "chronovisor-semantic-service",
 )
@@ -173,3 +174,37 @@ def test_uvx_wrappers_remain_executable() -> None:
 
     for name in UVX_WRAPPERS:
         assert (SCRIPTS / name).stat().st_mode & executable_bits == executable_bits
+
+
+def test_capture_wrapper_uses_converge_constraints(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    root = home / ".chronovisor"
+    constraints = root / "runtime/dependency-constraints/chronovisor-converge.txt"
+    constraints.parent.mkdir(parents=True)
+    constraints.write_text("anyio==4.14.2\n", encoding="utf-8")
+    uvx = tmp_path / "uvx"
+    uvx.write_text(
+        f"#!{sys.executable}\nimport json, sys\n"
+        "print(json.dumps({'args': sys.argv[1:]}, sort_keys=True))\n",
+        encoding="utf-8",
+    )
+    uvx.chmod(0o755)
+    completed = subprocess.run(
+        [str(SCRIPTS / "chronovisor-capture")],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            "HOME": str(home),
+            "PATH": "/usr/bin:/bin",
+            "CHRONOVISOR_REPO_ROOT": str(ROOT),
+            "CHRONOVISOR_ROOT": str(root),
+            "CHRONOVISOR_UVX": str(uvx),
+            "CHRONOVISOR_PYTHON": sys.executable,
+        },
+    )
+    args = json.loads(completed.stdout)["args"]
+
+    assert args.count("chronovisor-capture") == 1
+    assert args[args.index("--constraints") + 1] == str(constraints)
+    assert "--refresh-package" in args

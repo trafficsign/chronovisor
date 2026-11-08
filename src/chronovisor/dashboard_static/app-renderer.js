@@ -737,14 +737,14 @@ function renderModelStatus(modelStatus) {
 function renderHealth(health) {
   const capture = health.capture || {};
   const queue = health.queue || {};
-  const last = capture.last_run;
-  els.healthCapture.textContent = last ? timeLabel(last.timestamp) : "No runs";
-  els.healthExit.textContent = last ? String(last.exit_code) : "--";
+  const failed = intValue(capture.failed);
+  els.healthCapture.textContent = capture.last_success_at ? timeLabel(capture.last_success_at) : "No success";
+  els.healthExit.textContent = capture.last_error || "none";
   els.healthQueued.textContent = intValue(queue.queued);
   els.healthRunning.textContent = intValue(queue.running);
   els.healthRetry.textContent = intValue(queue.retry_wait);
-  els.healthFailed.textContent = intValue(queue.failed) + intValue(queue.quarantined);
-  els.healthCaption.textContent = intValue(queue.failed) + intValue(queue.quarantined) ? "attention" : "capture queue";
+  els.healthFailed.textContent = failed;
+  els.healthCaption.textContent = failed ? "attention" : "capture status";
 }
 
 function render(snapshot) {
@@ -754,10 +754,10 @@ function render(snapshot) {
   const ready = Object.values(services).filter((service) => service.ready).length;
   setState(status.state);
   els.saves.textContent = fmt(status.saves_today);
-  els.queue.textContent = fmt(capture.queued);
+  els.queue.textContent = fmt(capture.pending);
   els.queueSub.textContent = `${intValue(capture.by_status?.running)} running`;
-  els.capture.textContent = capture.last_run ? timeLabel(capture.last_run.timestamp) : "--";
-  els.captureSub.textContent = capture.last_run ? `${capture.last_run.timestamp.slice(0, 10)} · exit ${capture.last_run.exit_code}` : "No capture runs";
+  els.capture.textContent = capture.last_success_at ? timeLabel(capture.last_success_at) : "--";
+  els.captureSub.textContent = capture.last_error && capture.last_error !== "none" ? `Last error · ${capture.last_error}` : capture.last_success_at ? "Last successful capture" : "No capture runs";
   els.pages.textContent = fmt(status.page_count);
   els.pagesSub.textContent = "Frozen knowledge pages";
   els.services.textContent = `${ready} / ${Object.values(services).filter((service) => service.enabled !== false).length}`;

@@ -6,7 +6,7 @@
 	<string>@@LAUNCHD_LABEL_PREFIX@@capture</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>@@HOME@@/.chronovisor/bin/chronovisor-capture</string>
+		<string>@@PROJECT_ROOT@@/scripts/chronovisor-capture</string>
 	</array>
 	<key>WorkingDirectory</key>
 	<string>@@PROJECT_ROOT@@</string>
