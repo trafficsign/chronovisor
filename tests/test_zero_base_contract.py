@@ -252,7 +252,11 @@ def test_init_reads_only_two_pages_and_capture_count(monkeypatch):
     monkeypatch.setattr(
         server,
         "get_store",
-        lambda: SimpleNamespace(refresh=lambda: None, page_count=lambda **k: 7),
+        lambda: SimpleNamespace(
+                refresh=lambda: None,
+                refresh_if_stale=lambda: None,
+                page_count=lambda **k: 7,
+            ),
     )
     monkeypatch.setattr(server, "snapshot", lambda: {"by_status": {"queued": 2}})
     seen = []

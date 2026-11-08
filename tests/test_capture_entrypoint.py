@@ -293,6 +293,9 @@ def test_chronovisor_status_reports_capture_status(
         def refresh(self) -> None:
             return None
 
+        def refresh_if_stale(self) -> None:
+            return None
+
         def page_count(self, *, include_system: bool) -> int:
             assert include_system is False
             return 0

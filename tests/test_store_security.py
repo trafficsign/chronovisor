@@ -114,6 +114,9 @@ def test_chronovisor_read_confines_pages_and_system(
         def refresh(self) -> None:
             return None
 
+        def refresh_if_stale(self) -> None:
+            return None
+
         def meta(self, _page_id: str) -> None:
             return None
 

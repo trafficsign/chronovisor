@@ -318,7 +318,7 @@ def chronovisor_read(
         max_chars: Maximum characters of content to return (capped at 40000).
     """
     store = get_store()
-    store.refresh()
+    store.refresh_if_stale()
 
     try:
         path = _find_page_with_alias(page, require_stable=False)
@@ -400,7 +400,7 @@ def chronovisor_search(
     from chronovisor.search.search import search as run_search
 
     store = get_store()
-    store.refresh()
+    store.refresh_if_stale()
 
     results, search_mode = run_search(
         query=query,
@@ -457,7 +457,7 @@ def chronovisor_search(
 def chronovisor_init() -> str:
     """Return user-profile, lessons-learned, page count and queued capture jobs."""
     store = get_store()
-    store.refresh()
+    store.refresh_if_stale()
     jobs = snapshot()
     return json.dumps(
         {
@@ -478,7 +478,7 @@ def chronovisor_init() -> str:
 def chronovisor_status() -> str:
     """Return page count, index freshness and capture status."""
     store = get_store()
-    store.refresh()
+    store.refresh_if_stale()
     indexes = {}
     for name in ("pages.json", "lexical.sqlite"):
         path = CHRONOVISOR_ROOT / ".index" / name
