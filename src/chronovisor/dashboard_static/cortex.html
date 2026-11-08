@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CHRONOVISOR // SYNAPTIC CORTEX</title>
+  <link rel="stylesheet" href="/static/cortex.css">
+  <link rel="stylesheet" href="/static/activity-bar.css">
+  <script src="/static/cortex-runtime.js" defer></script>
+  <script src="/static/cortex-webgl.js" defer></script>
+  <script src="/static/cortex.js" defer></script>
+</head>
+<body class="has-activity-bar">
+  <nav class="activity-bar" aria-label="Chronovisor views">
+    <div class="activity-brand" aria-hidden="true">
+      <span class="activity-brand-mark"></span>
+    </div>
+    <div class="activity-views">
+      <a class="activity-view" data-view="observatory" href="/" aria-label="Observatory" title="Observatory">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3.5" y="3.5" width="7" height="7" rx="1"></rect>
+          <rect x="13.5" y="3.5" width="7" height="7" rx="1"></rect>
+          <rect x="3.5" y="13.5" width="7" height="7" rx="1"></rect>
+          <rect x="13.5" y="13.5" width="7" height="7" rx="1"></rect>
+        </svg>
+        <span class="activity-tooltip">Observatory</span>
+      </a>
+      <a class="activity-view is-active" data-view="cortex" href="/cortex" aria-current="page" aria-label="Synaptic Cortex" title="Synaptic Cortex">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M6.7 10.7 10.8 6.5M14.4 6.2l3.2 5.4M17.2 15.6l-4.1 2.1M9 17.3l-2.6-3.2"></path>
+          <circle cx="5.2" cy="12.2" r="2.2"></circle>
+          <circle cx="12.4" cy="5.2" r="2.2"></circle>
+          <circle cx="18.8" cy="13.5" r="2.2"></circle>
+          <circle cx="11" cy="18.8" r="2.2"></circle>
+        </svg>
+        <span class="activity-tooltip">Synaptic Cortex</span>
+      </a>
+    </div>
+  </nav>
+  <div id="app">
+    <header>
+      <div id="brand">
+        <svg id="logo" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+          <circle cx="16" cy="16" r="13.5" stroke="#ffb454" stroke-width="1.2" stroke-dasharray="4 3" opacity=".6">
+            <animateTransform attributeName="transform" type="rotate" from="0 16 16" to="360 16 16" dur="26s" repeatCount="indefinite"/>
+          </circle>
+          <circle cx="16" cy="16" r="8" stroke="#7d92b5" stroke-width="1" opacity=".7"/>
+          <circle cx="16" cy="16" r="2.6" fill="#ffb454"/>
+          <circle cx="24" cy="16" r="1.6" fill="#ffd9a0">
+            <animateTransform attributeName="transform" type="rotate" from="0 16 16" to="360 16 16" dur="6s" repeatCount="indefinite"/>
+          </circle>
+        </svg>
+        <div>
+          <h1>CHRONOVISOR // SYNAPTIC CORTEX</h1>
+          <small>MEMORY NETWORK · 3D</small>
+        </div>
+      </div>
+      <div id="searchWrap">
+        <input id="search" placeholder="search neurons…  ⌘K" aria-label="Search memory pages" autocomplete="off">
+        <span id="searchHits"></span>
+      </div>
+      <div id="hstats">
+        <span><b id="stN">—</b> NEURONS</span>
+        <span><b id="stE">—</b> SYNAPSES</span>
+        <span><b id="stSp">0</b> CAPTURES</span>
+        <span class="badge" id="cortexStatus"><i></i>CORTEX ONLINE</span>
+        <span class="chip" id="stC">—</span>
+      </div>
+    </header>
+
+    <div id="main">
+      <nav id="side" aria-label="Wiki Explorer">
+        <div class="paneTitle"><span>EXPLORER</span><span id="pkgCount"></span></div>
+        <div id="tree"></div>
+      </nav>
+
+      <main id="stage" tabindex="0" aria-label="Page-link graph">
+        <canvas id="gl" class="cortexBase" aria-hidden="true"></canvas>
+        <canvas id="overlay" class="cortexOverlay" aria-hidden="true"></canvas>
+        <div id="captureAria" class="srOnly" aria-live="polite"></div>
+        <div id="scan"></div>
+        <div class="hudCorner" id="c1"></div>
+        <div class="hudCorner" id="c2"></div>
+        <div class="hudCorner" id="c3"></div>
+        <div class="hudCorner" id="c4"></div>
+        <div id="modeBar">
+          <div class="seg modeSeg" role="group" aria-label="Graph layout">
+            <button id="mOrganic" class="on" type="button" aria-pressed="true">ORGANIC</button>
+            <button id="mSphere" type="button" aria-pressed="false">SPHERE</button>
+            <button id="mCluster" type="button" aria-pressed="false">CLUSTERS</button>
+          </div>
+          <div class="seg demoSeg">
+            <button class="stim" data-s="save" type="button">DEMO · SAVE</button>
+            <button class="centerReset" id="resetCenter" type="button" title="回転中心をグラフ中央へ戻す" aria-label="回転中心をグラフ中央へ戻す">◎ RESET CENTER</button>
+          </div>
+          <button class="tgl on" id="tLive" type="button"><i></i>live</button>
+          <button class="tgl on" id="tMotion" type="button"><i></i>motion</button>
+          <button class="tgl on" id="tRot" type="button"><i></i>rotate</button>
+          <button class="tgl" id="tSnd" type="button"><i></i>sound</button>
+          <label id="visCtl"><span>synapses</span><input id="visSlider" type="range" min="30" max="420" value="160"></label>
+          <button class="tgl prefsReset" id="tReset" type="button" title="表示設定を初期値に戻す" aria-label="表示設定を初期値に戻す">↺ reset</button>
+        </div>
+        <div id="zoomCtl">
+          <button id="zIn" type="button" aria-label="ズームイン">+</button>
+          <button id="zOut" type="button" aria-label="ズームアウト">−</button>
+          <button id="zFit" type="button" aria-label="全体表示">⌂</button>
+        </div>
+        <div id="ticker"><span class="cur"></span><span id="tickerTx"></span></div>
+        <div id="genInfo"></div>
+        <div id="tooltip"></div>
+      </main>
+
+      <aside id="hud">
+        <div class="paneTitle">
+          <span>SYSTEM MONITOR</span>
+          <span id="eventLive" class="liveStatus">● LIVE</span>
+        </div>
+        <div id="panelBody"></div>
+      </aside>
+    </div>
+  </div>
+</body>
+</html>

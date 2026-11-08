@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 RUNTIME_COMMAND = 'chronovisor_exec_uvx --python "$CHRONOVISOR_PYTHON"'
 UVX_WRAPPERS = (
+    "chronovisor-dashboard",
     "chronovisor-hook",
     "chronovisor-mcp",
     "chronovisor-background-jobs",
@@ -73,6 +74,7 @@ def test_shared_runtime_resolver_uses_safe_portable_defaults() -> None:
 @pytest.mark.parametrize(
     "wrapper,revision,refresh",
     [
+        ("chronovisor-dashboard", "@" + "a" * 40, True),
         ("chronovisor-mcp", "", True),
         ("chronovisor-hook", "", True),
         ("chronovisor-hook", "@main", True),

@@ -21,6 +21,7 @@ semantic = [
     "mlx-lm==0.31.3; sys_platform == 'darwin'",
 ]
 [project.scripts]
+chronovisor-dashboard = "chronovisor.ops.dashboard:main"
 chronovisor-mcp = "chronovisor.hosts.server:main"
 chronovisor-hook = "chronovisor.hosts.hook_dispatcher:main"
 chronovisor-codex-record = "chronovisor.hosts.codex_record:main"

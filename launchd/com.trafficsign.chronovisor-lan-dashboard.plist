@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>@@LAUNCHD_LABEL_PREFIX@@lan-dashboard</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@@PROJECT_ROOT@@/scripts/chronovisor-dashboard</string>
+    <string>--lan</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>@@PROJECT_ROOT@@</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>@@HOME@@</string>
+    <key>PATH</key>
+    <string>@@PATH@@</string>
+    <key>CHRONOVISOR_UVX</key>
+    <string>@@UVX@@</string>
+    <key>CHRONOVISOR_PYTHON</key>
+    <string>@@PYTHON@@</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>@@HOME@@/.chronovisor/logs/lan-dashboard.launchd.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>@@HOME@@/.chronovisor/logs/lan-dashboard.launchd.err.log</string>
+</dict>
+</plist>

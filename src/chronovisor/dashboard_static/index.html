@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chronovisor Observatory</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/activity-bar.css">
+</head>
+<body class="has-activity-bar">
+  <nav class="activity-bar" aria-label="Chronovisor views">
+    <div class="activity-brand" aria-hidden="true">
+      <span class="activity-brand-mark"></span>
+    </div>
+    <div class="activity-views">
+      <a class="activity-view is-active" data-view="observatory" href="/" aria-current="page" aria-label="Observatory" title="Observatory">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3.5" y="3.5" width="7" height="7" rx="1"></rect>
+          <rect x="13.5" y="3.5" width="7" height="7" rx="1"></rect>
+          <rect x="3.5" y="13.5" width="7" height="7" rx="1"></rect>
+          <rect x="13.5" y="13.5" width="7" height="7" rx="1"></rect>
+        </svg>
+        <span class="activity-tooltip">Observatory</span>
+      </a>
+      <a class="activity-view" data-view="cortex" href="/cortex" aria-label="Synaptic Cortex" title="Synaptic Cortex">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M6.7 10.7 10.8 6.5M14.4 6.2l3.2 5.4M17.2 15.6l-4.1 2.1M9 17.3l-2.6-3.2"></path>
+          <circle cx="5.2" cy="12.2" r="2.2"></circle>
+          <circle cx="12.4" cy="5.2" r="2.2"></circle>
+          <circle cx="18.8" cy="13.5" r="2.2"></circle>
+          <circle cx="11" cy="18.8" r="2.2"></circle>
+        </svg>
+        <span class="activity-tooltip">Synaptic Cortex</span>
+      </a>
+    </div>
+  </nav>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <div>
+          <h1>Chronovisor Observatory</h1>
+          <p class="eyebrow">Local memory pipeline</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <button class="lan-share-button" id="lan-share-button" type="button">Recovery link</button>
+        <div class="status-pill" id="state-pill">
+          <span class="pulse"></span>
+          <span id="state-text">connecting</span>
+        </div>
+      </div>
+    </header>
+
+    <section class="metrics-grid" aria-label="Primary metrics">
+      <article class="metric-card">
+        <span class="metric-label">Saves today</span>
+        <strong id="saves-value">--</strong>
+        <small id="saves-sub">Raw captures · JST</small>
+      </article>
+      <article class="metric-card">
+        <span class="metric-label">Queued captures</span>
+        <strong id="queue-value">--</strong>
+        <small id="queue-sub">Waiting capture jobs</small>
+      </article>
+      <article class="metric-card">
+        <span class="metric-label">Last capture</span>
+        <strong id="capture-value">--</strong>
+        <small id="capture-sub">Time and exit status</small>
+      </article>
+      <article class="metric-card">
+        <span class="metric-label">Frozen pages</span>
+        <strong id="pages-value">--</strong>
+        <small id="pages-sub">waiting</small>
+      </article>
+      <article class="metric-card">
+        <span class="metric-label">Services</span>
+        <strong id="services-value">--</strong>
+        <small id="services-sub">semantic / reranker</small>
+      </article>
+    </section>
+
+    <section class="dashboard-grid">
+      <article class="panel panel-wide save-history-panel" id="save-history-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Save History</h2>
+            <p>Raw captures by day.</p>
+          </div>
+          <div class="segmented-control" aria-label="Save history mode">
+            <button type="button" data-save-mode="daily" class="active">Daily</button>
+            <button type="button" data-save-mode="weekly">Weekly</button>
+            <button type="button" data-save-mode="cumulative">Cumulative</button>
+          </div>
+        </div>
+        <div class="chart-summary compact save-summary" aria-label="Save history summary">
+          <div class="chart-stat">
+            <span>Saved</span>
+            <strong id="save-total">--</strong>
+          </div>
+        </div>
+        <div class="save-history-layout">
+          <div class="save-heatmap-wrap">
+            <div class="save-months" id="save-months" aria-hidden="true"></div>
+            <div class="save-heatmap" id="save-heatmap" aria-label="Daily save heatmap"></div>
+          </div>
+          <aside class="save-detail" id="save-detail">
+            <span>--</span>
+          </aside>
+        </div>
+        <div class="save-feed" id="save-feed"></div>
+      </article>
+
+      <article class="panel panel-large">
+        <div class="panel-head">
+          <div>
+            <h2>Save Load</h2>
+            <p>Daily captured size · √ scale.</p>
+          </div>
+          <span id="trend-caption">waiting for data</span>
+        </div>
+        <div class="chart-frame">
+          <canvas id="pending-chart" height="300"></canvas>
+          <div class="chart-tooltip" id="save-load-tooltip" hidden></div>
+        </div>
+        <div class="chart-summary save-load-summary" aria-label="Save load summary">
+          <div class="chart-stat">
+            <span>Saved</span>
+            <strong id="pending-current">--</strong>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel panel-large knowledge-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Knowledge Mix</h2>
+            <p>Frozen page share by category and size.</p>
+          </div>
+          <div class="segmented-control compact-control" aria-label="Knowledge mix mode">
+            <button type="button" data-knowledge-mode="size" class="active">Size</button>
+            <button type="button" data-knowledge-mode="pages">Pages</button>
+          </div>
+        </div>
+        <div class="panel-subhead" id="knowledge-caption">waiting</div>
+        <div class="knowledge-layout">
+          <div class="knowledge-donut-wrap">
+            <canvas id="knowledge-chart" height="240"></canvas>
+            <div class="knowledge-center">
+              <strong id="knowledge-total">--</strong>
+              <span>pages</span>
+            </div>
+          </div>
+          <div class="knowledge-bars" id="knowledge-bars"></div>
+        </div>
+        <div class="chart-summary compact" aria-label="Knowledge mix summary">
+          <div class="chart-stat">
+            <span>Pages</span>
+            <strong id="knowledge-pages">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>Size</span>
+            <strong id="knowledge-size">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>Areas</span>
+            <strong id="knowledge-categories">--</strong>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel panel-wide health-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Memory Health</h2>
+            <p>Capture runs and capture queue pressure.</p>
+          </div>
+          <span id="health-caption">waiting</span>
+        </div>
+        <div class="health-groups" aria-label="Memory health summary">
+          <section class="health-group">
+            <h3>Capture</h3>
+            <div class="health-group-grid">
+              <div class="chart-stat"><span>Last run</span><strong id="health-capture">--</strong></div>
+              <div class="chart-stat"><span>Exit</span><strong id="health-exit">--</strong></div>
+            </div>
+          </section>
+          <section class="health-group">
+            <h3>Queue</h3>
+            <div class="health-group-grid">
+              <div class="chart-stat"><span>Queued</span><strong id="health-queued">--</strong></div>
+              <div class="chart-stat"><span>Running</span><strong id="health-running">--</strong></div>
+              <div class="chart-stat"><span>Retry</span><strong id="health-retry">--</strong></div>
+              <div class="chart-stat"><span>Failed</span><strong id="health-failed">--</strong></div>
+            </div>
+          </section>
+        </div>
+      </article>
+
+      <article class="panel panel-wide model-panel" id="model-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Model Fleet</h2>
+            <p>Semantic embedding and search reranking with live residency.</p>
+          </div>
+          <span id="model-caption">waiting</span>
+        </div>
+        <div class="chart-summary compact model-summary" aria-label="Model fleet summary">
+          <div class="chart-stat">
+            <span>Services</span>
+            <strong id="model-services">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>Loaded</span>
+            <strong id="model-loaded">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>Configured</span>
+            <strong id="model-configured">--</strong>
+          </div>
+          <div class="chart-stat">
+            <span>Unavailable</span>
+            <strong id="model-unavailable">--</strong>
+          </div>
+        </div>
+        <div class="model-grid" id="model-grid"></div>
+      </article>
+
+      <article class="panel panel-large panel-wide events-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Recent Events</h2>
+            <p>Capture runs and service status.</p>
+          </div>
+        </div>
+        <div class="event-feed" id="event-feed"></div>
+      </article>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+  <script src="/static/app-renderer.js"></script>
+  <script src="/static/app-client.js"></script>
+</body>
+</html>
