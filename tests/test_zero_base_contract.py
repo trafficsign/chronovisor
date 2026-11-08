@@ -410,20 +410,27 @@ def test_sweeper_recovers_both_hosts_and_appends_byte_exact_tails(tmp_path):
     assert not (root / "pages").exists() and not (root / "system").exists()
 
 
-def test_capture_wrapper_runs_retry_then_sweeper(tmp_path):
+def test_capture_wrapper_runs_one_entrypoint(tmp_path):
     scripts = SRC.parent / "scripts"
     wrapper = tmp_path / "chronovisor-capture"
     wrapper.write_bytes((scripts / wrapper.name).read_bytes())
-    for name in ("background-jobs", "session-sweeper"):
-        executable = tmp_path / f"chronovisor-{name}"
-        executable.write_text(f'#!/bin/sh\nprintf "%s\\n" "{name} $*"\n')
-        executable.chmod(0o700)
+    runtime_env = tmp_path / "chronovisor-runtime-env"
+    runtime_env.write_text(
+        'chronovisor_exec_uvx() { printf "%s\\n" "$*"; }\n'
+        "CHRONOVISOR_PYTHON=python3.14\n"
+        "RUNTIME_SOURCE=test-source\n"
+        "CHRONOVISOR_ROOT=$CAPTURE_TEST_ROOT\n"
+    )
     completed = subprocess.run(
-        ["/bin/sh", str(wrapper)], capture_output=True, text=True, check=True
+        ["/bin/sh", str(wrapper)],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "CAPTURE_TEST_ROOT": str(tmp_path / "root")},
     )
     assert completed.stdout.splitlines() == [
-        "background-jobs retry --limit 8",
-        "session-sweeper --limit 8",
+        "--python python3.14 --refresh-package chronovisor "
+        "--from test-source chronovisor-capture"
     ]
     template = SRC.parent / "launchd" / "com.trafficsign.chronovisor-capture.plist"
     assert plistlib.loads(template.read_bytes())["StartInterval"] == 120
