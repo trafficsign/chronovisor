@@ -123,7 +123,6 @@ def test_chronovisor_read_confines_pages_and_system(
         def backlinks(self, _page_id: str) -> list[str]:
             return []
 
-    monkeypatch.setattr(paths, "CHRONOVISOR_ROOT", root)
     monkeypatch.setattr(store, "PAGES_DIR", pages)
     monkeypatch.setattr(server, "CHRONOVISOR_ROOT", root)
     monkeypatch.setattr(server, "get_store", FakeStore)
