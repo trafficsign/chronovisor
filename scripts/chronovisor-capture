@@ -9,7 +9,7 @@ CHRONOVISOR_WRAPPER_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
 CHRONOVISOR_CONSTRAINTS="$CHRONOVISOR_ROOT/runtime/dependency-constraints/chronovisor-converge.txt"
 export CHRONOVISOR_CONSTRAINTS
 
+# No --refresh-package: the source is pinned to a commit, and this runs every 120 s.
 chronovisor_exec_uvx --python "$CHRONOVISOR_PYTHON" \
-  --refresh-package chronovisor \
   --from "$RUNTIME_SOURCE" \
   chronovisor-capture "$@"

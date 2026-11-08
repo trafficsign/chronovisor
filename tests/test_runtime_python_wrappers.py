@@ -207,4 +207,4 @@ def test_capture_wrapper_uses_converge_constraints(tmp_path: Path) -> None:
 
     assert args.count("chronovisor-capture") == 1
     assert args[args.index("--constraints") + 1] == str(constraints)
-    assert "--refresh-package" in args
+    assert "--refresh-package" not in args  # pinned source, runs every 120 s

@@ -429,8 +429,7 @@ def test_capture_wrapper_runs_one_entrypoint(tmp_path):
         env={**os.environ, "CAPTURE_TEST_ROOT": str(tmp_path / "root")},
     )
     assert completed.stdout.splitlines() == [
-        "--python python3.14 --refresh-package chronovisor "
-        "--from test-source chronovisor-capture"
+        "--python python3.14 --from test-source chronovisor-capture"
     ]
     template = SRC.parent / "launchd" / "com.trafficsign.chronovisor-capture.plist"
     assert plistlib.loads(template.read_bytes())["StartInterval"] == 120
