@@ -25,8 +25,9 @@ the file is missing or invalid, `last_success_at` is older than 15 minutes, or
 ## Capture
 
 Stop hooks enqueue job-module work; they do not run the save inline.
-`scripts/chronovisor-capture` runs `retry_due(limit=8)` and the missed-session
-sweep in one process, then writes `runtime/capture-status.json`.
+`scripts/chronovisor-capture` runs `retry_due(limit=8)`, the missed-session
+sweep and the index refresh in one process, then writes
+`runtime/capture-status.json`.
 
 ```sh
 scripts/chronovisor-capture
@@ -106,6 +107,9 @@ dashboard's Save History and Save Load panels are read-only projections.
 - **Read returns not found for a known page**: `chronovisor_read` falls back to
   canonical files when the frozen registry omits a page. Pages that fail
   canonical validation stay invisible; do not weaken validation to expose them.
+- **An edited page does not show up in search**: check `index_refreshed_at` and
+  `index_error` in `runtime/capture-status.json`; the cycle refreshes the index
+  every 120 s.
 - **Search looks empty**: check `.index/lexical.sqlite` exists and is readable.
   A BM25 database failure is surfaced as an error/unavailable channel, not as an
   empty result list.

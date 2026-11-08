@@ -61,8 +61,9 @@ retained surface.
 ## Capture
 
 `chronovisor-hook` only enqueues work. The background-job ledger is the durable
-queue: `runtime/background-jobs/state.json`. `chronovisor-capture` runs the
-retry pass and the missed-session sweep in one process. A corrupt ledger or
+queue: `runtime/background-jobs/state.json`. `chronovisor-capture`
+(`surface.cycle`, every 120 s) runs the retry pass, the missed-session sweep and
+then the index refresh in one process. A corrupt ledger or
 journal is preserved and blocks writers instead of being treated as empty.
 Permanent worker errors exit once with `PERMANENT_EXIT_CODE`; transient errors
 retry with bounded backoff.
@@ -71,9 +72,19 @@ retry with bounded backoff.
 work, pending count, failed count, and a privacy-safe error token. The deadman
 monitor reads it independently of Python and alerts through `osascript`.
 
+## Index ownership
+
+Readers never walk the page corpus per call. MCP tools call
+`IndexStore.refresh_if_stale()`, which reuses the in-memory snapshot for 2 s and
+then only compares the stat signature of `.index/pages.json` and
+`backlinks.json`. Writers publish snapshots with `IndexStore.refresh()`: the
+scheduled cycle (the only scheduled writer) and one startup reconcile per MCP
+process. A page edited on disk becomes searchable within one cycle;
+`capture-status.json` records `index_refreshed_at` and `index_error`.
+
 ## Search
 
-`core.search` builds or opens the SQLite lexical index and returns
+`search.search` builds or opens the SQLite lexical index and returns
 `ScoredPage` records. Ranking is the existing BM25 formula with exact anchors
 for page IDs, titles, tags, entities, and raw keywords, plus CJK bigram
 tokenization. Filters enforce stable lifecycle status, reference-page policy,
@@ -95,6 +106,6 @@ and last error from the capture status; the queue panel shows job counts.
 
 Codex and Claude Code enter through `chronovisor-hook`. The compatibility
 modules `chronovisor.hosts.codex_record` and
-`chronovisor.hosts.claude_code_record` alias the raw save workers so existing
-job module strings continue to execute. The Save harness performs no model
+`chronovisor.hosts.claude_code_record` alias the capture save workers so
+persisted job module strings continue to execute. The Save harness performs no model
 inference, ingestion, or page generation.
