@@ -27,6 +27,20 @@ chronovisor_search
   -> return direct_hits / expanded_hits / retrieval.channels.lexical
 ```
 
+## Modules
+
+- `common/`: paths, runtime config, canonical JSON/document, durable files,
+  time and hash helpers.
+- `raw/`: raw v2 storage, commit journals, legacy archive, save transaction.
+- `capture/`: host transcripts, recorders, background jobs, sweeper and the
+  capture cycle.
+- `pages/`: page lookup, frontmatter, link fixes and page identity.
+- `index/`: page metadata, BM25 lexical index, registry, aliases and search
+  types.
+- `search/`: the BM25 query API.
+- `surface/`: MCP server, hook dispatcher, dashboard and search eval.
+- `hosts/`: exactly two persisted-name shims for old job module strings.
+
 ## Store
 
 `~/.chronovisor` is the source of memory truth.

@@ -57,7 +57,7 @@ Ranking evaluation is available without writing:
 
 ```sh
 CHRONOVISOR_READ_ONLY=1 PYTHONPATH=src .venv/bin/python \
-  -m chronovisor.ops.search_eval --out /tmp/search-eval.json
+  -m chronovisor.surface.search_eval --out /tmp/search-eval.json
 ```
 
 ## Runtime identity

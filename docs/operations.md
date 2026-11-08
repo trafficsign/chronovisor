@@ -78,7 +78,7 @@ Ranking evaluation is read-only against production:
 
 ```sh
 CHRONOVISOR_READ_ONLY=1 PYTHONPATH=src .venv/bin/python \
-  -m chronovisor.ops.search_eval --out /tmp/search-eval.json
+  -m chronovisor.surface.search_eval --out /tmp/search-eval.json
 ```
 
 Evaluate an explicit eval set with `--set PATH`; compare two runs with
